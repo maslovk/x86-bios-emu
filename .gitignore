@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.env
+
+# External projects
+seabios/
+
+# Logs
+stderr.log
+*.log
+
+# AI tool directories
+.agents/
+.codex/

@@ -1,0 +1,6 @@
+# Core emulator: stdlib only (Python 3.8+).
+
+# Optional: differential tracing tooling (diff_trace.py).
+# Install with:  pip install -r requirements-dev.txt
+unicorn>=2.1
+capstone>=5.0

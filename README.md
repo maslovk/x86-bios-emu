@@ -5,14 +5,20 @@ A Python-based x86 real-mode CPU emulator with a minimal BIOS implementation, VG
 ## Architecture
 
 ```
-simple-bios/
-├── cpu.py       # x86 real-mode CPU core + step debugger (1700+ lines)
-├── video.py     # VGA 80x25 text + I/O ports + COM1 serial + keyboard + disk
-├── hardware.py  # PIT (8254), PIC (8259A), CMOS RTC (MC146818), Keyboard (i8042)
-├── fat12.py     # FAT12 filesystem reader (BPB, FAT, directory, cluster chains)
-├── bios.py      # BIOS ROM (IVT, POST, INT 10h/11h/12h/13h/15h/16h/19h/1Ah/1Ch/20h/29h/2Bh)
-├── main.py      # Emulator harness + sample boot sector + IRQ dispatch + floppy loader
-└── tests/       # pytest suite (373 tests: CPU, BIOS, video, hardware, keyboard, FAT12, integration)
+x86-bios-emu/
+├── cpu.py             # x86 real-mode CPU core + step debugger (2000+ lines)
+├── bios.py            # BIOS ROM (IVT, POST, INT 10h–2Bh)
+├── video.py           # VGA 80x25 text + I/O ports + COM1 serial + keyboard + disk
+├── hardware.py        # PIT (8254), PIC (8259A), CMOS RTC (MC146818), Keyboard (i8042)
+├── fat12.py           # FAT12 filesystem reader (BPB, FAT, directory, cluster chains)
+├── main.py            # Emulator harness + sample boot sector + IRQ dispatch + floppy loader
+├── trace_boot.py      # Boot tracer with INT 13h/INT 10h call logging
+├── trace_dos.py       # DOS-boot INT 21h/13h/2Fh call + return-value tracer
+├── debug_dos.py       # DOS 3.3 boot debugger (INT 13h trace + BDA dump)
+├── snapshot_capture.py# Capture full CPU+1MB memory state at OPEN-CON for diff tracing
+├── diff_trace.py      # Differential single-step tracer: my CPU vs Unicorn (QEMU)
+├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
+└── tests/             # pytest suite (449 tests: CPU, BIOS, video, hardware, keyboard, FAT12, shift flags, integration)
 ```
 
 ## Components
@@ -30,9 +36,10 @@ simple-bios/
   - String: MOVS[BW], CMPS[BW], STOS[BW], LODS[BW], SCAS[BW] (DF-aware, REP/REPNE)
   - Stack: PUSHA/POPA, ENTER/LEAVE
   - Flags: PUSHF/POPF, STC/CLD/STD/CMC, SETcc (all 16 conditions)
-  - System: INT, IRET, CLI, STI, HLT, XLAT
-  - Segment overrides: ES:/CS:/SS:/DS: prefixes (applied to next memory instruction)
+  - System: INT, IRET, CLI, STI, HLT, XLAT (honours segment-override prefix)
+  - Segment overrides: ES:/CS:/SS:/DS: prefixes (applied to next memory instruction, including XLAT)
   - BP-based addressing defaults to SS segment (per x86 spec)
+  - Shift/rotate flag semantics: scalar shifts (SHL/SHR/SAR/SAL) set SF/ZF/PF from the result and clear AF; rotates (ROL/ROR/RCL/RCR) only touch CF/OF, per Intel SDM
 
 ### BIOS ROM (`bios.py`)
 - Interrupt Vector Table (IVT) initialization
@@ -204,9 +211,9 @@ python3 main.py --floppy dos3.3.img        # Load full floppy + mount FAT12
 **Supported floppy formats:**
 | Media | Size   | Media Byte | Geometry (C/H/SPT) |
 |-------|--------|------------|---------------------|
-| 5.25" | 360KB  | 0xF8       | 40/2/8              |
-| 5.25" | 1.2MB  | 0xF0       | 80/2/15             |
-| 3.5"  | 720KB  | 0xF1       | 40/2/9              |
+| 5.25" | 360KB  | 0xFD       | 40/2/9              |
+| 5.25" | 1.2MB  | 0xF8       | 80/2/15             |
+| 3.5"  | 720KB  | 0xF1       | 80/2/9              |
 | 3.5"  | 1.44MB | 0xF9       | 80/2/18             |
 
 **Current DOS 3.3 status:** Boots to the command interpreter.
@@ -245,6 +252,53 @@ differential single-step trace against an identical OPEN-CON memory snapshot
 The differential trace now runs 20,000+ instructions with zero divergence
 between my CPU and Unicorn across the entire OPEN-CON local-qualify path.
 
+## Testing
+
+```bash
+python3 -m pytest -q              # full suite (449 tests)
+python3 -m pytest tests/test_cpu.py -q
+python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT regression (10 tests)
+python3 -m pytest tests/test_bios.py -q
+python3 -m pytest tests/test_fat12.py -q
+```
+
+Coverage: CPU opcode dispatch and ModR/M decode (`test_cpu.py`, `test_cpu_gaps.py`),
+shift-flag and XLAT segment-override semantics (`test_shift_flags.py`), BIOS
+interrupt handlers (`test_bios.py`), FAT12 BPB/cluster-chain parsing
+(`test_fat12.py`), hardware devices (`test_hardware.py`, `test_keyboard.py`),
+video (`test_video.py`), and end-to-end boot (`test_main.py`).
+
+## Debugging & Tracing
+
+The repo ships several purpose-built tools, developed while chasing the DOS-3.3
+boot. The most powerful is the **differential tracer** (`diff_trace.py`), which
+loads a saved CPU+memory snapshot into both this emulator's CPU and a
+reference CPU (Unicorn / QEMU's TCG), single-steps them in lockstep, and reports
+the first instruction where register/flag state diverges.
+
+```bash
+python3 snapshot_capture.py    # boots DOS, dumps 1MB + regs at OPEN-CON
+python3 diff_trace.py          # my CPU vs Unicorn from that snapshot
+```
+
+`diff_trace.py` requires `unicorn` and `capstone` (both pip-installable); it
+also requires `snapshot_capture.py` to have been run first to produce
+`snapshot.bin` + `snapshot.regs`.
+
+Diagnostic probes (one-shot, kept for future investigations):
+- `trace_boot.py` — boot tracer with INT 13h/INT 10h call logging
+- `trace_dos.py` — DOS-boot INT 21h/13h/2Fh call + return-value tracer
+  (captures return values even for DOS-handled vectors via stack-return-site sniffing)
+- `debug_dos.py` — DOS 3.3 boot debugger (INT 13h trace + BDA dump)
+- `probe_ivt.py` / `probe_chain.py` / `probe_devchain.py` / `probe_devnames.py` /
+  `probe_step.py` — IVT dumps, device-driver chain walker, single-step INT-handler
+  tracers
+
+The differential methodology is portable: to chase a new corruption, capture the
+state at the failing boundary with `snapshot_capture.py` (edit its trigger to
+the interrupt of interest), then run `diff_trace.py` to localise the first
+instruction-emulation divergence against a trusted reference.
+
 ## Limitations
 
 - No protected mode support
@@ -252,10 +306,19 @@ between my CPU and Unicorn across the entire OPEN-CON local-qualify path.
 - Single floppy disk only (FAT12, auto-detects size)
 - FAT12 read-only (no write support)
 - Step mode mnemonics are approximate (operand decoding is simplified)
-- PIT timing is instruction-count-based (not real-time)
+- PIT timing is instruction-count-based (not real-time), ~500 insns per PIT tick
 - CMOS RTC syncs with host time (no independent battery-backed clock)
+- DOS DATE/TIME prompts require `--interactive` with timed input to reach the `A>` prompt
+- Undefined x86 flag bits (AF after INC, MUL/IMUL SF/ZF/PF) may differ from real hardware — the differential tracer masks these out since DOS never branches on them
 
 ## Extending
 
-To add new instructions, add cases in `cpu.py::_dispatch()`.
-To add new BIOS interrupts, add handlers in `bios.py::handle_interrupt()`.
+- To add new instructions, add cases in `cpu.py::_dispatch()` and a regression
+  test in `tests/test_cpu_gaps.py` or `tests/test_shift_flags.py`. For new
+  arithmetic/shift/logic ops, set SF/ZF/PF/AF/CF/OF via the existing helpers
+  (`_flags_add8`, `_flags_sub8`, `_flags_logic8`, ...).
+- To add new BIOS interrupts, add handlers in `bios.py::handle_interrupt()`
+  (and register them in `_register_handlers`).
+- To fix a CPU-semantic bug found by differential tracing, run
+  `python3 diff_trace.py` after editing `snapshot_capture.py`'s trigger to the
+  boundary you suspect.

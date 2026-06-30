@@ -137,6 +137,75 @@ class TestShiftFlags:
         assert cpu.pf is False, "ROL must not clobber PF"
 
 
+class TestLahfSahf:
+    """LAHF/SAHF load/store flags low byte to/from AH (NOT AL).
+
+    Regression for a DOS-3.3 boot bug: LAHF was storing flags into AL and
+    SAHF was reading from AL, so COMMAND.COM's internal command parser
+    (which uses LAHF to check comparison results) got the wrong byte,
+    and every internal command (DIR, VER, CLS, ...) returned 'Bad command
+    or file name'.  Cross-checked against Unicorn.
+    """
+
+    def test_lahf_loads_flags_into_ah(self):
+        """LAHF: AH = SF:ZF:0:AF:0:PF:1:CF, AL unchanged."""
+        cpu = make_cpu([0x9F])   # LAHF
+        cpu.ax = 0x0000           # AH=0, AL=0
+        cpu.flags = 0x0046       # SF=0,ZF=1,AF=0,PF=1,CF=0, reserved bits sit
+        cpu.execute()
+        assert (cpu.ax >> 8) & 0xFF == 0x46, \
+            f"LAHF must put flags low byte into AH; got AH=0x{(cpu.ax>>8)&0xFF:02X}"
+        assert cpu.ax & 0xFF == 0x00, \
+            f"LAHF must not modify AL; got AL=0x{cpu.ax&0xFF:02X}"
+
+    def test_lahf_preserves_al(self):
+        """LAHF must not alter AL regardless of flags value."""
+        cpu = make_cpu([0x9F])
+        cpu.ax = 0x00AB           # AH=0, AL=0xAB
+        cpu.flags = 0x0087       # various flag bits set
+        cpu.execute()
+        assert cpu.ax & 0xFF == 0xAB, \
+            f"LAHF must preserve AL; got AL=0x{cpu.ax&0xFF:02X}"
+        assert (cpu.ax >> 8) & 0xFF == 0x87, \
+            f"LAHF must load flags low byte into AH; got AH=0x{(cpu.ax>>8)&0xFF:02X}"
+
+    def test_sahf_loads_ah_into_flags(self):
+        """SAHF: flags low byte = AH, AH unchanged, AL untouched."""
+        cpu = make_cpu([0x9E])   # SAHF
+        cpu.ax = 0x4699           # AH=0x46, AL=0x99
+        cpu.flags = 0xFF00       # high byte set, low byte cleared
+        cpu.execute()
+        assert cpu.flags & 0xFF == 0x46, \
+            f"SAHF must load AH into flags low byte; got 0x{cpu.flags&0xFF:02X}"
+        assert (cpu.flags >> 8) & 0xFF == 0xFF, \
+            "SAHF must preserve flags high byte"
+        assert cpu.ax == 0x4699, \
+            f"SAHF must not alter AX; got 0x{cpu.ax:04X}"
+
+    def test_sahf_does_not_read_al(self):
+        """SAHF must read from AH, not AL (the bug was reading AL)."""
+        cpu = make_cpu([0x9E])
+        # AH=0x00, AL=0x46 — if SAHF wrongly reads AL, flags low byte
+        # would become 0x46 instead of 0x00.
+        cpu.ax = 0x0046
+        cpu.flags = 0x0000
+        cpu.execute()
+        assert cpu.flags & 0xFF == 0x00, \
+            f"SAHF must read AH not AL; got flags low=0x{cpu.flags&0xFF:02X}"
+
+    def test_lahf_sahf_roundtrip(self):
+        """LAHF then SAHF should round-trip flags through AH."""
+        cpu = make_cpu([0x9F, 0x9E])   # LAHF; SAHF
+        cpu.ax = 0x0042
+        cpu.flags = 0x0087
+        cpu.execute()   # LAHF
+        assert (cpu.ax >> 8) & 0xFF == 0x87
+        cpu.flags = 0x0000   # clobber flags
+        cpu.execute()   # SAHF
+        assert cpu.flags & 0xFF == 0x87, \
+            f"SAHF after LAHF must restore flags; got 0x{cpu.flags&0xFF:02X}"
+
+
 class TestXlatSegmentOverride:
     """XLAT reads AL from [seg:BX+AL]. The default seg is DS, but a
     segment-override prefix (ES:/CS:/SS:/DS:) MUST redirect the read.

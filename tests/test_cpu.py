@@ -296,9 +296,14 @@ class TestOpcodes:
     def test_lahf_sahf(self, cpu):
         self._load(cpu, [0x9F, 0x9E])
         cpu.flags = 0x0045
-        cpu.execute()
-        assert (cpu.ax & 0xFF) == 0x45
-        cpu.execute()
+        cpu.ax = 0x0000             # AH=0, AL=0
+        cpu.execute()               # LAHF: AH = flags low byte
+        assert ((cpu.ax >> 8) & 0xFF) == 0x45, \
+            f"LAHF loads flags into AH; got AH=0x{(cpu.ax>>8)&0xFF:02X}"
+        assert (cpu.ax & 0xFF) == 0x00, \
+            f"LAHF must not alter AL; got AL=0x{cpu.ax&0xFF:02X}"
+        cpu.flags = 0xFF00          # clobber flags low byte
+        cpu.execute()               # SAHF: flags low byte = AH
         assert (cpu.flags & 0xFF) == 0x45
 
     def test_cbw_positive(self, cpu):

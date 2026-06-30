@@ -126,6 +126,23 @@ LOG = open('diff_trace.log', 'w')
 def log(msg):
     print(msg); LOG.write(msg + '\n'); LOG.flush()
 
+# Track undefined-flag state: MUL/IMUL/DIV/IDIV leave SF/ZF/PF undefined, and
+# flag-preserving instructions (POP, PUSH, MOV, etc.) inherit that state.
+# We keep masking those flags until a real flag-setting instruction runs.
+last_undef = [False]
+
+def instr_preserves_flags(ram, cs, ip):
+    """Heuristic: does this instruction NOT modify any flags?"""
+    b0 = ram[(cs<<4)+ip]
+    if 0x50 <= b0 <= 0x5F: return True
+    if 0xB0 <= b0 <= 0xBF: return True
+    if b0 in (0x89,0x8B,0x8E,0x8D,0x90,0x98,0x68,0x6A,
+              0x06,0x07,0x0E,0x16,0x17,0x1E,0x1F,0xA0,0xA1,
+              0xA2,0xA3,0xC6,0xC7,0x86,0x87,0x91,0x92,0x93,0x94,
+              0x95,0x96,0x97,0xE3):
+        return True
+    return False
+
 # Pre-disassemble a few instruction bytes from a physical address.
 def disasm_at(ram, phys, count=1):
     out = []
@@ -263,7 +280,14 @@ for step_no in range(1, N+1):
     u_phys = (u_cs << 4) + u_ip_before
     m_disasm = disasm_at(ram, m_phys)
     # Did this instruction have undefined flag semantics (MUL/IMUL/DIV/IDIV)?
-    undef_flags = just_executed_has_undefined_flags(ram, m_cs, m_ip_before)
+    is_undef = just_executed_has_undefined_flags(ram, m_cs, m_ip_before)
+    # Propagate undefined-flag state through flag-preserving instructions
+    # (POP, MOV, etc.) so we don't false-positive on stale MUL flags.
+    if is_undef:
+        last_undef[0] = True
+    elif not instr_preserves_flags(ram, m_cs, m_ip_before):
+        last_undef[0] = False
+    undef_flags = last_undef[0]
     # Compare
     same, diff_key = snapshots_equal(m_after, u_after, undef_flags=undef_flags)    # If INT happened in unicorn, also do it in mine? mine's execute() for 0xCD
     # calls _do_interrupt = my_real_int, so the post-state should match IF the

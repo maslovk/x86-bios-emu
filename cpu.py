@@ -1224,14 +1224,14 @@ class CPU:
         # 9D POPF
         if opc == 0x9D: self.flags = self._pop(); return
 
-        # 9E SAHF
+        # 9E SAHF — load AH into flags low byte
         if opc == 0x9E:
-            self.flags = (self.flags & 0xFF00) | (self.ax & 0xFF)
+            self.flags = (self.flags & 0xFF00) | ((self.ax >> 8) & 0xFF)
             return
 
-        # 9F LAHF
+        # 9F LAHF — store flags low byte into AH
         if opc == 0x9F:
-            self.ax = (self.ax & 0xFF00) | (self.flags & 0xFF)
+            self.ax = ((self.flags & 0xFF) << 8) | (self.ax & 0xFF)
             return
 
         # A0 MOV AL, [addr]

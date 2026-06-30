@@ -1582,9 +1582,12 @@ class CPU:
             self.ax = 0xFF if self.cf else 0x00
             return
 
-        # D7 XLAT — Translate AL via table at DS:BX+AL
+        # D7 XLAT — Translate AL via table at [seg:BX+AL], honouring the
+        # segment-override prefix (e.g. `CS: XLAT` reads from CS:BX+AL).
+        # Default segment for XLAT is DS, matching the Intel SDM.
         if opc == 0xD7:
-            addr = self._phys(self.ds, self.bx + (self.ax & 0xFF))
+            seg = self._default_data_seg()
+            addr = self._phys(seg, self.bx + (self.ax & 0xFF))
             self.ax = (self.ax & 0xFF00) | self._readb(addr)
             return
 
@@ -2039,6 +2042,18 @@ class CPU:
 
         if count != 1:
             self.of = False
+
+        # Scalar shifts (SHL/SAL, SHR, SAR -- reg 4/5/6/7) update SF, ZF, PF
+        # from the result, per the Intel SDM.  AF is officially undefined;
+        # we clear it (matches QEMU/unicorn behaviour observed during the
+        # DOS-3.3 OPEN-CON differential trace).  Rotates (ROL/ROR/RCL/RCR,
+        # reg 0/1/2/3) only touch CF/OF and must NOT modify these.  A count
+        # of 0 affects no flags at all.
+        if count != 0 and reg in (4, 5, 6, 7):
+            self.sf = bool(val & sign_bit)
+            self.zf = (val == 0)
+            self.pf = bin(val & 0xFF).count('1') % 2 == 0
+            self.af = False
 
     def status(self):
         """Return register state as dict."""

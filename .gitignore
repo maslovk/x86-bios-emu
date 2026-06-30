@@ -17,3 +17,6 @@ stderr.log
 # AI tool directories
 .agents/
 .codex/
+snapshot.bin
+snapshot.regs
+diff_trace.log

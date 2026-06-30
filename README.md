@@ -209,46 +209,41 @@ python3 main.py --floppy dos3.3.img        # Load full floppy + mount FAT12
 | 3.5"  | 720KB  | 0xF1       | 40/2/9              |
 | 3.5"  | 1.44MB | 0xF9       | 80/2/18             |
 
-**Current DOS 3.3 status:** Boot sector loads and executes (100K+ instructions). The
-boot sector relocation, IO.SYS relocation, MSDOS.SYS relocation, DOS kernel
-initialisation and SYSINIT all run to completion. SYSINIT issues `INT 21h
-AH=3Dh OPEN` calls for the standard device names (`CON`, `AUX`, `NUL`, `PRN`)
-and finally for the command interpreter (`COMMAND.COM`); **every one of these
-opens fails with `AX=0002 file_not_found, CF=1`** and DOS prints `Bad or
-missing CON` / `Bad or missing Command Interpreter` before halting.
+**Current DOS 3.3 status:** Boots to the command interpreter.
+Boot-sector relocation, IO.SYS relocation, MSDOS.SYS relocation, DOS kernel
+initialisation and SYSINIT all run to completion. SYSINIT's standard-handle
+opens (CON/AUX/NUL/PRN) and the COMMAND.COM open succeed, COMMAND.COM loads
+and runs, and the emulator displays the familiar:
 
-Diagnostic findings (see `trace_dos.py`, `probe_devchain.py`, `probe_devnames.py`):
+```
+Current date is Mon  1-07-1980
+Enter new date (mm-dd-yy):
+```
 
-- **The device-driver chain is intact.** `INT 21h AH=52h` returns the correct
-  List-of-Lists; `SYSVARS+0x22` holds the NUL device header *inline* and the
-  chain walks `NUL→CON→AUX→PRN→CLOCK$→block→COM1..4/LPT1..3` with the proper
-  `0070:FFFF` terminator — all in IO.SYS's resident segment 0x70.
-- **`INT 2Fh AX=1123h` (redirector "qualify filename") behaves correctly.** It is
-  handled by the DOS-3.3 stub at `023E:172F` which returns `AX=1, CF=1`; CF=1 is
-  the documented "redirector didn't handle it, qualify locally" signal that a
-  non-networked DOS expects, so the OPEN then takes the local path.
-- **`INT 2Fh AX=111Eh` during qualify** also returns `CF=1` from the same stub.
-- The OPEN-CON local-qualify path runs ~1315 instructions: it invokes the **block
-  device driver** (`0x70:0x5DC` strategy then `0x70:0x636` intr — the shared
-  strategy/intr used by NUL/CON/AUX/PRN/CLOCK$/block drivers) for a media/BPB
-  request, builds a canonical path (`A:\<name>`) via `strcpy` at `023E:1E26`,
-  then enters the path-scanner loop at `023E:6C90` (`LODSB / CALL Is-Sep /
-  JNZ -6`). When the path string terminates (null), the `023E:6AC8` routine
-  `MOV AL,3 / JZ +2 / MOV AL,2 / STC / RET` (with ZF=0 from the trailing
-  `CMP AL,'/'`) sets **AL=2 file_not_found, CF=1** and returns.
+To reach the interactive `A>` prompt, run with `--interactive` and type the
+date (or just Enter) plus the time when prompted.
 
-**Conclusion:** the failure is *not* a broken device chain, *not* a botched
-`INT 2Fh` redirector stub, and *not* a missing BIOS interrupt. The OPEN path
-runs the full local qualify + filename scan but never reaches the device-name
-*match* (no `REPE CMPSW` against the device headers is observed) and concludes
-file_not_found. The bug most likely lives either (a) in the block-device
-`intr` routine's BPB/media response, where a wrong return status propagates to
-file_not_found, or (b) in a CPU-fidelity detail of one of the path-scanner
-string/loop instructions that causes it to skip the device-name match branch.
-Pinpointing the exact instruction will require a single-step differential
-trace against a reference x86 emulator (e.g. 86Box/dosbox) at the same boot
-point — the necessary scaffolding (`probe_step.py`, return-address capture in
-`trace_dos.py`) is already in place.
+This was unblocked by two CPU-emulation bugs found via a Unicorn (QEMU-based)
+differential single-step trace against an identical OPEN-CON memory snapshot
+(see `diff_trace.py`, `snapshot_capture.py`, `tests/test_shift_flags.py`):
+
+1. **Scalar shift flag semantics** (`cpu.py::_do_shift`): SHL/SHR/SAR/SAL
+   (D0-D3, reg 4/5/6/7) were only updating CF and OF, leaving SF/ZF/PF --
+   and in the case of SHL-by-1 the parity flag specifically -- stale from
+   the prior instruction. DOS's `MOV BL,AH; SHL BX,1; ...` after `XOR BH,BH`
+   read the wrong PF/ZF and mis-dispatched the open. Fixed to set SF/ZF/PF
+   (and clear AF) from the result, gated on count != 0; rotates left all
+   arithmetic flags alone per the Intel SDM.
+
+2. **XLAT segment-override prefix** (`cpu.py`, opcode 0xD7): XLAT was
+   hard-coded to read from `DS:BX+AL` and ignored the segment-override
+   prefix. A `CS: XLAT` (0x2E 0xD7) at `023E:5532` -- which looks up a byte
+   in DOS's country-info table -- was reading from `DS:BX+AL` instead of
+   `CS:BX+AL`, returning the wrong byte and corrupting every subsequent
+   device/file open. Fixed to use `_default_data_seg()`.
+
+The differential trace now runs 20,000+ instructions with zero divergence
+between my CPU and Unicorn across the entire OPEN-CON local-qualify path.
 
 ## Limitations
 

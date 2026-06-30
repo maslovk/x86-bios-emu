@@ -220,7 +220,8 @@ class Emulator:
     """Main emulator loop."""
 
     def __init__(self, boot_file=None, step_mode=False, interactive=False,
-                 enable_hardware=True, floppy_image=None):
+                 enable_hardware=True, floppy_image=None, gtk=False,
+                 gtk_font_size=18):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -247,8 +248,24 @@ class Emulator:
                          pit=self.pit, pic=self.pic, cmos=self.cmos,
                          kbd_ctrl=self.kbd_ctrl)
         self.boot_file = boot_file
-        self.interactive = interactive
+        self.interactive = interactive or gtk   # --gtk implies interactive
         self.enable_hardware = enable_hardware
+
+        # GTK display (optional).  When enabled, it takes over rendering and
+        # keyboard input: the emulator loop pumps Gtk events between
+        # instruction batches, and key-press callbacks inject ASCII bytes
+        # directly into the keyboard controller (no cbreak/scan-code dance).
+        self.gtk = gtk
+        self.gtk_display = None
+        if gtk:
+            from gtdisplay import GtkDisplay
+            def _on_key(byte):
+                if self.kbd_ctrl:
+                    self.kbd_ctrl.inject_key(byte)
+                else:
+                    self.kbd.buffer.append(byte)
+            self.gtk_display = GtkDisplay(
+                self.video, on_key=_on_key, font_size=gtk_font_size)
 
         # FAT12 filesystem
         self.floppy_image = floppy_image
@@ -481,11 +498,29 @@ class Emulator:
             else:
                 self.kbd.feed_string(" ")
 
-        if self.interactive:
+        if self.interactive and not self.gtk:
             print("[Interactive mode: type keys, Ctrl+C to stop]", file=sys.stderr)
             import select
             import termios
             import tty
+            import os as _os
+            # Put the terminal into cbreak mode so each keystroke is
+            # delivered immediately (no line buffering) and Enter produces
+            # CR (0x0D) -- the value COMMAND.COM's DATE/TIME prompt expects
+            # -- instead of LF (0x0A) which cooked mode yields. cbreak keeps
+            # ISIG on, so Ctrl+C still raises KeyboardInterrupt to exit.
+            # Only configure the terminal when stdin IS a real TTY; if input
+            # is piped (e.g. `printf ... | main.py -i`) we just read bytes.
+            self._term_fd = sys.stdin.fileno()
+            self._term_old = None
+            if sys.stdin.isatty():
+                self._term_old = termios.tcgetattr(self._term_fd)
+                tty.setcbreak(self._term_fd)
+                sys.stdout.write("\033[24;1H")   # cursor to bottom-left
+                sys.stdout.flush()
+        elif self.gtk:
+            print("[GTK mode: click the window and type; Ctrl+C or close "
+                  "the window to stop]", file=sys.stderr)
 
         step = 0
         last_display = 0
@@ -520,16 +555,26 @@ class Emulator:
                 if self.pic:
                     self._check_and_dispatch_irq()
 
-                # Interactive: check for stdin input
-                if self.interactive:
+                # Interactive: read one keystroke.  Two paths:
+                #   - GTK mode: pump the Gtk main loop (handles redraw,
+                #     key-press, and window-close events).  Key presses
+                #     are injected into kbd_ctrl via the on_key callback set
+                #     up in __init__, so we only need to pump here.
+                #   - terminal mode: cbreak stdin read.
+                if self.gtk:
+                    if self.gtk_display.pump():
+                        print("[GTK window closed]", file=sys.stderr)
+                        break
+                elif self.interactive:
                     try:
                         if select.select([sys.stdin], [], [], 0)[0]:
-                            ch = sys.stdin.read(1)
-                            if ch:
+                            b = _os.read(0, 1)
+                            if b:
+                                key = b[0]
                                 if self.kbd_ctrl:
-                                    self.kbd_ctrl.inject_key(ord(ch))
+                                    self.kbd_ctrl.inject_key(key)
                                 else:
-                                    self.kbd.buffer.append(ord(ch))
+                                    self.kbd.buffer.append(key)
                     except (OSError, ValueError):
                         pass
 
@@ -551,12 +596,16 @@ class Emulator:
                     stuck_count = 0
                 last_ip = cur_ip
 
-                # Display video every 5000 instructions
-                if step - last_display > 5000:
+                # Display video every 5000 instructions (terminal path only).
+                # In GTK mode the per-batch pump() above already queued a
+                # redraw and processed the expose event, so the terminal box
+                # render would be wasted work (and would clobber the GUI's
+                # stdout with ANSI escapes).
+                if not self.gtk and step - last_display > 5000:
                     self.video.display()
                     last_display = step
 
-                if step % 100000 == 0:
+                if step % 100000 == 0 and not self.gtk:
                     print(f"[Step {step:,}] CS:IP={self.cpu.cs:04X}:{self.cpu.ip:04X} AX={self.cpu.ax:04X} BX={self.cpu.bx:04X}", file=sys.stderr)
 
                 # Check for halt
@@ -564,9 +613,22 @@ class Emulator:
                     break
         except KeyboardInterrupt:
             print("\n[Interrupted by user]", file=sys.stderr)
+        finally:
+            # Restore terminal settings even if the loop broke or crashed
+            # (terminal interactive path only; GTK mode never touched them).
+            if self.interactive and not self.gtk and \
+                    getattr(self, '_term_old', None) is not None:
+                try:
+                    termios.tcsetattr(self._term_fd, termios.TCSADRAIN, self._term_old)
+                except (OSError, ValueError, NameError):
+                    pass
+            # Tear down the GTK window if it was opened.
+            if self.gtk and self.gtk_display is not None:
+                self.gtk_display.close()
 
-        # Final display
-        self.video.display()
+        # Final display (terminal path only; GTK window already closed).
+        if not self.gtk:
+            self.video.display()
         status = self.cpu.status()
         print(f"\n[CPU HALTED] CS:IP={status['cs']:04X}:{status['ip']:04X} "
               f"Instructions: {step:,}", file=sys.stderr)
@@ -601,6 +663,12 @@ def main():
                         help='Disable COM1 serial output')
     parser.add_argument('--floppy', '-f', metavar='IMG',
                         help='Load floppy image (FAT12, 1.44MB)')
+    parser.add_argument('--gtk', '-g', action='store_true',
+                        help='Use a GTK window for display + keyboard input '
+                             '(replaces the terminal box; sidesteps cbreak/')
+    parser.add_argument('--gtk-font-size', type=int, default=18,
+                        metavar='PT',
+                        help='Pango font point size for --gtk (default: 18)')
     args = parser.parse_args()
 
     print("=" * 60, file=sys.stderr)
@@ -610,13 +678,16 @@ def main():
         print(f"  Boot file: {args.boot}", file=sys.stderr)
     if args.step:
         print(f"  Step mode: ON", file=sys.stderr)
-    if args.interactive:
+    if args.gtk:
+        print(f"  Display: GTK window", file=sys.stderr)
+    elif args.interactive:
         print(f"  Interactive: ON", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     print()
 
     emu = Emulator(boot_file=args.boot, step_mode=args.step,
-                   interactive=args.interactive, floppy_image=args.floppy)
+                   interactive=args.interactive, floppy_image=args.floppy,
+                   gtk=args.gtk, gtk_font_size=args.gtk_font_size)
     emu.run()
 
 

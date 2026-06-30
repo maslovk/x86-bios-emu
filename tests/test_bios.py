@@ -281,10 +281,93 @@ class TestINT16h:
         bios_env.handlers[0x16](cpu)
         assert cpu.ax & 0xFF == ord('A')
 
+    # ── INT 16h AH=00: ASCII passthrough (regression for scan-code remap bug) ──
+    #
+    # The interactive main loop injects keys via kbd_ctrl.inject_key(ascii),
+    # so the kbd buffer holds the ASCII value the user typed. AH=00 was
+    # treating that byte as a SCAN CODE and re-mapping it through a
+    # set-1 scan-code→ASCII table, so typing '1' (0x31) returned 'n'
+    # (because scan code 0x31 is the 'N' key) and typing '0' returned 'b'.
+    # Confirmed bug: typing '1234567890' rendered as 'nm345678_b'.
+
+    def test_wait_for_key_digits_pass_through_as_ascii(self):
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        # Inject the numerals 1..0 the way the interactive loop does.
+        for ch in '1234567890':
+            kbd_ctrl.inject_key(ord(ch))
+        got = ''
+        for _ in range(10):
+            cpu = FakeCPU(ax=0x0000)
+            bios.handlers[0x16](cpu)   # AH=00 wait for key
+            got += chr(cpu.ax & 0xFF)
+        assert got == '1234567890', (
+            f"digits must pass through as ASCII; got {got!r} '"
+            f"(scan-code remap would give 'nm345678_b')")
+
+    def test_wait_for_key_letter_pass_through(self):
+        # Letters and CR must also pass through unmodified.
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        for ch in 'Hi\r':
+            kbd_ctrl.inject_key(ord(ch))
+        cpu = FakeCPU(ax=0x0000); bios.handlers[0x16](cpu)
+        assert (cpu.ax & 0xFF) == ord('H')
+        cpu = FakeCPU(ax=0x0000); bios.handlers[0x16](cpu)
+        assert (cpu.ax & 0xFF) == ord('i')
+        cpu = FakeCPU(ax=0x0000); bios.handlers[0x16](cpu)
+        assert (cpu.ax & 0xFF) == 0x0D  # CR
+
     def test_check_key_empty(self, bios_env):
         bios_env.initialize()
         cpu = FakeCPU(ax=0x0100)
         bios_env.handlers[0x16](cpu)
+        assert cpu.flags & 0x40
+
+    # ── INT 16h AH=01: key-status must drain kbd_ctrl and PEEK, not pop ──
+
+    def _make_bios_with_kbd_ctrl(self, memory=None):
+        from hardware import KeyboardController, PIT, PIC, CMOS
+        from video import Video, Disk, Keyboard
+        mem = memory if memory is not None else Mem()
+        video = Video(); video.attach_memory(mem)
+        kbd = Keyboard()
+        disk = Disk()
+        kbd_ctrl = KeyboardController()
+        bios = BIOS(mem, video, kbd, disk,
+                    pit=PIT(), pic=PIC(), cmos=CMOS(), kbd_ctrl=kbd_ctrl)
+        bios.initialize()
+        return bios, kbd_ctrl
+
+    def test_check_key_drains_keyboard_controller(self):
+        # AH=01 must see a key that was injected via kbd_ctrl.inject_key
+        # (the path used by the interactive main loop), even though the
+        # IRQ-1/INT-09h drain never fired.
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        kbd_ctrl.inject_key(ord('X'))
+        cpu = FakeCPU(ax=0x0100)          # AH=01 (check key status)
+        bios.handlers[0x16](cpu)
+        assert not (cpu.flags & 0x40), "ZF must be clear: a key is available"
+        assert (cpu.ax & 0xFF) == ord('X'), "AL must hold the ASCII key"
+
+    def test_check_key_peeks_does_not_consume(self):
+        # AH=01 must NOT remove the key from the buffer; the subsequent
+        # AH=00 (wait for key) must still be able to return it.
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        kbd_ctrl.inject_key(ord('Y'))
+        # First, AH=01 should peek:
+        cpu1 = FakeCPU(ax=0x0100)
+        bios.handlers[0x16](cpu1)
+        assert (cpu1.ax & 0xFF) == ord('Y')
+        assert not (cpu1.flags & 0x40)
+        # Then AH=00 must still return the same key (it was not consumed):
+        cpu2 = FakeCPU(ax=0x0000)
+        bios.handlers[0x16](cpu2)
+        assert (cpu2.ax & 0xFF) == ord('Y')
+
+    def test_check_key_still_empty_after_drain(self):
+        # When kbd_ctrl has nothing, AH=01 must set ZF=1 (no key).
+        bios, _ = self._make_bios_with_kbd_ctrl()
+        cpu = FakeCPU(ax=0x0100)
+        bios.handlers[0x16](cpu)
         assert cpu.flags & 0x40
 
     def test_shift_state(self, bios_env):

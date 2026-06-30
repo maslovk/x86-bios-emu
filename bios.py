@@ -616,35 +616,41 @@ class BIOS:
 
     def _int16h(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
+        # Set-1 scan codes for the printable ASCII range 0x20–0x7E, used to
+        # back-fill AH (the scan-code byte required by INT 16h) when the
+        # keyboard buffer only carries an ASCII value (the path used by the
+        # interactive main loop's kbd_ctrl.inject_key).  Mapping scan codes
+        # back to ASCII (the old approach) is wrong for this path because the
+        # buffer already holds ASCII -- e.g. typing '1' (0x31 = ord('1')) would
+        # have been misread as scan code 0x31 (the 'N' key) and returned 'n'.
+        _ASCII_TO_SCAN = {
+            0x1B: 0x01, 0x09: 0x0F, 0x0D: 0x1C, 0x08: 0x0E, 0x20: 0x39,
+            0x27: 0x35, 0x2C: 0x33, 0x2D: 0x0C, 0x2E: 0x34, 0x2F: 0x35,
+            0x30: 0x0B, 0x31: 0x02, 0x32: 0x03, 0x33: 0x04, 0x34: 0x05,
+            0x35: 0x06, 0x36: 0x07, 0x37: 0x08, 0x38: 0x09, 0x39: 0x0A,
+            0x3B: 0x27, 0x3D: 0x0D, 0x5B: 0x1A, 0x5C: 0x2B, 0x5D: 0x1B,
+            0x60: 0x29, 0x61: 0x1E, 0x62: 0x30, 0x63: 0x2E, 0x64: 0x20,
+            0x65: 0x12, 0x66: 0x21, 0x67: 0x22, 0x68: 0x23, 0x69: 0x17,
+            0x6A: 0x24, 0x6B: 0x25, 0x6C: 0x26, 0x6D: 0x32, 0x6E: 0x31,
+            0x6F: 0x18, 0x70: 0x19, 0x71: 0x10, 0x72: 0x13, 0x73: 0x1F,
+            0x74: 0x14, 0x75: 0x16, 0x76: 0x2F, 0x77: 0x11, 0x78: 0x2D,
+            0x79: 0x15, 0x7A: 0x2C,
+        }
         if ah == 0x00:  # Wait for key (blocking)
-            # Drain keyboard controller output into kbd buffer first
+            # Drain keyboard controller output into kbd buffer first. Keys
+            # arrive here as ASCII bytes (kbd_ctrl.inject_key bypasses scan
+            # translation), so the buffer holds ASCII, NOT scan codes.
             if self.kbd_ctrl and self.kbd_ctrl.has_data():
                 while self.kbd_ctrl.has_data():
                     ch = self.kbd_ctrl.read_data()
                     if ch:
                         self.kbd.buffer.append(ch)
             if self.kbd.key_pressed():
-                sc = self.kbd.read_key()
-                ascii_map = {
-                    0x01: 0x1B, 0x02: ord('1'), 0x03: ord('2'),
-                    0x04: ord('3'), 0x05: ord('4'), 0x06: ord('5'),
-                    0x07: ord('6'), 0x08: ord('7'), 0x09: ord('8'),
-                    0x0A: ord('9'), 0x0B: ord('0'), 0x0C: ord('-'),
-                    0x0D: ord('='), 0x0E: 0x08, 0x0F: 0x09,
-                    0x10: ord('q'), 0x11: ord('w'), 0x12: ord('e'),
-                    0x13: ord('r'), 0x14: ord('t'), 0x15: ord('y'),
-                    0x16: ord('u'), 0x17: ord('i'), 0x18: ord('o'),
-                    0x19: ord('p'), 0x1C: 0x0D,
-                    0x1E: ord('a'), 0x1F: ord('s'), 0x20: ord('d'),
-                    0x21: ord('f'), 0x22: ord('g'), 0x23: ord('h'),
-                    0x24: ord('j'), 0x25: ord('k'), 0x26: ord('l'),
-                    0x2C: ord('z'), 0x2D: ord('x'), 0x2E: ord('c'),
-                    0x2F: ord('v'), 0x30: ord('b'), 0x31: ord('n'),
-                    0x32: ord('m'), 0x39: ord('_'), 0x2B: ord(' '),
-                }
-                asc = ascii_map.get(sc, sc)
+                asc = self.kbd.read_key()
                 if isinstance(asc, str):
                     asc = ord(asc)
+                asc &= 0xFF
+                sc = _ASCII_TO_SCAN.get(asc, 0)   # best-effort AH scan code
                 cpu.ax = (sc << 8) | asc
                 cpu.flags &= ~0x40
             else:
@@ -652,13 +658,28 @@ class BIOS:
                 # DOS boot loops on this; auto-feed should prevent infinite loop
                 cpu.ax = 0
                 cpu.flags &= ~0x40
-        elif ah == 0x01:  # Check key
+        elif ah == 0x01:  # Check key (peek; do NOT consume)
+            # Drain the keyboard controller output buffer into the BIOS key
+            # buffer first.  Without this, keys injected via kbd_ctrl (the
+            # path used by the interactive main loop) are invisible to AH=01,
+            # because the IRQ-1/INT-09h drain path is not guaranteed to have
+            # fired.  DOS's idle loop polls AH=01, so this would deadlock.
+            if self.kbd_ctrl and self.kbd_ctrl.has_data():
+                while self.kbd_ctrl.has_data():
+                    ch = self.kbd_ctrl.read_data()
+                    if ch:
+                        self.kbd.buffer.append(ch)
             if self.kbd.key_pressed():
-                cpu.ax = (self.kbd.read_key() << 8)
-                cpu.flags &= ~0x40
+                # AH=01 peeks (returns the key in AX but leaves it in the
+                # buffer for AH=00 to consume).  Buffer holds ASCII; put it
+                # in AL and best-effort scan code in AH.
+                key = self.kbd.buffer[0] & 0xFF
+                sc = _ASCII_TO_SCAN.get(key, 0)
+                cpu.ax = (sc << 8) | key
+                cpu.flags &= ~0x40         # ZF=0: key available
             else:
                 cpu.ax = 0
-                cpu.flags |= 0x40
+                cpu.flags |= 0x40         # ZF=1: no key
         elif ah == 0x02:  # Shift state
             if self.kbd_ctrl:
                 cpu.ax = self.kbd_ctrl.shift_state

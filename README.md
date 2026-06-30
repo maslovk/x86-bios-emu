@@ -12,6 +12,7 @@ x86-bios-emu/
 ├── hardware.py        # PIT (8254), PIC (8259A), CMOS RTC (MC146818), Keyboard (i8042)
 ├── fat12.py           # FAT12 filesystem reader (BPB, FAT, directory, cluster chains)
 ├── main.py            # Emulator harness + sample boot sector + IRQ dispatch + floppy loader
+├── gtdisplay.py        # Optional GTK window display (real keyboard capture, CGA colours)
 ├── trace_boot.py      # Boot tracer with INT 13h/INT 10h call logging
 ├── trace_dos.py       # DOS-boot INT 21h/13h/2Fh call + return-value tracer
 ├── debug_dos.py       # DOS 3.3 boot debugger (INT 13h trace + BDA dump)
@@ -158,11 +159,13 @@ The sample boot sector (`main.py::build_boot_sector()`) demonstrates:
 ## Usage
 
 ```bash
-cd simple-bios
+cd x86-bios-emu
 python3 main.py                          # Run with built-in boot sector
 python3 main.py --boot file.bin          # Load external boot sector (512 bytes)
 python3 main.py --step                   # Step mode: trace each instruction
 python3 main.py --interactive            # Interactive: read keys from stdin
+python3 main.py --gtk                    # GTK window display + real keyboard capture
+python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 python3 main.py --boot file.bin --step   # Combine flags
 python3 main.py --floppy disk.img         # Load FAT12 floppy image (auto-detect size)
 python3 main.py --boot dos3.3.img         # Load DOS 3.3 boot sector
@@ -174,11 +177,33 @@ python3 main.py --boot dos3.3.img --step  # Step through DOS 3.3 boot
 |------|-------------|
 | `--boot FILE` / `-b` | Load boot sector from binary file (padded to 512 bytes) |
 | `--step` / `-s` | Print mnemonic + full register state every instruction |
-| `--interactive` / `-i` | Read keyboard input from stdin (Ctrl+C to stop) |
+| `--interactive` / `-i` | Read keyboard input from stdin (Ctrl+C to stop; needs a TTY) |
+| `--gtk` / `-g` | Open a GTK window rendering the 80x25 VGA grid with proper keyboard capture (recommended for interactive DOS use) |
+| `--gtk-font-size PT` | Pango font point size for `--gtk` (default 18) |
 | `--no-serial` | Disable COM1 serial port output |
 | `--floppy IMG` / `-f` | Load floppy image (FAT12, auto-detects 360KB–1.44MB) and mount filesystem |
 
 The emulator runs for ~1 second, displays the VGA screen, then exits with final CPU state.
+
+## Display modes
+
+The emulator supports two VGA output paths:
+
+- **Terminal** (default) — renders the 80x25 grid as an aligned box-drawing
+  frame with batched ANSI colour escapes.  ANSI is auto-disabled when stdout
+  isn't a TTY so output stays readable in pipes/logs.  No keyboard capture.
+- **GTK** (`--gtk` / `-g`) — opens a real `Gtk.DrawingArea` window, paints
+  each cell's CGA background + foreground colour, and captures key presses
+  directly (injecting ASCII bytes into the keyboard controller).  This is
+  the recommended path for interactive DOS use: it sidesteps the cbreak /
+  scan-code-remapping pitfalls of terminal stdin, and Enter yields `0x0D`
+  (CR) — what COMMAND.COM's DATE/TIME prompts expect.  Ctrl+C in the
+  window stops the emulator; closing the window ends the run.
+
+GTK requires PyGObject + Gtk 3 + PangoCairo (Debian/Ubuntu:
+`apt install python3-gi gir1.2-gtk-3.0 gir1.2-pango-1.0`).  The dependency
+is loaded lazily, so `main.py` imports fine without it; `--gtk` raises a
+clear error only when actually used.
 
 ## Technical Details
 
@@ -227,8 +252,18 @@ Current date is Mon  1-07-1980
 Enter new date (mm-dd-yy):
 ```
 
-To reach the interactive `A>` prompt, run with `--interactive` and type the
-date (or just Enter) plus the time when prompted.
+To reach the interactive `A>` prompt, use the GTK display (recommended) and
+serve the DATE/TIME prompts:
+
+```bash
+python3 main.py --floppy DOS3_3_525/DISK01.IMG --gtk
+# When the 'Enter new date (mm-dd-yy):' prompt appears, type e.g. 01-01-1980
+# and press Enter; same for 'Enter new time'.  The DOS A> prompt follows.
+```
+
+The terminal `--interactive` path also works but needs a real TTY (it puts
+the terminal into cbreak mode); piped input has timing issues because the
+keys arrive before COMMAND.COM's prompt is up.
 
 This was unblocked by two CPU-emulation bugs found via a Unicorn (QEMU-based)
 differential single-step trace against an identical OPEN-CON memory snapshot

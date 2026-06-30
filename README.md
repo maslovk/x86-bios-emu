@@ -209,7 +209,46 @@ python3 main.py --floppy dos3.3.img        # Load full floppy + mount FAT12
 | 3.5"  | 720KB  | 0xF1       | 40/2/9              |
 | 3.5"  | 1.44MB | 0xF9       | 80/2/18             |
 
-**Current DOS 3.3 status:** Boot sector loads and executes (100K+ instructions). Stalls in memory copy loop due to uninitialized BDA data structures. Requires additional BIOS data setup and INT 13h multi-sector read refinement for full boot.
+**Current DOS 3.3 status:** Boot sector loads and executes (100K+ instructions). The
+boot sector relocation, IO.SYS relocation, MSDOS.SYS relocation, DOS kernel
+initialisation and SYSINIT all run to completion. SYSINIT issues `INT 21h
+AH=3Dh OPEN` calls for the standard device names (`CON`, `AUX`, `NUL`, `PRN`)
+and finally for the command interpreter (`COMMAND.COM`); **every one of these
+opens fails with `AX=0002 file_not_found, CF=1`** and DOS prints `Bad or
+missing CON` / `Bad or missing Command Interpreter` before halting.
+
+Diagnostic findings (see `trace_dos.py`, `probe_devchain.py`, `probe_devnames.py`):
+
+- **The device-driver chain is intact.** `INT 21h AH=52h` returns the correct
+  List-of-Lists; `SYSVARS+0x22` holds the NUL device header *inline* and the
+  chain walks `NUL→CON→AUX→PRN→CLOCK$→block→COM1..4/LPT1..3` with the proper
+  `0070:FFFF` terminator — all in IO.SYS's resident segment 0x70.
+- **`INT 2Fh AX=1123h` (redirector "qualify filename") behaves correctly.** It is
+  handled by the DOS-3.3 stub at `023E:172F` which returns `AX=1, CF=1`; CF=1 is
+  the documented "redirector didn't handle it, qualify locally" signal that a
+  non-networked DOS expects, so the OPEN then takes the local path.
+- **`INT 2Fh AX=111Eh` during qualify** also returns `CF=1` from the same stub.
+- The OPEN-CON local-qualify path runs ~1315 instructions: it invokes the **block
+  device driver** (`0x70:0x5DC` strategy then `0x70:0x636` intr — the shared
+  strategy/intr used by NUL/CON/AUX/PRN/CLOCK$/block drivers) for a media/BPB
+  request, builds a canonical path (`A:\<name>`) via `strcpy` at `023E:1E26`,
+  then enters the path-scanner loop at `023E:6C90` (`LODSB / CALL Is-Sep /
+  JNZ -6`). When the path string terminates (null), the `023E:6AC8` routine
+  `MOV AL,3 / JZ +2 / MOV AL,2 / STC / RET` (with ZF=0 from the trailing
+  `CMP AL,'/'`) sets **AL=2 file_not_found, CF=1** and returns.
+
+**Conclusion:** the failure is *not* a broken device chain, *not* a botched
+`INT 2Fh` redirector stub, and *not* a missing BIOS interrupt. The OPEN path
+runs the full local qualify + filename scan but never reaches the device-name
+*match* (no `REPE CMPSW` against the device headers is observed) and concludes
+file_not_found. The bug most likely lives either (a) in the block-device
+`intr` routine's BPB/media response, where a wrong return status propagates to
+file_not_found, or (b) in a CPU-fidelity detail of one of the path-scanner
+string/loop instructions that causes it to skip the device-name match branch.
+Pinpointing the exact instruction will require a single-step differential
+trace against a reference x86 emulator (e.g. 86Box/dosbox) at the same boot
+point — the necessary scaffolding (`probe_step.py`, return-address capture in
+`trace_dos.py`) is already in place.
 
 ## Limitations
 

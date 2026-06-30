@@ -97,28 +97,56 @@ class Video:
         self.cur_x = 0; self.cur_y = 0
         self._sync_to_memory()
 
+    # ANSI foreground escapes for the 16 CGA colours (low nibble of attr).
+    _FG = {
+        0: "30",  1: "34",  2: "32",  3: "36",
+        4: "31",  5: "35",  6: "33",  7: "37",
+        8: "90",  9: "94", 10: "92", 11: "96",
+       12: "91", 13: "95", 14: "93", 15: "97",
+    }
+
+    def _render_row(self, row, use_color):
+        """Render one VGA row (80 cells) as a string.
+
+        Consecutive cells sharing the same foreground colour are batched
+        into a single ANSI escape, so output stays readable when redirected
+        and is fast to emit on a terminal."""
+        out = []
+        cur_fg = None
+        for ch, attr in row:
+            fg = attr & 0xF
+            c = chr(ch) if 0x20 <= ch <= 0x7E else ' '
+            if use_color and fg != cur_fg:
+                out.append(f"\033[{self._FG.get(fg, 37)}m")
+                cur_fg = fg
+            out.append(c)
+        if use_color:
+            out.append("\033[0m")
+        return ''.join(out)
+
     def display(self):
         self._sync_from_memory()
-        os.system('clear' if os.name != 'nt' else 'cls')
-        print("╔" + "═" * 158 + "╗")
-        print("║  Simple BIOS Emulator - VGA Text Mode (80x25)                       ║")
-        print("╠" + "═" * 158 + "╣")
-        colors = {
-            0: "\033[30m", 1: "\033[34m", 2: "\033[32m", 3: "\033[36m",
-            4: "\033[31m", 5: "\033[35m", 6: "\033[33m", 7: "\033[37m",
-            8: "\033[90m", 9: "\033[94m", 10: "\033[92m", 11: "\033[96m",
-            12: "\033[91m", 13: "\033[95m", 14: "\033[93m", 15: "\033[97m",
-        }
+        use_color = sys.stdout.isatty()
+        # Clear screen + home cursor. Only meaningful on a real terminal;
+        # skip when redirected so piped output has no stray escape codes.
+        if use_color:
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+        pad = 2                              # spaces of padding each side
+        inner = self.width + pad * 2        # content width between the bars
+        top = "╔" + "═" * inner + "╗"
+        div = "╠" + "═" * inner + "╣"
+        bot = "╚" + "═" * inner + "╝"
+        title = "Simple BIOS Emulator — VGA Text Mode (80x25)"
+        gap = inner - len(title)
+        title_row = "║" + (" " * (gap // 2)) + title + (" " * (gap - gap // 2)) + "║"
+        print(top)
+        print(title_row)
+        print(div)
         for row in self.buffer:
-            line = ""
-            for ch, attr in row:
-                fg = attr & 0xF
-                c = chr(ch) if 0x20 <= ch <= 0x7E else ' '
-                color = colors.get(fg, '\033[37m')
-                line += f"{color}{c}"
-            line += "\033[0m"
-            print(f"║  {line}  ║")
-        print("╚" + "═" * 158 + "╝")
+            body = self._render_row(row, use_color)
+            print(f"║  {body}  ║")
+        print(bot)
 
 
 class Serial:

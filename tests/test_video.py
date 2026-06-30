@@ -135,6 +135,89 @@ class TestVideo:
         assert attr == 0x0A
         assert 'D' in capsys.readouterr().out
 
+    # ── display() rendering invariants (regression for ugly-output bug) ──
+
+    def _display_lines(self, video, capsys, isatty=True):
+        """Run display() with a fake isatty() and return the printed lines."""
+        import video as video_mod
+        orig = sys.stdout.isatty
+        sys.stdout.isatty = lambda: isatty
+        try:
+            video.display()
+        finally:
+            sys.stdout.isatty = orig
+        return capsys.readouterr().out.splitlines()
+
+    def test_display_border_width_is_consistent(self, capsys):
+        # Top divider, title row, and body rows must all have the same
+        # visible width so the right edge of the box lines up.
+        video = Video()
+        video.print_str("Hello", Video.ATTR_NORMAL, 0, 0)
+        lines = self._display_lines(video, capsys, isatty=False)
+        # Strip ANSI (none expected when not a TTY) and measure visible width.
+        widths = [len(l) for l in lines if l.startswith('║') or l.startswith('╔') or l.startswith('╚')]
+        assert widths, "expected box-drawing lines"
+        assert len(set(widths)) == 1, f"box rows have differing widths: {set(widths)}"
+
+    def test_display_body_row_has_expected_padding(self, capsys):
+        # Each body row is: ║ + 2 spaces + 80 VGA cols + 2 spaces + ║ = 86 chars.
+        video = Video()
+        video.print_str("AB", Video.ATTR_NORMAL, 0, 0)
+        lines = self._display_lines(video, capsys, isatty=False)
+        body = [l for l in lines if 'AB' in l][0]
+        assert len(body) == 86
+        assert body[0] == '║' and body[-1] == '║'
+        assert body[3:5] == 'AB'   # printed at column 0
+
+    def test_display_omits_ansi_when_not_a_tty(self, capsys):
+        # Redirected output must be plain text (no escape codes at all,
+        # including the clear-screen sequence) so it stays readable in pipes/logs.
+        video = Video()
+        video.print_str("X", Video.ATTR_RED, 0, 0)
+        out = '\n'.join(self._display_lines(video, capsys, isatty=False))
+        assert '\033[' not in out
+        assert 'X' in out
+
+    def test_display_batches_color_runs_when_tty(self, capsys):
+        # A run of same-colour cells must share ONE escape, not one per char.
+        video = Video()
+        # Row 0: 5 red 'A's, 5 green 'B's, 5 red 'C's, then blank (attr 0x07)
+        # for the remaining 65 cells = 4 colour runs total.
+        for x in range(5):
+            video.write(x, 0, ord('A'), Video.ATTR_RED)
+        for x in range(5, 10):
+            video.write(x, 0, ord('B'), Video.ATTR_GREEN)
+        for x in range(10, 15):
+            video.write(x, 0, ord('C'), Video.ATTR_RED)
+        lines = self._display_lines(video, capsys, isatty=True)
+        body = [l for l in lines if 'AAAAA' in l][0]
+        # 4 colour-run escapes (red, green, red, white-blank) + 1 reset = 5.
+        # Per-char rendering would emit ~80 escapes; batching keeps it to 5.
+        assert body.count('\033[') == 5
+
+    def test_display_renders_blank_cell_as_space(self, capsys):
+        # A zero/garbage byte must not emit a control char into the terminal.
+        video = Video()
+        video.write(0, 0, 0x00, Video.ATTR_NORMAL)        # NUL
+        video.write(1, 0, 0x9B, Video.ATTR_NORMAL)        # outside printable range
+        lines = self._display_lines(video, capsys, isatty=False)
+        body = [l for l in lines if l.startswith('║  ')][0]
+        assert body[3:5] == '  '   # both cells rendered as spaces
+
+    def test_display_only_clears_via_ansi_not_os_system(self, monkeypatch, capsys):
+        # Must not shell out to `clear`/`cls` (flicker + external dep); the
+        # ANSI clear sequence is written to stdout instead (when a TTY).
+        called = []
+        monkeypatch.setattr('os.system', lambda *a: called.append(a))
+        orig = sys.stdout.isatty
+        sys.stdout.isatty = lambda: True
+        try:
+            Video().display()
+        finally:
+            sys.stdout.isatty = orig
+        assert called == []
+        assert '\033[2J' in capsys.readouterr().out
+
 
 # ── Serial ──────────────────────────────────────────────────────
 

@@ -84,6 +84,10 @@ class Video:
         self.buffer = self.buffer[1:]
         self.buffer.append([(0x20, self.ATTR_NORMAL) for _ in range(self.width)])
         self.cur_y = self.height - 1
+        # Mirror the scrolled buffer back into VRAM.  Without this, the next
+        # display() / GTK _on_draw() call _sync_from_memory() would overwrite
+        # self.buffer with the stale (un-scrolled) memory, losing the scroll.
+        self._sync_to_memory()
 
     def print_str(self, s, attr=ATTR_NORMAL, x=-1, y=-1):
         if x >= 0 and y >= 0:

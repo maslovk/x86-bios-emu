@@ -387,6 +387,9 @@ class BIOS:
                         self.video.buffer[y][x] = self.video.buffer[y + rows][x]
                     else:
                         self.video.buffer[y][x] = (0x20, attr)
+            # Mirror the scroll into VRAM so display()/GTK see it (they read
+            # from 0xB8000 via _sync_from_memory before each redraw).
+            self.video._sync_to_memory()
         elif ah == 0x08:  # Read char/attr at cursor
             x, y = self.video.cur_x, self.video.cur_y
             if 0 <= y < 25 and 0 <= x < 80:

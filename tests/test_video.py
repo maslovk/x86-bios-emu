@@ -81,6 +81,50 @@ class TestVideo:
         ch, _ = video.buffer[24][0]
         assert ch == 0x20  # last row cleared to space
 
+    # ── scroll + memory sync (regression for GTK/terminal scroll bug) ──
+    #
+    # video.scroll() used to update only self.buffer, not the VRAM at
+    # 0xB8000.  display() and GTK both call _sync_from_memory() first, so
+    # the scrolled buffer was overwritten with stale un-scrolled memory --
+    # meaning every screen fill (e.g. typing commands at DOS's A> prompt)
+    # lost the scroll and left old rows stuck on top.
+
+    def test_scroll_syncs_buffer_to_vram(self):
+        mem = Mem()
+        video = Video()
+        video.attach_memory(mem)
+        # Put a marker on row 1 that should move to row 0 after scroll.
+        video.write(0, 1, ord('M'), 0x0A)
+        # Fill row 0 with junk so we can prove the scroll replaced it.
+        for x in range(80):
+            video.write(x, 0, ord('X'), 0x07)
+        video.scroll()
+        # Memory at 0xB8000 (row 0, col 0) must now hold the scrolled-up 'M'.
+        addr = 0xB8000
+        assert mem.read_byte(addr) == ord('M')
+        assert mem.read_byte(addr + 1) == 0x0A
+        # Memory at the bottom row must be cleared (space).
+        bottom = 0xB8000 + (24 * 80) * 2
+        assert mem.read_byte(bottom) == 0x20
+
+    def test_putc_wrapping_triggers_memory_synced_scroll(self):
+        # Filling past the bottom via putc must scroll and the scrolled
+        # content must reach VRAM (the path GTK display reads from).
+        mem = Mem()
+        video = Video()
+        video.attach_memory(mem)
+        video.cur_x = 0; video.cur_y = 0
+        video.print_str("TOP")       # row 0
+        # Position at the last row, write enough chars to wrap onto a
+        # 25th (non-existent) row; putc must scroll to keep the buffer in
+        # VRAM synced.
+        video.cur_y = video.height - 1
+        video.cur_x = 0
+        video.print_str("X" * (video.width + 5))   # wraps past the bottom
+        # After the wrap+scroll, row 0 of VRAM should no longer be 'TOP'.
+        addr = 0xB8000
+        assert mem.read_byte(addr) != ord('T'), "scroll did not propagate to VRAM"
+
     def test_print_str(self, video):
         video.cur_x = 0; video.cur_y = 0
         video.print_str("Hi", 0x09)

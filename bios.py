@@ -722,11 +722,16 @@ class BIOS:
     def _int1ah(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
         if ah == 0x00:  # Get system ticks
+            # INT 1Ah AH=00 returns CX:DX = 32-bit tick count where
+            # CX = high word and DX = low word (per IBM PC BIOS spec).
+            # Returning them swapped causes DOS's elapsed-time checks
+            # (SBB CX, saved_high) to see a non-zero high word and falsely
+            # conclude a timeout, aborting device opens.
             ticks = self.mem.read_dword(0x046C) if hasattr(self.mem, 'read_dword') else (
                 self.mem.read_word(0x046C) | (self.mem.read_word(0x046E) << 16)
             )
-            cpu.cx = ticks & 0xFFFF
-            cpu.dx = (ticks >> 16) & 0xFFFF
+            cpu.cx = (ticks >> 16) & 0xFFFF   # high word
+            cpu.dx = ticks & 0xFFFF            # low word
         elif ah == 0x02:  # Get RTC time
             if self.cmos:
                 t = self.cmos.get_date_bcd()
@@ -748,6 +753,13 @@ class BIOS:
     # ── INT 2Ah: (compat) Get System Time ──────────────────────
 
     def _int2ah(self, cpu):
+        # Only AH=00h is "Get System Time" — and it is the only function
+        # we should answer.  DOS uses INT 2Ah for many internal signals
+        # (AH=80h–87h critical-section, AH=06h print-server, etc.) that
+        # must NOT clobber any registers.  Returning here without touching
+        # registers lets those internal calls pass through harmlessly.
+        if (cpu.ax >> 8) & 0xFF:
+            return
         import time
         t = int(time.time())
         cpu.cx = (t // 1000) & 0xFFFF  # Hundredths

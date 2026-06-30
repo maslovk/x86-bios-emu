@@ -123,6 +123,27 @@ class TestEmulatorIntegration:
         assert emu.cpu.cf is True
         assert emu.cpu.if_flag is True
 
+    def test_irq_dispatch_honors_dos_replaced_ivt_handler(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        emu.cpu.cs = 0x1111
+        emu.cpu.ip = 0x2222
+        emu.cpu.sp = 0x9000
+        emu.cpu.flags = 0x0202
+        emu.cpu.if_flag = True
+
+        emu.mem.write_word(0x08 * 4, 0x3456)
+        emu.mem.write_word(0x08 * 4 + 2, 0x789A)
+        emu.io.get_pending_irq = lambda: 0
+        emu.io.get_irq_vector = lambda irq: 0x08
+
+        assert emu._check_and_dispatch_irq() is True
+        assert emu.cpu.cs == 0x789A
+        assert emu.cpu.ip == 0x3456
+        assert emu.cpu.int_no_return is True
+        assert emu.cpu.sp == 0x8FFA
+
     def test_irq_dispatch_respects_interrupt_shadow(self):
         from main import Emulator
         emu = Emulator()

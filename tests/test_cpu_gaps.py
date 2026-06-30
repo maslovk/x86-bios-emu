@@ -62,6 +62,98 @@ class TestPushImm16:
         assert cpu.mem.read_word(cpu._phys(cpu.ss, 0xFFFE)) == 0xBEEF
 
 
+class TestRetImm16:
+    def test_c2_ret_pops_ip_and_discards_stack_args(self):
+        cpu = _make_cpu()
+        cpu.cs = cpu.ss = 0
+        cpu.ip = 0
+        cpu.sp = 0x1000
+        cpu.mem.write_byte(0, 0xC2)
+        cpu.mem.write_word(1, 0x0004)
+        cpu.mem.write_word(cpu._phys(cpu.ss, 0x1000), 0x3456)
+
+        cpu.execute()
+
+        assert cpu.ip == 0x3456
+        assert cpu.sp == 0x1006
+
+
+class TestRetfImm16:
+    def test_ca_retf_pops_cs_ip_and_discards_stack_args(self):
+        cpu = _make_cpu(ram=0x100000)
+        cpu.cs = 0x2000
+        cpu.ss = 0x1000
+        cpu.ip = 0
+        cpu.sp = 0x1000
+        # CA 02 00  -> RETF imm16 (imm16 = 0x0002)
+        cpu.mem.write_byte(cpu._phys(0x2000, 0), 0xCA)
+        cpu.mem.write_word(cpu._phys(0x2000, 1), 0x0002)
+        # Far-return frame on the stack: [SP]=IP, [SP+2]=CS
+        cpu.mem.write_word(cpu._phys(0x1000, 0x1000), 0x3456)   # return IP
+        cpu.mem.write_word(cpu._phys(0x1000, 0x1002), 0x4000)   # return CS
+
+        cpu.execute()
+
+        assert cpu.cs == 0x4000
+        assert cpu.ip == 0x3456
+        assert cpu.sp == 0x1006   # 0x1000 + 4 (pop IP+CS) + 2 (imm16)
+
+    def test_ca_retf_fetches_imm_before_pops(self):
+        """The imm16 must be read from the instruction stream, not from the
+        return target after CS:IP are restored."""
+        cpu = _make_cpu(ram=0x100000)
+        cpu.cs = 0x2000
+        cpu.ss = 0x1000
+        cpu.ip = 0
+        cpu.sp = 0x1000
+        # CA 04 00  -> RETF imm16 (imm16 = 0x0004)
+        cpu.mem.write_byte(cpu._phys(0x2000, 0), 0xCA)
+        cpu.mem.write_word(cpu._phys(0x2000, 1), 0x0004)
+        # Far-return frame: return to 0x4000:0x3456
+        cpu.mem.write_word(cpu._phys(0x1000, 0x1000), 0x3456)   # return IP
+        cpu.mem.write_word(cpu._phys(0x1000, 0x1002), 0x4000)   # return CS
+        # Poison the first two bytes of the return target (0x4000:0x3456).
+        # A buggy fetch-after-pop would read this word as the imm16, blowing up
+        # SP and skipping the first two bytes of the resumed code.
+        cpu.mem.write_word(cpu._phys(0x4000, 0x3456), 0xFFFF)
+
+        cpu.execute()
+
+        assert cpu.cs == 0x4000
+        assert cpu.ip == 0x3456
+        assert cpu.sp == 0x1008   # 0x1000 + 4 + 4, NOT 0x1000 + 4 + 0xFFFF
+
+
+class TestGroup1ImmToMemory:
+    def test_80_cmp_bp_disp8_uses_disp_before_imm8(self):
+        cpu = _make_cpu()
+        cpu.cs = cpu.ss = 0
+        cpu.ip = 0
+        cpu.bp = 0x1000
+        cpu.mem.write_byte(0, 0x80)
+        cpu.mem.write_byte(1, 0x7E)
+        cpu.mem.write_byte(2, 0x19)
+        cpu.mem.write_byte(3, 0x01)
+        cpu.mem.write_byte(0x1019, 0x01)
+        cpu.execute()
+        assert cpu.zf is True
+        assert cpu.cf is False
+
+    def test_81_cmp_bp_disp8_uses_disp_before_imm16(self):
+        cpu = _make_cpu()
+        cpu.cs = cpu.ss = 0
+        cpu.ip = 0
+        cpu.bp = 0x1000
+        cpu.mem.write_byte(0, 0x81)
+        cpu.mem.write_byte(1, 0x7E)
+        cpu.mem.write_byte(2, 0x10)
+        cpu.mem.write_word(3, 0x1234)
+        cpu.mem.write_word(0x1010, 0x1234)
+        cpu.execute()
+        assert cpu.zf is True
+        assert cpu.cf is False
+
+
 # ── PUSH imm8 (6A) ───────────────────────────────────────────────
 
 class TestPushImm8:
@@ -1321,6 +1413,27 @@ class TestGroup1ByteOpcodes:
         assert cpu.sp == 0x1234
 
 
+class TestMovImmToMemory:
+    def test_c6_mov_direct_disp16_honors_segment_override(self):
+        cpu = _make_cpu()
+        cpu.cs = 0x0070
+        cpu.ip = 0x0000
+        cpu.ds = 0x0000
+        cpu.mem.write_byte(cpu._phys(cpu.cs, 0x0000), 0x2E)  # CS:
+        cpu.mem.write_byte(cpu._phys(cpu.cs, 0x0001), 0xC6)  # MOV r/m8, imm8
+        cpu.mem.write_byte(cpu._phys(cpu.cs, 0x0002), 0x06)  # [disp16]
+        cpu.mem.write_word(cpu._phys(cpu.cs, 0x0003), 0x0266)
+        cpu.mem.write_byte(cpu._phys(cpu.cs, 0x0005), 0x01)
+
+        cpu.mem.write_byte(cpu._phys(cpu.cs, 0x0266), 0xAA)
+        cpu.mem.write_byte(0x0266, 0xBB)
+
+        cpu.execute()
+
+        assert cpu.mem.read_byte(cpu._phys(cpu.cs, 0x0266)) == 0x01
+        assert cpu.mem.read_byte(0x0266) == 0xBB
+
+
 class TestImmediatePortIO:
     def test_e4_in_al_imm8_reads_byte_port(self):
         cpu = _make_cpu()
@@ -1361,3 +1474,75 @@ class TestImmediatePortIO:
         cpu.execute()
 
         assert calls == [(0x21, 0xBEEF)]
+
+
+# ── INT-chaining stub: PUSHF; CALL FAR [vec] must IRET-pop the flags ──────
+# DOS's INT 8 (and other) handlers chain to the previous vector with
+# `PUSHF; CALL FAR [saved_vec]`.  That pushes an IRET frame ([IP][CS][flags]),
+# so the callee must return with IRET (not RETF) to consume the flags.
+# The BIOS IVT stubs end with 0xCF (IRET) for this reason; this test pins the
+# CPU/stub contract so a regression to `INT n; RETF` is caught immediately.
+
+class TestIntChainStubIret:
+    def _setup_chain(self, cpu, stub_seg, stub_off, int_n):
+        # Stub: CD <int_n> ; CF (IRET)
+        base = (stub_seg << 4) + stub_off
+        cpu.mem.write_byte(base + 0, 0xCD)
+        cpu.mem.write_byte(base + 1, int_n & 0xFF)
+        cpu.mem.write_byte(base + 2, 0xCF)   # IRET -- must consume the flags
+        # A tiny "previous handler" target the stub's INT n jumps to: just IRET.
+        # Override _do_interrupt to simulate the hooked handler: push nothing,
+        # just advance to a trampoline that immediately IRETs back to stub+2.
+        # Easiest: make the INT a no-op that returns to the instruction after CD.
+        # Override _do_interrupt to simulate a balanced hooked handler:
+        # the real emulator pushes/pops an INT frame (net stack effect zero)
+        # and returns control to the instruction after `CD n`, i.e. the
+        # stub's IRET at stub+2.  Leaving CS:IP untouched achieves that,
+        # since the CPU has already advanced IP past the 2-byte CD.
+        cpu._do_interrupt = lambda n: None
+
+    def test_pushf_callf_stub_iret_consumes_flags(self):
+        cpu = _make_cpu(ram=0x100000)
+        stub_seg, stub_off = 0xF000, 0x0100
+        self._setup_chain(cpu, stub_seg, stub_off, 0x08)
+        # Caller at 0200:0000:  PUSHF; CALL FAR [0200:0040]; HLT
+        # [0200:0040] holds the far pointer to the stub.
+        cpu.mem.write_word(cpu._phys(0x0200, 0x0040), stub_off)
+        cpu.mem.write_word(cpu._phys(0x0200, 0x0042), stub_seg)
+        p = cpu._phys(0x0200, 0)
+        cpu.mem.write_byte(p + 0, 0x9C)            # PUSHF
+        cpu.mem.write_byte(p + 1, 0x9A)            # CALL far imm16:16
+        cpu.mem.write_word(p + 2, stub_off)
+        cpu.mem.write_word(p + 4, stub_seg)
+        cpu.mem.write_byte(p + 6, 0xF4)            # HLT (return landing pad)
+
+        cpu.cs = 0x0200
+        cpu.ip = 0x0000
+        cpu.ss = 0x0100
+        cpu.sp = 0x1000
+        sp_before = cpu.sp
+
+        # PUSHF -> CALL FAR -> stub CD 08 (hooked, balanced) -> stub IRET
+        for _ in range(4):
+            cpu.execute()
+        # After the chained IRET we must land at the HLT (offset 6) with the
+        # PUSHF flags consumed: SP back to its pre-PUSHF value.
+        assert cpu.cs == 0x0200
+        assert cpu.ip == 0x0006
+        assert cpu.sp == sp_before
+
+    def test_stub_byte_is_iret_not_retf(self):
+        # Guard against the stub regressing to `INT n; RETF` (0xCB).
+        import importlib
+        bios = importlib.import_module('bios')
+        from tests.conftest import Mem as _Mem
+        from video import Video, Keyboard, Disk
+        mem = _Mem(0x100000)
+        b = bios.BIOS(mem, Video(), Keyboard(), Disk())
+        b.initialize()
+        ip = mem.read_word(0x08 * 4)
+        cs = mem.read_word(0x08 * 4 + 2)
+        base = (cs << 4) + ip
+        assert mem.read_byte(base + 0) == 0xCD
+        assert mem.read_byte(base + 1) == 0x08
+        assert mem.read_byte(base + 2) == 0xCF   # IRET, not RETF

@@ -68,6 +68,60 @@ class DirEntry:
         return f"<DirEntry {self.full_name:>12s} {self.size:>8d}B [{flag_str}]>"
 
 
+# ── DOS 1.x media-descriptor geometry table ───────────────────────────
+#
+# The original IBM-PC BPB (DOS 2.0+, 1983) sits at boot-sector offsets
+# 11-35.  DOS 1.x boot sectors predate the BPB: the early fields at
+# offsets 11-18 (bytes_per_sector, reserved_sectors, num_fats,
+# root_entries) are absent or hold garbage, while the later fields at
+# offsets 19-27 (total_sectors, media descriptor, sectors_per_fat,
+# sectors_per_track, heads) were sometimes present and valid.  The DOS 1.x
+# FORMAT command derived geometry from a *media-descriptor byte*
+# (0xF0, 0xF9, 0xFC, 0xFD, 0xFE, 0xFF) via a built-in drive-type
+# lookup table.  We mirror that here, keyed on total_sectors to avoid
+# the 0xF0-ambiguous (1.2MB vs 1.44MB) case.
+# Each trim: (bytes_per_sector, sectors_per_cluster, reserved_sectors,
+#            num_fats, root_entries, sectors_per_fat, media,
+#            sectors_per_track, heads, label).
+_DOS_MEDIA_GEOMETRIES = {
+    2880: dict(bytes_per_sector=512, sectors_per_cluster=1,
+               reserved_sectors=1, num_fats=2, root_entries=224,
+               sectors_per_fat=9,  media=0xF0, sectors_per_track=18,
+               heads=2, label='1.44MB 3.5"'),
+    2400: dict(bytes_per_sector=512, sectors_per_cluster=1,
+               reserved_sectors=1, num_fats=2, root_entries=224,
+               sectors_per_fat=7,  media=0xF9, sectors_per_track=15,
+               heads=2, label='1.2MB 5.25"'),
+    1440: dict(bytes_per_sector=512, sectors_per_cluster=2,
+               reserved_sectors=1, num_fats=2, root_entries=112,
+               sectors_per_fat=3,  media=0xF9, sectors_per_track=9,
+               heads=2, label='720KB 3.5"'),
+    1232: dict(bytes_per_sector=512, sectors_per_cluster=2,
+               reserved_sectors=1, num_fats=2, root_entries=192,
+               sectors_per_fat=2,  media=0xFD, sectors_per_track=8,
+               heads=2, label='615KB 5.25"'),
+     720: dict(bytes_per_sector=512, sectors_per_cluster=2,
+               reserved_sectors=1, num_fats=2, root_entries=112,
+               sectors_per_fat=2,  media=0xFD, sectors_per_track=9,
+               heads=2, label='360KB 5.25"'),
+     640: dict(bytes_per_sector=512, sectors_per_cluster=2,
+               reserved_sectors=1, num_fats=2, root_entries=112,
+               sectors_per_fat=1,  media=0xFF, sectors_per_track=8,
+               heads=2, label='320KB 5.25"'),
+     360: dict(bytes_per_sector=512, sectors_per_cluster=1,
+               reserved_sectors=1, num_fats=2, root_entries=64,
+               sectors_per_fat=2,  media=0xFC, sectors_per_track=9,
+               heads=1, label='180KB 5.25"'),
+     320: dict(bytes_per_sector=512, sectors_per_cluster=1,
+               reserved_sectors=1, num_fats=2, root_entries=64,
+               sectors_per_fat=1,  media=0xFE, sectors_per_track=8,
+               heads=1, label='160KB 5.25"'),
+}
+
+# Recognised IBM-PC media-descriptor bytes.
+_VALID_MEDIA_BYTES = frozenset({0xF0, 0xF9, 0xFC, 0xFD, 0xFE, 0xFF})
+
+
 class FAT12:
     """FAT12 filesystem reader for 1.44 MB floppy images.
 
@@ -90,6 +144,12 @@ class FAT12:
         self._bpb = None
         self._fat_cache = None
         self._root_entries = None
+        # Variants set by _parse_bpb(): 'dos2plus' (IBM PC BPB parse ok)
+        # or 'dos1x-fallback' (early BPB fields invalid; geometry derived
+        # from the DOS 1.x media-descriptor lookup table below).  Caller
+        # code may inspect these via info().
+        self.dos_variant = 'dos2plus'
+        self.geom_label = 'FAT12 BPB'
 
     def mount(self):
         """Read and parse the boot sector BPB."""
@@ -99,7 +159,18 @@ class FAT12:
         return self
 
     def _parse_bpb(self, boot_sector: bytes):
-        """Parse BIOS Parameter Block from boot sector."""
+        """Parse the BPB; fall back to a DOS 1.x media-descriptor layout
+        when the standard DOS 2+ BPB looks corrupt or absent.
+
+        Many real DOS 1.x boot sectors (e.g. the SCP-86-DOS-derived
+        "DOS 1.25" reference disk) leave the early BPB fields at
+        offsets 11-18 (bytes_per_sector, reserved_sectors, num_fats,
+        root_entries) zero-filled or filled with garbage, while the
+        later fields at offsets 19-27 (total_sectors, media,
+        sectors_per_fat, sectors_per_track, heads) read correctly.
+        Falling back through a known PC-floppy geometry table keyed on
+        total_sectors lets us mount and read those images.
+        """
         if len(boot_sector) < 36:
             raise FAT12Error("Boot sector too small for BPB")
 
@@ -109,43 +180,214 @@ class FAT12:
             if sig != 0xAA55:
                 raise FAT12Error(f"Invalid boot sector signature: 0x{sig:04X}")
 
+        self._bpb = boot_sector[:36]
+        self.dos_variant = 'dos2plus'
+        self.geom_label = 'FAT12 BPB'
+
         # BPB fields (offset from start of boot sector)
         # Jump(3) + OEM(8) = BPB starts at offset 11
-        self.bytes_per_sector = int.from_bytes(boot_sector[11:13], 'little')
-        self.sectors_per_cluster = boot_sector[13]
-        self.reserved_sectors = int.from_bytes(boot_sector[14:16], 'little')
-        self.num_fats = boot_sector[16]
-        self.root_entries = int.from_bytes(boot_sector[17:19], 'little')
-        self.total_sectors_16 = int.from_bytes(boot_sector[19:21], 'little')
-        self.media = boot_sector[21]
-        self.sectors_per_fat_16 = int.from_bytes(boot_sector[22:24], 'little')
-        self.sectors_per_track = int.from_bytes(boot_sector[24:26], 'little')
-        self.heads = int.from_bytes(boot_sector[26:28], 'little')
-        self.hidden_sectors = int.from_bytes(boot_sector[28:32], 'little')
-        self.total_sectors_32 = int.from_bytes(boot_sector[32:36], 'little')
+        bytes_per_sector    = int.from_bytes(boot_sector[11:13], 'little')
+        sectors_per_cluster = boot_sector[13]
+        reserved_sectors    = int.from_bytes(boot_sector[14:16], 'little')
+        num_fats            = boot_sector[16]
+        root_entries        = int.from_bytes(boot_sector[17:19], 'little')
+        total_sectors_16    = int.from_bytes(boot_sector[19:21], 'little')
+        media               = boot_sector[21]
+        sectors_per_fat_16  = int.from_bytes(boot_sector[22:24], 'little')
+        sectors_per_track   = int.from_bytes(boot_sector[24:26], 'little')
+        heads               = int.from_bytes(boot_sector[26:28], 'little')
+        hidden_sectors      = int.from_bytes(boot_sector[28:32], 'little')
+        total_sectors_32    = int.from_bytes(boot_sector[32:36], 'little')
+
+        if not self._bpb_valid(bytes_per_sector, sectors_per_cluster,
+                               reserved_sectors, num_fats, root_entries,
+                               total_sectors_16, total_sectors_32,
+                               sectors_per_fat_16):
+            # DOS 1.x: derive missing fields from the disk-geometry table.
+            gv = self._dos1x_geometry(total_sectors_16, total_sectors_32,
+                                      media, sectors_per_fat_16,
+                                      sectors_per_track, heads,
+                                      sectors_per_cluster)
+            bytes_per_sector    = gv['bytes_per_sector']
+            sectors_per_cluster = gv['sectors_per_cluster']
+            reserved_sectors    = gv['reserved_sectors']
+            num_fats            = gv['num_fats']
+            root_entries        = gv['root_entries']
+            total_sectors_16    = gv['total_sectors']
+            media               = gv['media']
+            sectors_per_fat_16  = gv['sectors_per_fat']
+            sectors_per_track   = gv['sectors_per_track']
+            heads               = gv['heads']
+            self.dos_variant    = gv.get('variant', 'dos1x-fallback')
+            self.geom_label     = gv.get('label', 'DOS 1.x (recovered)')
+
+        self.bytes_per_sector    = bytes_per_sector
+        self.sectors_per_cluster = sectors_per_cluster
+        self.reserved_sectors    = reserved_sectors
+        self.num_fats            = num_fats
+        self.root_entries        = root_entries
+        self.total_sectors_16    = total_sectors_16
+        self.media               = media
+        self.sectors_per_fat_16  = sectors_per_fat_16
+        self.sectors_per_track   = sectors_per_track
+        self.heads               = heads
+        self.hidden_sectors      = hidden_sectors
+        self.total_sectors_32    = total_sectors_32
 
         # Derived values
         self.sectors_per_fat = self.sectors_per_fat_16 if self.sectors_per_fat_16 else self.total_sectors_32
         self.total_sectors = self.total_sectors_16 if self.total_sectors_16 else self.total_sectors_32
         self.cluster_size = self.bytes_per_sector * self.sectors_per_cluster
 
-        # Region boundaries (in sectors)
+        # Region boundaries (in sectors).  Skip over *every* FAT copy
+        # (not just FAT2) so 1-FAT layouts also work.
         self.fat_start = self.reserved_sectors
         self.fat_end = self.fat_start + self.sectors_per_fat
-        self.root_start = self.fat_end + self.sectors_per_fat  # FAT2 is mirror
+        self.root_start = self.fat_end + self.sectors_per_fat * (self.num_fats - 1)
         self.root_sectors = (self.root_entries * 32 + self.bytes_per_sector - 1) // self.bytes_per_sector
         self.data_start = self.root_start + self.root_sectors
 
         # Total clusters
-        data_sectors = self.total_sectors - self.data_start
-        self.total_clusters = data_sectors // self.sectors_per_cluster
+        if self.total_sectors > self.data_start:
+            data_sectors = self.total_sectors - self.data_start
+            self.total_clusters = data_sectors // self.sectors_per_cluster
+        else:
+            self.total_clusters = 0
 
         # FAT12 end markers
         self.FAT12_EOC = 0xFF8  # End of chain
         self.FAT12_BAD = 0xFF7  # Bad sector
         self.FAT12_FREE = 0x000
 
-        self._bpb = boot_sector[:36]
+        if self.sectors_per_fat == 0:
+            raise FAT12Error("DOS 1.x BPB fallback failed: sectors_per_fat unresolved")
+        if self.total_sectors == 0:
+            raise FAT12Error("DOS 1.x BPB fallback failed: total_sectors unresolved")
+
+    @staticmethod
+    def _bpb_valid(bps, spc, reserved, num_fats, root_entries,
+                    total_sectors_16, total_sectors_32, sectors_per_fat_16):
+        """Sanity-check the DOS 2+ BPB fields.
+
+        Return True iff the parsed BPB plausibly describes a real FAT12
+        filesystem.  Otherwise the caller switches to the DOS 1.x recovery
+        path.  Tests treat this as the 'switch' between code paths.
+        """
+        if bps not in (128, 256, 512, 1024, 2048, 4096):
+            return False
+        if spc not in (1, 2, 4, 8, 16, 32, 64, 128):
+            return False
+        if num_fats not in (1, 2):
+            return False
+        total = total_sectors_16 if total_sectors_16 else total_sectors_32
+        if total <= 0:
+            return False
+        if reserved >= total:
+            return False
+        if root_entries <= 0 or root_entries > 65535:
+            return False
+        if sectors_per_fat_16 == 0 or sectors_per_fat_16 >= total:
+            return False
+        return True
+
+    def _disk_sector_count(self):
+        """Best-effort total sector count from the underlying Disk object.
+
+        The Disk object (video.py) stores its image as ``self.sectors``
+        (a list of 512-byte bytearrays).  Test fakes use ``self.data``.
+        Returns 0 if neither attribute is available.
+        """
+        disk = self.disk
+        if hasattr(disk, 'sectors'):
+            try:
+                return len(disk.sectors)
+            except Exception:
+                pass
+        if hasattr(disk, 'data'):
+            try:
+                return len(disk.data) // 512
+            except Exception:
+                pass
+        return 0
+
+    def _dos1x_geometry(self, total_sectors_16, total_sectors_32, media,
+                         sectors_per_fat_16, sectors_per_track, heads,
+                         sectors_per_cluster_std):
+        """Recover missing BPB fields for a DOS 1.x boot sector.
+
+        Strategy:
+          1. Pick total_sectors from offset 19-20 (or 32-35, or from
+             the disk-image size on disk).
+          2. Look up a verified geometry in ``_DOS_MEDIA_GEOMETRIES``
+             keyed on total_sectors.  This avoids the well-known
+             0xF0 ambiguity (used for both 1.2MB and 1.44MB floppies)
+             by trusting total_sectors over the media byte.
+          3. Override with any sane 'late' BPB field actually read
+             from the boot sector (offsets 19-27).
+          4. Estimate sectors_per_fat for unknown geometries so we
+             can still walk FAT chains.
+        """
+        total_sectors = total_sectors_16 if total_sectors_16 else total_sectors_32
+        if not total_sectors:
+            total_sectors = self._disk_sector_count()
+        if not total_sectors:
+            raise FAT12Error(
+                "DOS 1.x BPB fallback failed: total_sectors unknown "
+                f"(t16={total_sectors_16}, t32={total_sectors_32})")
+
+        geom = _DOS_MEDIA_GEOMETRIES.get(total_sectors)
+        if geom is None:
+            # Heuristic defaults for non-standard sizes.
+            if total_sectors >= 1440:
+                root_entries,  spc_default = 224,  1
+            elif total_sectors >= 640:
+                root_entries,  spc_default = 112,  2
+            else:
+                root_entries,  spc_default = 64,   1
+            geom = dict(
+                bytes_per_sector=512,
+                sectors_per_cluster=spc_default,
+                reserved_sectors=1,
+                num_fats=2,
+                root_entries=root_entries,
+                sectors_per_fat=0,           # estimate below
+                media=(media if media in _VALID_MEDIA_BYTES else 0xF0),
+                sectors_per_track=(sectors_per_track
+                                   if 0 < sectors_per_track <= total_sectors else 9),
+                heads=(heads if 0 < heads <= 2 else 2),
+                label='DOS 1.x (recovered, heuristic)')
+        else:
+            geom = dict(geom)               # copy so we can mutate
+
+        # Override with any sane late-BPB field from the boot sector.
+        if 0 < sectors_per_fat_16 < total_sectors:
+            geom['sectors_per_fat'] = sectors_per_fat_16
+        if 0 < sectors_per_track <= total_sectors:
+            geom['sectors_per_track'] = sectors_per_track
+        if 0 < heads <= 2:
+            geom['heads'] = heads
+        if sectors_per_cluster_std in (1, 2, 4, 8, 16, 32, 64, 128):
+            # The SPC byte at offset 13 is preserved on most DOS 1.x disks.
+            geom['sectors_per_cluster'] = sectors_per_cluster_std
+        if media in _VALID_MEDIA_BYTES:
+            geom['media'] = media
+        if not geom.get('sectors_per_cluster'):
+            geom['sectors_per_cluster'] = 1
+
+        if not geom.get('sectors_per_fat') or geom['sectors_per_fat'] >= total_sectors:
+            # Estimate sectors-per-FAT: 1.5 bytes per FAT12 entry, bps=512.
+            root_sectors = (geom['root_entries'] * 32 + 511) // 512
+            reserved     = geom['reserved_sectors']
+            data_sectors = max(0, total_sectors - reserved - root_sectors)
+            # FAT12: each cluster occupies 1 FAT entry (12 bits) + 1 cluster
+            # of data; that gives 2/3 of the data region as clusters.
+            data_clusters = data_sectors * 2 // 3
+            spf = max(1, (data_clusters * 3 // 2 + 511) // 512)
+            geom['sectors_per_fat'] = spf
+
+        geom['total_sectors'] = total_sectors
+        geom['variant']        = 'dos1x-fallback'
+        return geom
 
     def info(self) -> dict:
         """Return filesystem info dict."""
@@ -162,6 +404,8 @@ class FAT12:
             'data_start_sector': self.data_start,
             'media': self.media,
             'capacity_kb': self.total_sectors * self.bytes_per_sector // 1024,
+            'dos_variant': self.dos_variant,
+            'geom_label': self.geom_label,
         }
 
     def _cluster_to_sector(self, cluster: int) -> int:

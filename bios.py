@@ -76,8 +76,11 @@ class BIOS:
 
         The emulator still dispatches `INT n` to Python handlers directly, but
         DOS and boot loaders also inspect and chain IVT entries as data. Each
-        stub is `INT n; RETF`, which lets far callers reach the Python handler
-        through normal CPU execution.
+        stub is `INT n; IRET`, so a far caller that chains with the standard
+        `PUSHF; CALL FAR [vec]` pattern gets a correct 6-byte IRET return
+        (popping the pushed flags together with the call's CS:IP).  Using IRET
+        here matches real BIOS interrupt handlers, which always return with
+        IRET rather than RETF.
         """
         stub_seg = 0xF000
         stub_off = 0x0100
@@ -87,7 +90,7 @@ class BIOS:
             base = (stub_seg << 4) + stub_off
             self.mem.write_byte(base + 0, 0xCD)   # INT imm8
             self.mem.write_byte(base + 1, n & 0xFF)
-            self.mem.write_byte(base + 2, 0xCB)   # RETF
+            self.mem.write_byte(base + 2, 0xCF)   # IRET (see comment above)
             self.mem.write_word(n * 4, stub_off)
             self.mem.write_word(n * 4 + 2, stub_seg)
             self.ivt_stubs[n] = (stub_seg, stub_off)
@@ -509,10 +512,11 @@ class BIOS:
             except Exception as e:
                 print(f"[BIOS] INT 13h AH=02 Buffer log error: {e}", file=sys.stderr)
 
-            cpu.ax = 0x0100
+            cpu.ah = 0x00
+            cpu.al = sectors
             cpu.flags &= ~0x01
         elif ah == 0x03:  # Write sectors
-            cpu.ax = 0x0100
+            cpu.ah = 0x00
             cpu.flags &= ~0x01
         elif ah == 0x08:  # Get disk params
             media = self.disk.media_type if hasattr(self.disk, 'media_type') else 0xF9
@@ -534,6 +538,8 @@ class BIOS:
             cpu.cl = (spt & 0x3F) | ((max_cyl >> 2) & 0xC0)
             cpu.dh = max_head
             cpu.dl = 0x01
+            cpu.di = self.mem.read_word(0x1E * 4)
+            cpu.es = self.mem.read_word(0x1E * 4 + 2)
             cpu.flags &= ~0x01
         elif ah == 0x04:  # Re-calibrate drive
             cpu.ax = 0x0000

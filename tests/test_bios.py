@@ -84,7 +84,9 @@ class TestBIOSInit:
         base = 0xF0000 + ip
         assert bios_env.mem.read_byte(base) == 0xCD
         assert bios_env.mem.read_byte(base + 1) == 0x13
-        assert bios_env.mem.read_byte(base + 2) == 0xCB
+        # Stub ends with IRET (0xCF) so DOS-style `PUSHF; CALL FAR [vec]`
+        # chaining gets a correct 6-byte IRET return.
+        assert bios_env.mem.read_byte(base + 2) == 0xCF
 
     def test_sets_int1e_diskette_table(self, bios_env):
         bios_env.initialize()
@@ -229,6 +231,8 @@ class TestINT13h:
         assert cpu.cl == 9
         assert cpu.dh == 1
         assert cpu.dl == 1
+        assert cpu.di == 0xEFC7
+        assert cpu.es == 0xF000
         assert (cpu.flags & 0x01) == 0
 
     def test_extended_check(self, bios_env):
@@ -404,7 +408,8 @@ class TestINT13hMultiSector:
         cpu.es = 0x07C0
         cpu.bx = 0x0000
         bios_env.handlers[0x13](cpu)
-        assert cpu.ax == 0x0100
+        assert cpu.ah == 0x00
+        assert cpu.al == 0x01
 
     def test_read_multi_sector(self, bios_env):
         """Read 3 sectors and verify each has correct data."""
@@ -421,7 +426,8 @@ class TestINT13hMultiSector:
         cpu.es = 0x07C0
         cpu.bx = 0x0000
         bios_env.handlers[0x13](cpu)
-        assert cpu.ax == 0x0100
+        assert cpu.ah == 0x00
+        assert cpu.al == 0x03
         for sector in range(3):
             offset = sector * 512
             for i in range(10):
@@ -441,7 +447,8 @@ class TestINT13hMultiSector:
         cpu.es = 0x07C0
         cpu.bx = 0x0000
         bios_env.handlers[0x13](cpu)
-        assert cpu.ax == 0x0100
+        assert cpu.ah == 0x00
+        assert cpu.al == 0x03
         assert bios_env.mem.read_byte(0x7C00) == 0xAA
         assert bios_env.mem.read_byte(0x7C00 + 1024) == 0xBB
 

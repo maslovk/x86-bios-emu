@@ -527,6 +527,54 @@ class CPU:
         else:
             write_mem(addr, result)
 
+    def _exec_group1_mem_arith(self, addr, reg, imm, is_word=True):
+        """GROUP 1 helper for memory operands when EA must be resolved before imm."""
+        if is_word:
+            read_mem = self._readw
+            write_mem = self._writew
+            add_op = self._do_add16
+            or_op = self._do_or16
+            sub_op = self._do_sub16
+            and_op = self._do_and16
+            xor_op = self._do_xor16
+            mask = 0xFFFF
+        else:
+            read_mem = self._readb
+            write_mem = self._writeb
+            add_op = self._do_add8
+            or_op = self._do_or8
+            sub_op = self._do_sub8
+            and_op = self._do_and8
+            xor_op = self._do_xor8
+            mask = 0xFF
+
+        imm &= mask
+        value = read_mem(addr)
+
+        if reg == 7:
+            sub_op(value, imm)
+            return
+        if reg == 0:
+            result = add_op(value, imm)
+        elif reg == 1:
+            result = or_op(value, imm)
+        elif reg == 2:
+            carry = 1 if self.cf else 0
+            result = add_op(value, (imm + carry) & mask)
+        elif reg == 3:
+            borrow = 1 if self.cf else 0
+            result = sub_op(value, (imm + borrow) & mask)
+        elif reg == 4:
+            result = and_op(value, imm)
+        elif reg == 5:
+            result = sub_op(value, imm)
+        elif reg == 6:
+            result = xor_op(value, imm)
+        else:
+            return
+
+        write_mem(addr, result)
+
     # ── LEA address calculation (no memory access) ─────────────────
 
     def _lea_address(self, mod, rm):
@@ -1003,22 +1051,39 @@ class CPU:
         # 80, 82, 83 GROUP 1 (ib)
         if opc in (0x80, 0x82):
             mod, reg, rm = self._decode_modrm()
-            imm = self._fetchb()
-            if imm & 0x80: imm |= 0xFF00
-            self._exec_modrm_arith(mod, rm, reg, imm, is_word=False)
+            if mod == 3:
+                imm = self._fetchb()
+                self._exec_modrm_arith(mod, rm, reg, imm, is_word=False)
+            else:
+                addr = self._ea(mod, rm)
+                imm = self._fetchb()
+                self._exec_group1_mem_arith(addr, reg, imm, is_word=False)
             return
         if opc == 0x83:
             mod, reg, rm = self._decode_modrm()
-            imm = self._fetchb()
-            if imm & 0x80: imm |= 0xFF00
-            self._exec_modrm_arith(mod, rm, reg, imm, is_word=True)
+            if mod == 3:
+                imm = self._fetchb()
+                if imm & 0x80:
+                    imm |= 0xFF00
+                self._exec_modrm_arith(mod, rm, reg, imm, is_word=True)
+            else:
+                addr = self._ea(mod, rm)
+                imm = self._fetchb()
+                if imm & 0x80:
+                    imm |= 0xFF00
+                self._exec_group1_mem_arith(addr, reg, imm, is_word=True)
             return
 
         # 81 GROUP 1 (iw)
         if opc == 0x81:
             mod, reg, rm = self._decode_modrm()
-            imm = self._fetchw()
-            self._exec_modrm_arith(mod, rm, reg, imm, is_word=True)
+            if mod == 3:
+                imm = self._fetchw()
+                self._exec_modrm_arith(mod, rm, reg, imm, is_word=True)
+            else:
+                addr = self._ea(mod, rm)
+                imm = self._fetchw()
+                self._exec_group1_mem_arith(addr, reg, imm, is_word=True)
             return
 
         # 84 TEST AL, r/m8
@@ -1368,6 +1433,13 @@ class CPU:
             self._set_reg16(opc - 0xB8, self._fetchw())
             return
 
+        # C2 RET imm16
+        if opc == 0xC2:
+            extra = self._fetchw()
+            self.ip = self._pop()
+            self.sp = (self.sp + extra) & 0xFFFF
+            return
+
         # C3 RET
         if opc == 0xC3:
             self.ip = self._pop()
@@ -1400,28 +1472,24 @@ class CPU:
 
         # C6 MOV r/m8, imm8
         if opc == 0xC6:
-            modrm = self._fetchb()
-            mod = (modrm >> 6) & 3
-            rm = modrm & 7
-            imm = self._fetchb()
+            mod, reg, rm = self._decode_modrm()
             if mod == 3:
+                imm = self._fetchb()
                 self._set_reg8_modrm(rm, imm)
             else:
                 ea = self._ea(mod, rm)
-                self._writeb(ea, imm)
+                self._writeb(ea, self._fetchb())
             return
 
         # C7 MOV r/m16, imm16
         if opc == 0xC7:
-            modrm = self._fetchb()
-            mod = (modrm >> 6) & 3
-            rm = modrm & 7
-            imm = self._fetchw()
+            mod, reg, rm = self._decode_modrm()
             if mod == 3:
+                imm = self._fetchw()
                 self._set_reg16(rm, imm)
             else:
                 ea = self._ea(mod, rm)
-                self._writew(ea, imm)
+                self._writew(ea, self._fetchw())
             return
 
         # C8 ENTER imm16, imm8
@@ -1450,11 +1518,15 @@ class CPU:
             self.cs = self._pop()
             return
 
-        # CA RETF imm
+        # CA RETF imm16
+        # Fetch the immediate BEFORE popping CS:IP; otherwise _fetchw() would
+        # read from the return target (the just-restored CS:IP) instead of the
+        # instruction stream, corrupting both SP and the resumed IP.
         if opc == 0xCA:
+            extra = self._fetchw()
             self.ip = self._pop()
             self.cs = self._pop()
-            self.sp = (self.sp + self._fetchw()) & 0xFFFF
+            self.sp = (self.sp + extra) & 0xFFFF
             return
 
         # CC INT3

@@ -424,3 +424,158 @@ class TestFAT12EdgeCases:
             assert entry is not None, f"Could not find {name}"
             data = fat.read_file(entry.first_cluster, entry.size)
             assert data == f'content{i}'.encode()
+
+
+# ── DOS 1.x boot-sector BPB fallback tests ─────────────────────────────
+#
+# Real DOS 1.x boot sectors (e.g. SCP-86-DOS / "DOS 1.25" reference disk)
+# store only the late BPB fields at offsets 19-27 (total_sectors, media,
+# sectors_per_fat, sectors_per_track, heads) and leave the early fields at
+# offsets 11-18 (bytes_per_sector, reserved_sectors, num_fats, root_entries)
+# either zero-filled or filled with garbage.  The standard DOS 2+ BPB parse
+# rejects such a boot sector; the FAT12 parser must fall back to the
+# media-descriptor / disk-size geometry lookup instead.
+
+_DOS125_IMAGE_PATH = '/home/kirill/DOS_Source/v11source/dos125.img'
+
+
+def corrupt_bpb_like_dos125(disk_bytes):
+    """Corrupt the early BPB fields of an in-memory floppy image to mimic
+    the dos125.img layout: bytes_per_sector=2880, reserved=0xF001, num_fats=9,
+    root_entries=0, while leaving spc=1 and the late fields (offsets 19-27)
+    intact.  This forces _bpb_valid() to return False.  Returns a new copy.
+    """
+    img = bytearray(disk_bytes)
+    img[11:13] = (2880).to_bytes(2, 'little')      # bogus bytes_per_sector
+    # offset 13: spc stays at 1 (valid)
+    img[14:16] = (0xF001).to_bytes(2, 'little')     # bogus reserved_sectors (01 F0)
+    img[16]   = 9                                  # bogus num_fats (=9)
+    img[17:19] = (0).to_bytes(2, 'little')          # bogus root_entries (=0)
+    # Offsets 19-27 remain at standard 1.44MB values written by build_floppy().
+    return img
+
+
+class TestFAT12Dos1xFallback:
+    """Tests for the DOS 1.x media-descriptor fallback path in _parse_bpb()."""
+
+    def test_corrupt_bpb_falls_back_with_correct_geometry(self):
+        img = corrupt_bpb_like_dos125(build_floppy())
+        fat = FAT12(FakeDisk(img))
+        fat.mount()
+        assert fat.dos_variant == 'dos1x-fallback'
+        # Late fields are read from the boot sector (still valid).
+        # Early fields are recovered from the geometry lookup table.
+        assert fat.bytes_per_sector == 512   # recovered (was 2880)
+        assert fat.sectors_per_cluster == 1
+        assert fat.reserved_sectors == 1      # recovered (was 61441)
+        assert fat.num_fats == 2             # recovered (was 9)
+        assert fat.root_entries == 224       # recovered (was 0)
+        assert fat.total_sectors == 2880
+        assert fat.sectors_per_fat == 9
+        assert fat.sectors_per_track == 18
+        assert fat.heads == 2
+        assert fat.media == 0xF0
+        # Region boundaries match a standard 1.44MB floppy.
+        assert fat.fat_start == 1
+        assert fat.fat_end == 10
+        assert fat.root_start == 19
+        assert fat.root_sectors == 14
+        assert fat.data_start == 33
+
+    def test_zeroed_bpb_recovers_via_disk_size(self):
+        # Zero out *all* BPB fields (offsets 11-35), keep 0x55AA sig.
+        img = bytearray(build_floppy())
+        for i in range(11, 36):
+            img[i] = 0
+        fat = FAT12(FakeDisk(img))
+        fat.mount()
+        # total_sectors_16=0 → fallback uses disk size (2880 sectors).
+        assert fat.dos_variant == 'dos1x-fallback'
+        assert fat.total_sectors == 2880
+        assert fat.bytes_per_sector == 512
+        assert fat.media == 0xF0
+        assert fat.reserved_sectors == 1
+        assert fat.num_fats == 2
+        assert fat.root_entries == 224
+        assert fat.sectors_per_fat >= 1
+
+    def test_info_reports_variant_and_label(self):
+        img = corrupt_bpb_like_dos125(build_floppy())
+        fat = FAT12(FakeDisk(img))
+        fat.mount()
+        info = fat.info()
+        assert info['dos_variant'] == 'dos1x-fallback'
+        assert '1.44MB' in info['geom_label']
+
+    def test_file_readable_after_fallback(self):
+        content = b'Hello through the DOS 1.x fallback!'
+        img = corrupt_bpb_like_dos125(build_floppy({'HELLO.TXT': content}))
+        fat = FAT12(FakeDisk(img))
+        fat.mount()
+        entry = fat.find_file('HELLO.TXT')
+        assert entry is not None
+        assert entry.first_cluster == 2
+        chain = fat.follow_chain(entry.first_cluster)
+        assert chain == [2]    # 33 bytes fits one cluster
+        data = fat.read_file(entry.first_cluster, entry.size)
+        assert data == content
+
+    def test_multi_cluster_file_after_fallback(self):
+        content = b'X' * 2000     # 4 clusters
+        img = corrupt_bpb_like_dos125(build_floppy({'BIG.BIN': content}))
+        fat = FAT12(FakeDisk(img))
+        fat.mount()
+        entry = fat.find_file('BIG.BIN')
+        # FAT chain for 2000B / 512 bps / 1 spc = 4 clusters.
+        chain = fat.follow_chain(entry.first_cluster)
+        assert len(chain) == 4
+        data = fat.read_file(entry.first_cluster, entry.size)
+        assert data == content
+
+    def test_missing_signature_still_raises_for_dos1x(self):
+        # Boot sector with both: corrupt BPB and broken signature.
+        # Signature check happens before the fallback, so we must raise.
+        img = bytearray(build_floppy())
+        img[510] = 0x00
+        img[511] = 0x00
+        fat = FAT12(FakeDisk(img))
+        with pytest.raises(FAT12Error):
+            fat.mount()
+
+    def test_dos2plus_variant_for_valid_bpb(self):
+        # Sanity: a standard BPB should NOT trigger the fallback path.
+        fat = FAT12(FakeDisk(build_floppy()))
+        fat.mount()
+        assert fat.dos_variant == 'dos2plus'
+        info = fat.info()
+        assert info['dos_variant'] == 'dos2plus'
+
+    @pytest.mark.skipif(not os.path.exists(_DOS125_IMAGE_PATH),
+                        reason=f"no real DOS 1.25 image at {_DOS125_IMAGE_PATH}")
+    def test_real_dos125_image_mounts(self):
+        # Mount the actual SCP-86-DOS 1.25 reference image.
+        raw = open(_DOS125_IMAGE_PATH, 'rb').read()
+        raw = raw + b'\x00' * (1474560 - len(raw))   # pad to 1.44MB
+        disk = FakeDisk(bytearray(raw))
+        fat = FAT12(disk)
+        fat.mount()
+        info = fat.info()
+        assert info['dos_variant'] == 'dos1x-fallback'
+        assert '1.44MB' in info['geom_label']
+        assert info['sector_size'] == 512
+        assert info['total_sectors'] == 2880
+        assert info['root_entries'] == 224
+        # Standard DOS 1.25 system files should be present.
+        names = {e.full_name for e in fat.list_root()}
+        assert 'IO.SYS' in names
+        assert 'MSDOS.SYS' in names
+        assert 'COMMAND.COM' in names
+        # Read back IO.SYS chain.
+        io = fat.find_file('IO.SYS')
+        assert io is not None
+        assert io.size == 1920
+        chain = fat.follow_chain(io.first_cluster)
+        assert chain == [2, 3, 4, 5]
+        data = fat.read_file(io.first_cluster, io.size)
+        assert len(data) == 1920
+

@@ -356,13 +356,31 @@ class Emulator:
         self.cpu.if_flag = False
         self.cpu._push(self.cpu.cs)
         self.cpu._push(self.cpu.ip)
-        # Call BIOS handler directly
-        self.cpu.int_no_return = False
-        self.bios.handle_interrupt(self.cpu, vector)
+        self._dispatch_hardware_interrupt(vector)
         # Pop IP, CS, FLAGS (return to interrupted code)
         if not self.cpu.int_no_return:
             self._finish_interrupt_return(saved_flags)
         return True
+
+    def _dispatch_hardware_interrupt(self, vector):
+        """Dispatch a hardware IRQ.
+
+        If DOS has replaced the IVT entry, transfer control to that handler and
+        let its IRET consume the IRQ frame. Otherwise, use the built-in BIOS
+        handler for the original BIOS stub-backed vectors.
+        """
+        ip = self.mem.read_word(vector * 4)
+        cs = self.mem.read_word(vector * 4 + 2)
+        bios_stub = self.bios.ivt_stubs.get(vector)
+
+        self.cpu.int_no_return = False
+        if bios_stub and (cs, ip) != bios_stub and (ip, cs) != (0, 0):
+            self.cpu.cs = cs
+            self.cpu.ip = ip
+            self.cpu.int_no_return = True
+            return
+
+        self.bios.handle_interrupt(self.cpu, vector)
 
     def _finish_interrupt_return(self, saved_flags):
         """Restore CS:IP and merge handler result flags with saved control flags."""

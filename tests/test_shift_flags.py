@@ -206,6 +206,75 @@ class TestLahfSahf:
             f"SAHF after LAHF must restore flags; got 0x{cpu.flags&0xFF:02X}"
 
 
+class TestRepStringCxZero:
+    """REP/REPNE/REPE string ops with CX=0 must be no-ops.
+
+    Regression for a DOS-3.3 bug: REPE CMPSB ran ONE comparison even when
+    CX=0, wrapping CX to 0xFFFF and corrupting SI/DI.  DOS's FCB_FINDF
+    directory search used REPE CMPSB in a loop that checked "is this entry
+    a match?" with CX=0 at the loop boundary, so the spurious comparison
+    made every search return "not found".  Cross-checked against Unicorn.
+    """
+
+    def test_repe_cmpsb_cx_zero_is_noop(self):
+        cpu = make_cpu([0xF3, 0xA6])  # REPE CMPSB
+        cpu.ds = 0x0000; cpu.es = 0x0000
+        cpu.si = 0x0100; cpu.di = 0x0200; cpu.cx = 0
+        cpu.zf = True  # pretend prior match
+        # Set different bytes so we can detect a spurious comparison
+        cpu.mem.write_byte(0x0100, 0x41)  # 'A' at source
+        cpu.mem.write_byte(0x0200, 0x42)  # 'B' at dest
+        cpu.execute()
+        assert cpu.cx == 0, f"CX must stay 0; got 0x{cpu.cx:04X}"
+        assert cpu.si == 0x0100, f"SI must not change; got 0x{cpu.si:04X}"
+        assert cpu.di == 0x0200, f"DI must not change; got 0x{cpu.di:04X}"
+
+    def test_repne_scasb_cx_zero_is_noop(self):
+        cpu = make_cpu([0xF2, 0xAE])  # REPNE SCASB
+        cpu.es = 0x0000
+        cpu.di = 0x0200; cpu.cx = 0; cpu.ax = 0x0041
+        cpu.mem.write_byte(0x0200, 0x41)
+        cpu.execute()
+        assert cpu.cx == 0
+        assert cpu.di == 0x0200
+
+    def test_repe_cmpsw_cx_zero_is_noop(self):
+        cpu = make_cpu([0xF3, 0xA7])  # REPE CMPSW
+        cpu.ds = 0x0000; cpu.es = 0x0000
+        cpu.si = 0x0100; cpu.di = 0x0200; cpu.cx = 0
+        cpu.mem.write_word(0x0100, 0x1234)
+        cpu.mem.write_word(0x0200, 0x5678)
+        cpu.execute()
+        assert cpu.cx == 0
+        assert cpu.si == 0x0100
+        assert cpu.di == 0x0200
+
+    def test_rep_movsb_cx_zero_is_noop(self):
+        # MOVSB already used range(count) and was correct, but verify.
+        cpu = make_cpu([0xF3, 0xA4])  # REP MOVSB
+        cpu.ds = 0x0000; cpu.es = 0x0000
+        cpu.si = 0x0100; cpu.di = 0x0200; cpu.cx = 0
+        cpu.mem.write_byte(0x0100, 0xFF)
+        cpu.mem.write_byte(0x0200, 0x00)
+        cpu.execute()
+        assert cpu.cx == 0
+        assert cpu.si == 0x0100
+        assert cpu.di == 0x0200
+        assert cpu.mem.read_byte(0x0200) == 0x00  # dest unchanged
+
+    def test_repe_cmpsb_cx_one_runs_once(self):
+        # CX=1: exactly one comparison, CX→0, then stop.
+        cpu = make_cpu([0xF3, 0xA6])  # REPE CMPSB
+        cpu.ds = 0x0000; cpu.es = 0x0000
+        cpu.si = 0x0100; cpu.di = 0x0200; cpu.cx = 1
+        cpu.mem.write_byte(0x0100, 0x41)
+        cpu.mem.write_byte(0x0200, 0x41)  # match: ZF=1
+        cpu.execute()
+        assert cpu.cx == 0, f"CX should be 0 after 1 iteration; got 0x{cpu.cx:04X}"
+        assert cpu.si == 0x0101  # advanced by 1
+        assert cpu.di == 0x0201
+
+
 class TestXlatSegmentOverride:
     """XLAT reads AL from [seg:BX+AL]. The default seg is DS, but a
     segment-override prefix (ES:/CS:/SS:/DS:) MUST redirect the read.

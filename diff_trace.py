@@ -29,7 +29,7 @@ assert len(ram) == 0x100000
 # --- Build my CPU at the same state ---
 from main import Emulator
 # A throwaway Emulator solely for its CPU object (we override its INT path).
-emu = Emulator(boot_file=None, step_mode=False, floppy_image=None)
+emu = Emulator(boot_file=None, step_mode=False, floppy_image='DOS3_3_525/DISK01.IMG')
 emu.bios.initialize()
 # load memory from snapshot
 for a in range(0x100000):
@@ -58,10 +58,29 @@ def my_real_int(n):
     cpu.if_flag = False
     cpu._push(cpu.cs)
     cpu._push(cpu.ip)
-    target_ip = cpu.mem.read_word(n*4)
-    target_cs = cpu.mem.read_word(n*4+2)
-    cpu.cs = target_cs
-    cpu.ip = target_ip
+    # Route interrupts that have Python BIOS handlers through the BIOS,
+    # so INT 13h (disk reads), INT 10h, INT 1Ah, etc. actually do their
+    # work -- matching the real emulator's behavior.  Int 21h, 2Fh, etc.
+    # go through the IVT to DOS's own handlers.
+    handler = emu.bios.handlers.get(n)
+    if handler is not None:
+        cpu.int_no_return = False
+        handler(cpu)
+        if not cpu.int_no_return:
+            emu._finish_interrupt_return(saved_flags)
+        return
+    # No Python handler: check IVT for a stub (INT n; IRET = CD xx CF).
+    stub_ip = cpu.mem.read_word(n*4)
+    stub_cs = cpu.mem.read_word(n*4+2)
+    stub_phys = (stub_cs << 4) + stub_ip
+    b0 = cpu.mem.read_byte(stub_phys)
+    b2 = cpu.mem.read_byte(stub_phys + 2)
+    if b0 == 0xCD and b2 == 0xCF:
+        # BIOS stub: just IRET.
+        emu._finish_interrupt_return(saved_flags)
+        return
+    cpu.cs = stub_cs
+    cpu.ip = stub_ip
 cpu._do_interrupt = my_real_int
 
 # --- Build unicorn at the same state ---
@@ -97,7 +116,29 @@ def uc_snapshot():
 # We use UC_HOOK_INSN_INVALID-like behaviour: actually unicorn emits UC_ERR_EXCEPTION
 # for INT.  We catch it and emulate the INT manually, then resume.
 def do_int_in_uc(n):
-    # mimic my_real_int: push flags, cs, ip; jump to IVT[n]
+    # Route interrupts with Python BIOS handlers through the BIOS (matching
+    # my_real_int), so INT 13h disk reads, INT 10h, etc. actually work.
+    handler = emu.bios.handlers.get(n)
+    if handler is not None:
+        # Call the Python handler, which modifies CPU state + memory.
+        cpu.int_no_return = False
+        handler(cpu)
+        # Sync Unicorn regs from my CPU state.
+        for k, const in REGMAP.items():
+            uc.reg_write(const, getattr(cpu, k) & 0xFFFF)
+        uc.reg_write(UC_X86_REG_FLAGS, cpu.flags & 0xFFFF)
+        # Sync the full 1MB memory (Python handler may have written to VRAM,
+        # disk buffers, etc. via the BIOS INT 13h handler).
+        uc.mem_write(0, bytes(emu.mem.ram))
+        return
+    # No Python handler: check IVT for a stub (CD xx CF).
+    ivt = uc.mem_read(n*4, 4)
+    tip = struct.unpack('<H', ivt[0:2])[0]
+    tcs = struct.unpack('<H', ivt[2:4])[0]
+    stub_phys = (tcs << 4) + tip
+    stub_bytes = uc.mem_read(stub_phys, 3)
+    if stub_bytes[0] == 0xCD and stub_bytes[2] == 0xCF:
+        return  # BIOS stub: no-op.
     cur_flags = uc.reg_read(UC_X86_REG_FLAGS) & 0xFFFF
     sp = uc.reg_read(UC_X86_REG_SP) & 0xFFFF
     ss = uc.reg_read(UC_X86_REG_SS) & 0xFFFF
@@ -111,10 +152,6 @@ def do_int_in_uc(n):
     # clear IF, TF
     new_flags = cur_flags & ~0x0300  # clear TF (0x100) and IF (0x200)
     uc.reg_write(UC_X86_REG_FLAGS, new_flags)
-    # read IVT[n]
-    ivt = uc.mem_read(n*4, 4)
-    tip = struct.unpack('<H', ivt[0:2])[0]
-    tcs = struct.unpack('<H', ivt[2:4])[0]
     uc.reg_write(UC_X86_REG_CS, tcs)
     uc.reg_write(UC_X86_REG_IP, tip)
 
@@ -183,21 +220,37 @@ def step_uc():
     # For REP-prefixed string ops, run the WHOLE loop as one logical step
     # (matching my CPU's execute()). Stop when IP differs from start.
     if is_rep_prefixed_string_op(ram, cs_b, ip_b):
+        # For REP-prefixed string ops, Unicorn's count=1 runs ONE iteration.
+        # Loop until the REP condition is exhausted.
+        prefix_byte = ram[(cs_b<<4)+ip_b]
+        is_repne = prefix_byte == 0xF2
+        is_repe = prefix_byte == 0xF3
+        # For CMPS/SCAS, REPE stops on ZF=0, REPNE stops on ZF=1.
+        # For MOVS/STOS/LODS, REP just loops CX times.
+        opcode = ram[(cs_b<<4)+ip_b + 1]
+        is_cmps_or_scas = opcode in (0xA6, 0xA7, 0xAE, 0xAF)
         try:
-            # Step with a high count; the code hook stops us at first IP change.
-            stopped = {'done': False}
-            def _hook_stop(uc_, address, size, user_data):
-                cur_ip = uc.reg_read(UC_X86_REG_IP) & 0xFFFF
-                if cur_ip != ip_b or stopped['done']:
-                    stopped['done'] = True
-                    uc.emu_stop()
-            hook = uc.hook_add(UC_HOOK_CODE, _hook_stop)
-            uc.emu_start(addr, addr + 0x10, count=0x10000)
-            uc.hook_del(hook)
-            return (cs_b, ip_b, True, None)
+            while True:
+                cx_before = uc.reg_read(UC_X86_REG_CX) & 0xFFFF
+                if cx_before == 0:
+                    break
+                uc.emu_start(addr, addr + 16, count=1)
+                cx_after = uc.reg_read(UC_X86_REG_CX) & 0xFFFF
+                zf = uc.reg_read(UC_X86_REG_FLAGS) & 0x40
+                if cx_after == 0:
+                    break
+                if is_cmps_or_scas and is_repne and zf:
+                    break  # REPNE: stop when ZF=1
+                if is_cmps_or_scas and is_repe and not zf:
+                    break  # REPE: stop when ZF=0
+                if cx_after >= cx_before:
+                    break  # CX didn't decrease
+            # Manually advance IP past the 2-byte REP instruction.
+            uc.reg_write(UC_X86_REG_IP, (ip_b + 2) & 0xFFFF)
         except UcError as e:
             log(f"[uc] REP step error {e} at {cs_b:04X}:{ip_b:04X}")
             return None
+        return (cs_b, ip_b, True, None)
     try:
         uc.emu_start(addr, addr + 16, count=1)
     except UcError as e:

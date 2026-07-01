@@ -113,7 +113,7 @@ class DOSHarness:
         self.inject_string('\r')
         self.wait_for('A>')
 
-    def run_command(self, cmd, max_steps=5_000_000):
+    def run_command(self, cmd, max_steps=8_000_000):
         """Type a command + Enter, run until the screen shows a new A> at
         the bottom (or step limit), return the screen text."""
         self.run_steps(20000)  # settle
@@ -172,11 +172,16 @@ class TestDOSBoot:
         assert 'TestPassed' in screen
 
     def test_dir_shows_volume_header(self):
-        """DIR prints 'Volume in drive A' (internal command + FCB search)."""
+        """DIR lists files from the floppy (FCB search + REPE CMPSB).
+        With 34 files, the 'Volume in drive A' header scrolls off the
+        25-row VGA screen, so we check for file entries and the file count."""
         h = DOSHarness()
         h.boot_to_prompt()
-        screen = h.run_command('DIR')
-        assert 'Volume in drive A' in screen or 'Directory of' in screen
+        screen = h.run_command('DIR', max_steps=10_000_000)
+        # Should show file listings, not 'File not found'
+        assert 'COM' in screen or 'SYS' in screen or 'EXE' in screen
+        assert 'File not found' not in screen
+        assert 'File(s)' in screen  # '34 File(s) ... bytes free'
 
     def test_bad_command_message(self):
         """An unknown command gives 'Bad command or file name'."""

@@ -179,7 +179,7 @@ class CPU:
     # ── Memory access ──────────────────────────────────────────────
 
     def _phys(self, seg, off):
-        return ((seg << 4) + off) & 0xFFFFF
+        return ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
 
     def _readb(self, a): return self.mem.read_byte(a)
     def _readw(self, a): return self.mem.read_word(a)
@@ -1292,6 +1292,8 @@ class CPU:
         if opc == 0xA6:
             inc = 1 if not self.df else -1
             src_seg = self._default_data_seg()
+            if self._rep_prefix and self.cx == 0:
+                return  # REP with CX=0: no-op
             while True:
                 a = self._readb(self._phys(src_seg, self.si))
                 b = self._readb(self._phys(self.es, self.di))
@@ -1313,6 +1315,8 @@ class CPU:
         if opc == 0xA7:
             inc = 2 if not self.df else -2
             src_seg = self._default_data_seg()
+            if self._rep_prefix and self.cx == 0:
+                return  # REP with CX=0: no-op
             while True:
                 a = self._readw(self._phys(src_seg, self.si))
                 b = self._readw(self._phys(self.es, self.di))
@@ -1379,6 +1383,8 @@ class CPU:
         # AE SCASB — Compare AL vs [ES:DI]
         if opc == 0xAE:
             inc = 1 if not self.df else -1
+            if self._rep_prefix and self.cx == 0:
+                return  # REP with CX=0: no-op
             while True:
                 b = self._readb(self._phys(self.es, self.di))
                 self._flags_sub8(self.ax & 0xFF, b)
@@ -1397,6 +1403,8 @@ class CPU:
         # AF SCASW — Compare AX vs [ES:DI]
         if opc == 0xAF:
             inc = 2 if not self.df else -2
+            if self._rep_prefix and self.cx == 0:
+                return  # REP with CX=0: no-op
             while True:
                 b = self._readw(self._phys(self.es, self.di))
                 self._flags_sub16(self.ax, b)

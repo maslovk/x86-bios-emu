@@ -12,14 +12,16 @@ x86-bios-emu/
 ├── hardware.py        # PIT (8254), PIC (8259A), CMOS RTC (MC146818), Keyboard (i8042)
 ├── fat12.py           # FAT12 filesystem reader (BPB, FAT, directory, cluster chains)
 ├── main.py            # Emulator harness + sample boot sector + IRQ dispatch + floppy loader
-├── gtdisplay.py        # Optional GTK window display (real keyboard capture, CGA colours)
+├── gtdisplay.py       # Optional GTK window display (real keyboard capture, CGA colours)
 ├── trace_boot.py      # Boot tracer with INT 13h/INT 10h call logging
 ├── trace_dos.py       # DOS-boot INT 21h/13h/2Fh call + return-value tracer
 ├── debug_dos.py       # DOS 3.3 boot debugger (INT 13h trace + BDA dump)
-├── snapshot_capture.py# Capture full CPU+1MB memory state at OPEN-CON for diff tracing
+├── snapshot_capture.py# Capture full CPU+1MB memory state at a trigger point for diff tracing
 ├── diff_trace.py      # Differential single-step tracer: my CPU vs Unicorn (QEMU)
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
-└── tests/             # pytest suite (449 tests: CPU, BIOS, video, hardware, keyboard, FAT12, shift flags, integration)
+├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
+├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
+└── tests/             # pytest suite (477 tests: CPU, BIOS, video, hardware, keyboard, FAT12, shift/XLAT/LAHF/REPE, DOS boot)
 ```
 
 ## Components
@@ -38,9 +40,11 @@ x86-bios-emu/
   - Stack: PUSHA/POPA, ENTER/LEAVE
   - Flags: PUSHF/POPF, STC/CLD/STD/CMC, SETcc (all 16 conditions)
   - System: INT, IRET, CLI, STI, HLT, XLAT (honours segment-override prefix)
+  - LAHF/SAHF store/load flags low byte to/from AH (not AL)
   - Segment overrides: ES:/CS:/SS:/DS: prefixes (applied to next memory instruction, including XLAT)
-  - BP-based addressing defaults to SS segment (per x86 spec)
+  - BP-based addressing defaults to SS segment (per x86 spec); all offsets masked to 16 bits
   - Shift/rotate flag semantics: scalar shifts (SHL/SHR/SAR/SAL) set SF/ZF/PF from the result and clear AF; rotates (ROL/ROR/RCL/RCR) only touch CF/OF, per Intel SDM
+  - REP/REPE/REPNE string ops with CX=0 are no-ops (CMPSB/CW/SCASB/W checked before first iteration)
 
 ### BIOS ROM (`bios.py`)
 - Interrupt Vector Table (IVT) initialization
@@ -241,15 +245,29 @@ python3 main.py --floppy dos3.3.img        # Load full floppy + mount FAT12
 | 3.5"  | 720KB  | 0xF1       | 80/2/9              |
 | 3.5"  | 1.44MB | 0xF9       | 80/2/18             |
 
-**Current DOS 3.3 status:** Boots to the command interpreter.
+**Current DOS 3.3 status:** Boots to a fully interactive `A>` prompt.
 Boot-sector relocation, IO.SYS relocation, MSDOS.SYS relocation, DOS kernel
-initialisation and SYSINIT all run to completion. SYSINIT's standard-handle
-opens (CON/AUX/NUL/PRN) and the COMMAND.COM open succeed, COMMAND.COM loads
-and runs, and the emulator displays the familiar:
+initialisation, SYSINIT, and COMMAND.COM all run to completion. Internal
+commands work: `DIR` lists all 34 files with sizes and timestamps, `ECHO`
+prints text, `VER` reports the DOS version, `CLS` clears the screen, etc.
 
 ```
 Current date is Mon  1-07-1980
 Enter new date (mm-dd-yy):
+Current time is  0:00:11.25
+Enter new time:
+Microsoft(R) MS-DOS(R)  Version 3.30
+             (C)Copyright Microsoft Corp 1981-1987
+A>DIR
+ Volume in drive A has no label
+ Directory of  A:\
+
+IO       SYS    22357   7-24-87  12:00a
+COMMAND  COM    25276   7-24-87  12:00a
+...
+SYS      COM     4725   7-24-87  12:00a
+       34 File(s)      5120 bytes free
+A>
 ```
 
 To reach the interactive `A>` prompt, use the GTK display (recommended) and
@@ -265,43 +283,52 @@ The terminal `--interactive` path also works but needs a real TTY (it puts
 the terminal into cbreak mode); piped input has timing issues because the
 keys arrive before COMMAND.COM's prompt is up.
 
-This was unblocked by two CPU-emulation bugs found via a Unicorn (QEMU-based)
-differential single-step trace against an identical OPEN-CON memory snapshot
-(see `diff_trace.py`, `snapshot_capture.py`, `tests/test_shift_flags.py`):
+This was unblocked by five CPU-emulation bugs found via a Unicorn (QEMU-based)
+differential single-step trace against memory snapshots captured at the
+failing boundary (see `diff_trace.py`, `snapshot_capture.py`,
+`tests/test_shift_flags.py`):
 
 1. **Scalar shift flag semantics** (`cpu.py::_do_shift`): SHL/SHR/SAR/SAL
-   (D0-D3, reg 4/5/6/7) were only updating CF and OF, leaving SF/ZF/PF --
-   and in the case of SHL-by-1 the parity flag specifically -- stale from
-   the prior instruction. DOS's `MOV BL,AH; SHL BX,1; ...` after `XOR BH,BH`
-   read the wrong PF/ZF and mis-dispatched the open. Fixed to set SF/ZF/PF
-   (and clear AF) from the result, gated on count != 0; rotates left all
-   arithmetic flags alone per the Intel SDM.
-
-2. **XLAT segment-override prefix** (`cpu.py`, opcode 0xD7): XLAT was
-   hard-coded to read from `DS:BX+AL` and ignored the segment-override
-   prefix. A `CS: XLAT` (0x2E 0xD7) at `023E:5532` -- which looks up a byte
-   in DOS's country-info table -- was reading from `DS:BX+AL` instead of
-   `CS:BX+AL`, returning the wrong byte and corrupting every subsequent
-   device/file open. Fixed to use `_default_data_seg()`.
+   were only updating CF/OF, leaving SF/ZF/PF stale. DOS's `SHL BX,1` after
+   `XOR BH,BH` read the wrong PF and mis-dispatched every device open.
+2. **XLAT segment-override prefix** (`cpu.py`, 0xD7): `CS: XLAT` was reading
+   from `DS:BX+AL` instead of `CS:BX+AL`, corrupting DOS's country-info
+   table lookup.
+3. **LAHF/SAHF AH/AL swap** (`cpu.py`, 0x9E/0x9F): LAHF stored flags into
+   AL instead of AH, and SAHF read from AL instead of AH. COMMAND.COM's
+   internal command parser uses LAHF for string comparison, so every
+   internal command returned "Bad command or file name".
+4. **Physical address 16-bit wrap** (`cpu.py::_phys`): `[SI+disp8]` addressing
+   with a negative displacement (e.g. SI=0x005C + disp=0xFFFF) computed
+   `0x1005B` without wrapping to 16 bits, reading from the wrong physical
+   address. DIR printed its header but could not find any files.
+5. **REPE CMPSB/CMPSW/SCASB/SCASW with CX=0** (`cpu.py`, 0xA6-A7/AE-AF):
+   the `while True` loop ran one comparison BEFORE checking CX=0, wrapping
+   CX to 0xFFFF and corrupting SI/DI. DOS's FCB directory search used REPE
+   CMPSB at a loop boundary where CX was 0, so every directory search
+   returned "File not found".
 
 The differential trace now runs 20,000+ instructions with zero divergence
-between my CPU and Unicorn across the entire OPEN-CON local-qualify path.
+between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 
 ## Testing
 
 ```bash
-python3 -m pytest -q              # full suite (449 tests)
-python3 -m pytest tests/test_cpu.py -q
-python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT regression (10 tests)
-python3 -m pytest tests/test_bios.py -q
-python3 -m pytest tests/test_fat12.py -q
+python3 -m pytest -q                    # fast tests only (472 tests, ~6s)
+python3 -m pytest -q -m slow            # DOS boot integration tests (5 tests, ~13s)
+python3 -m pytest -q -m "not slow"      # same as default (skip slow)
+python3 -m pytest -q                    # all 477 tests
+python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (20 tests)
+python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```
 
 Coverage: CPU opcode dispatch and ModR/M decode (`test_cpu.py`, `test_cpu_gaps.py`),
-shift-flag and XLAT segment-override semantics (`test_shift_flags.py`), BIOS
+shift-flag and XLAT segment-override semantics (`test_shift_flags.py`), LAHF/SAHF
+correctness and REP-string CX=0 no-op behavior (`test_shift_flags.py`), BIOS
 interrupt handlers (`test_bios.py`), FAT12 BPB/cluster-chain parsing
 (`test_fat12.py`), hardware devices (`test_hardware.py`, `test_keyboard.py`),
-video (`test_video.py`), and end-to-end boot (`test_main.py`).
+video rendering + scroll sync (`test_video.py`), end-to-end boot (`test_main.py`),
+and real MS-DOS 3.3 boot + command execution (`test_dos_boot.py`, marked `slow`).
 
 ## Debugging & Tracing
 
@@ -312,13 +339,17 @@ reference CPU (Unicorn / QEMU's TCG), single-steps them in lockstep, and reports
 the first instruction where register/flag state diverges.
 
 ```bash
-python3 snapshot_capture.py    # boots DOS, dumps 1MB + regs at OPEN-CON
+python3 snapshot_capture.py    # boots DOS, dumps 1MB + regs at a trigger point
 python3 diff_trace.py          # my CPU vs Unicorn from that snapshot
 ```
 
 `diff_trace.py` requires `unicorn` and `capstone` (both pip-installable); it
 also requires `snapshot_capture.py` to have been run first to produce
-`snapshot.bin` + `snapshot.regs`.
+`snapshot.bin` + `snapshot.regs`. The tracer routes INT 13h/10h/1Ah through
+the Python BIOS handlers (so disk reads actually work), properly handles
+REPE vs REPNE ZF conditions in Unicorn's REP loops, and propagates
+undefined-flag state through flag-preserving instructions to avoid false
+positives.
 
 Diagnostic probes (one-shot, kept for future investigations):
 - `trace_boot.py` — boot tracer with INT 13h/INT 10h call logging
@@ -328,6 +359,14 @@ Diagnostic probes (one-shot, kept for future investigations):
 - `probe_ivt.py` / `probe_chain.py` / `probe_devchain.py` / `probe_devnames.py` /
   `probe_step.py` — IVT dumps, device-driver chain walker, single-step INT-handler
   tracers
+
+Smoke tests (require an X display):
+- `check_gtk_smoke.py` — boots the sample boot sector under `--gtk`, grabs pixels
+  from the DrawingArea, and verifies the POST banner was rendered
+- `check_gtk_keys.py` — synthesises GDK key-press events and verifies the correct
+  ASCII bytes (including 0x0D for Enter) reach the keyboard controller
+- `check_interactive.py` — spawns the emulator in a pty, waits for the DATE prompt,
+  types a date, and checks for the `A>` prompt
 
 The differential methodology is portable: to chase a new corruption, capture the
 state at the failing boundary with `snapshot_capture.py` (edit its trigger to
@@ -339,11 +378,12 @@ instruction-emulation divergence against a trusted reference.
 - No protected mode support
 - No DMA emulation
 - Single floppy disk only (FAT12, auto-detects size)
-- FAT12 read-only (no write support)
+- FAT12 read-only (no write support) — `COPY`, `FORMAT`, `DISKCOPY`, `SYS` will fail
+- DOS external commands that need disk writes (FORMAT, DISKCOPY, FDISK, SYS, RECOVER) don't work
 - Step mode mnemonics are approximate (operand decoding is simplified)
 - PIT timing is instruction-count-based (not real-time), ~500 insns per PIT tick
 - CMOS RTC syncs with host time (no independent battery-backed clock)
-- DOS DATE/TIME prompts require `--interactive` with timed input to reach the `A>` prompt
+- DOS DATE/TIME prompts require `--gtk` or `--interactive` (cbreak mode) to type input
 - Undefined x86 flag bits (AF after INC, MUL/IMUL SF/ZF/PF) may differ from real hardware — the differential tracer masks these out since DOS never branches on them
 
 ## Extending

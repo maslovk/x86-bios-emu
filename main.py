@@ -220,8 +220,8 @@ class Emulator:
     """Main emulator loop."""
 
     def __init__(self, boot_file=None, step_mode=False, interactive=False,
-                 enable_hardware=True, floppy_image=None, gtk=False,
-                 gtk_font_size=18, persist=False):
+                 enable_hardware=True, floppy_image=None, floppy_b=None,
+                 gtk=False, gtk_font_size=18, persist=False):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -250,6 +250,8 @@ class Emulator:
         self.boot_file = boot_file
         self.interactive = interactive or gtk   # --gtk implies interactive
         self.enable_hardware = enable_hardware
+        # Second floppy drive (B:); populated by _load_floppy_b() below.
+        self.disk_b = None
 
         # GTK display (optional).  When enabled, it takes over rendering and
         # keyboard input: the emulator loop pumps Gtk events between
@@ -277,6 +279,8 @@ class Emulator:
         self.persist = persist
         if floppy_image:
             self._load_floppy(floppy_image)
+        if floppy_b:
+            self._load_floppy_b(floppy_b)
 
         # Write BIOS ROM string
         bios_str = b"SIMPLE BIOS"
@@ -358,6 +362,31 @@ class Emulator:
         except FAT12Error as e:
             print(f"[WARN] FAT12 mount failed: {e}", file=sys.stderr)
             self.fat = None
+
+    def _load_floppy_b(self, path: str):
+        """Load the second-drive (B:) floppy image into a fresh Disk.
+
+        The BIOS already references ``self.disk_b``; we create it here and
+        point the BIOS at it so INT 13h DL=01 dispatches to drive B.
+        """
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+        except FileNotFoundError:
+            print(f"[ERROR] Floppy B image not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        self.disk_b = Disk()
+        self.bios.disk_b = self.disk_b
+        media_byte = data[0x15] if len(data) > 0x15 else 0xF9
+        actual_sectors = max(len(data) // 512, 1)
+        padded = data + b'\x00' * (max(0, 2880 - len(data) // 512) * 512)
+        for i in range(min(2880, len(padded) // 512)):
+            buf = bytearray(512)
+            buf[:512] = padded[i * 512:(i + 1) * 512]
+            self.disk_b.write_sector(i, buf)
+        self.disk_b.media_type = media_byte
+        print(f"  Floppy B: {len(data)//1024}KB, {actual_sectors} sectors, "
+              f"media=0x{media_byte:02X}", file=sys.stderr)
 
     def _check_and_dispatch_irq(self):
         """Check for pending IRQs and dispatch highest priority one.
@@ -691,6 +720,8 @@ def main():
                         help='Disable COM1 serial output')
     parser.add_argument('--floppy', '-f', metavar='IMG',
                         help='Load floppy image (FAT12, 1.44MB)')
+    parser.add_argument('--floppy-b', metavar='IMG',
+                        help='Load a second floppy image as drive B:')
     parser.add_argument('--gtk', '-g', action='store_true',
                         help='Use a GTK window for display + keyboard input '
                              '(replaces the terminal box; sidesteps cbreak/')
@@ -719,6 +750,7 @@ def main():
 
     emu = Emulator(boot_file=args.boot, step_mode=args.step,
                    interactive=args.interactive, floppy_image=args.floppy,
+                   floppy_b=args.floppy_b,
                    gtk=args.gtk, gtk_font_size=args.gtk_font_size,
                    persist=args.persist)
     emu.run()

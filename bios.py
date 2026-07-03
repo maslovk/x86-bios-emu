@@ -12,11 +12,12 @@ import sys
 class BIOS:
     """Minimal BIOS ROM implementation."""
 
-    def __init__(self, memory, video, keyboard, disk, pit=None, pic=None, cmos=None, kbd_ctrl=None):
+    def __init__(self, memory, video, keyboard, disk, pit=None, pic=None, cmos=None, kbd_ctrl=None, disk_b=None):
         self.mem = memory
         self.video = video
         self.kbd = keyboard
-        self.disk = disk
+        self.disk = disk          # drive 0 (A:)
+        self.disk_b = disk_b      # drive 1 (B:), or None
         self.pit = pit
         self.pic = pic
         self.cmos = cmos
@@ -440,7 +441,10 @@ class BIOS:
         # Bit 0: 1 = math coprocessor
         # Our config: 1 floppy, color VGA, no math, no BASIC
         # = (01 << 10) | (1 << 4) = 0x0400 | 0x0010 = 0x0410
+        # With a second drive present, set bits 6-7 = 01 (two floppies).
         cpu.ax = 0x0410
+        if self.disk_b is not None:
+            cpu.ax |= 0x0040
         cpu.flags = (cpu.flags & ~0x40)
 
     # ── INT 12h: Memory Size ───────────────────────────────────
@@ -457,25 +461,41 @@ class BIOS:
         0xFD: (39, 1), 0xF1: (39, 1), 0xF2: (79, 1),  # 360KB / 720KB / 2.88MB
     }
 
-    def _disk_geometry(self):
-        """Return (sectors_per_track, max_cyl, max_head) for the loaded disk."""
-        media = getattr(self.disk, 'media_type', 0xF9)
+    def _disk_for(self, dl):
+        """Return the Disk for drive number ``dl`` (0=A, 1=B), or None."""
+        if dl == 0x00:
+            return self.disk
+        if dl == 0x01 and self.disk_b is not None:
+            return self.disk_b
+        return None
+
+    @property
+    def _num_drives(self):
+        return 2 if self.disk_b is not None else 1
+
+    def _disk_geometry(self, disk=None):
+        """Return (sectors_per_track, max_cyl, max_head) for the given disk."""
+        if disk is None:
+            disk = self.disk
+        media = getattr(disk, 'media_type', 0xF9)
         spt = self._SPT_BY_MEDIA.get(media, 18)
         max_cyl, max_head = self._GEO_BY_MEDIA.get(media, (79, 1))
         return spt, max_cyl, max_head
 
-    def _chs_to_lba(self, cpu):
+    def _chs_to_lba(self, cpu, disk=None):
         """Decode INT 13h CHS registers, validate, return (lba, count).
 
         AL=sector count, CL[0:6]=sector, CL[6:8]+CH=cylinder, DH=head.
         Returns None when the request is out of range (caller reflects
         AH=04h, CF=1).  Number of heads is max_head+1 (2 for these floppies).
         """
+        if disk is None:
+            disk = self.disk
         count = cpu.al
         sector = cpu.cl & 0x3F
         head = (cpu.dx >> 8) & 0xFF
         cyl = cpu.ch | ((cpu.cl & 0xC0) << 2)
-        spt, max_cyl, max_head = self._disk_geometry()
+        spt, max_cyl, max_head = self._disk_geometry(disk)
         nheads = max_head + 1
         if (count == 0 or sector == 0 or sector > spt
                 or head > max_head or cyl > max_cyl):
@@ -485,12 +505,22 @@ class BIOS:
 
     def _int13h(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
+        dl = cpu.dl & 0x7F                  # floppy drive select (strip HD bit)
+        disk = self._disk_for(dl)           # None for an absent B: / hard disk
 
         if ah == 0x00:  # Reset disk
-            cpu.ax = 0
-            cpu.flags &= ~0x01
+            if disk is None:
+                cpu.ah = 0x01
+                cpu.flags |= 0x01
+            else:
+                cpu.ax = 0
+                cpu.flags &= ~0x01
         elif ah == 0x02:  # Read sectors (CHS)
-            res = self._chs_to_lba(cpu)
+            if disk is None:
+                cpu.ah = 0x01
+                cpu.flags |= 0x01
+                return
+            res = self._chs_to_lba(cpu, disk)
             if res is None:
                 cpu.ax = 0x0400
                 cpu.flags |= 0x01
@@ -501,7 +531,7 @@ class BIOS:
             ok = True
             for s in range(sectors):
                 buf = bytearray(512)
-                if not self.disk.read_sector(lba + s, buf):
+                if not disk.read_sector(lba + s, buf):
                     ok = False
                     break
                 # Write each sector immediately to ES:BX + s*512, wrapping
@@ -516,7 +546,11 @@ class BIOS:
             cpu.al = sectors
             cpu.flags &= ~0x01
         elif ah == 0x03:  # Write sectors (CHS)
-            res = self._chs_to_lba(cpu)
+            if disk is None:
+                cpu.ah = 0x01
+                cpu.flags |= 0x01
+                return
+            res = self._chs_to_lba(cpu, disk)
             if res is None:
                 cpu.ax = 0x0400
                 cpu.flags |= 0x01
@@ -531,7 +565,7 @@ class BIOS:
                 # wrapping the offset modulo 64K, then write it to disk.
                 for i in range(512):
                     buf[i] = self.mem.read_byte((es << 4) + ((bx + s * 512 + i) & 0xFFFF))
-                if not self.disk.write_sector(lba + s, buf):
+                if not disk.write_sector(lba + s, buf):
                     ok = False
                     break
             if not ok:
@@ -541,8 +575,67 @@ class BIOS:
             cpu.ah = 0x00
             cpu.al = sectors
             cpu.flags &= ~0x01
+        elif ah == 0x04:  # Verify sectors (CHS)
+            if disk is None:
+                cpu.ah = 0x01
+                cpu.flags |= 0x01
+                return
+            res = self._chs_to_lba(cpu, disk)
+            if res is None:
+                cpu.ax = 0x0400
+                cpu.flags |= 0x01
+                return
+            lba, sectors = res
+            ok = True
+            for s in range(sectors):
+                buf = bytearray(512)
+                if not disk.read_sector(lba + s, buf):
+                    ok = False
+                    break
+            if not ok:
+                cpu.ax = 0x0004
+                cpu.flags |= 0x01
+                return
+            cpu.ah = 0x00
+            cpu.al = sectors
+            cpu.flags &= ~0x01
+        elif ah == 0x05:  # Format track
+            # ES:BX -> address-field table, 4 bytes/sector: C,H,R,N.
+            # Zero-fill each addressed sector so a fresh FORMAT victim is
+            # actually blank on the host side (FORMAT then SYS rely on this).
+            if disk is None:
+                cpu.ah = 0x01
+                cpu.flags |= 0x01
+                return
+            count = cpu.al
+            spt, max_cyl, max_head = self._disk_geometry(disk)
+            nheads = max_head + 1
+            es, bx = cpu.es, cpu.bx
+            zeros = bytearray(512)
+            ok = True
+            for i in range(count):
+                c = self.mem.read_byte((es << 4) + bx + i * 4 + 0)
+                h = self.mem.read_byte((es << 4) + bx + i * 4 + 1)
+                r = self.mem.read_byte((es << 4) + bx + i * 4 + 2)
+                if r == 0 or r > spt or h > max_head or c > max_cyl:
+                    ok = False
+                    break
+                lba = (c * nheads + h) * spt + (r - 1)
+                disk.write_sector(lba, zeros)
+            if not ok:
+                cpu.ax = 0x0400
+                cpu.flags |= 0x01
+                return
+            cpu.ah = 0x00
+            cpu.al = count
+            cpu.flags &= ~0x01
         elif ah == 0x08:  # Get disk params
-            media = self.disk.media_type if hasattr(self.disk, 'media_type') else 0xF9
+            # DL=drive to query (floppy 0/1); hard disk (0x80+) unsupported.
+            if cpu.dl & 0x80 or disk is None:
+                cpu.ah = 0x01
+                cpu.flags |= 0x01
+                return
+            media = getattr(disk, 'media_type', 0xF9)
             if media == 0xF9:  # 1.44MB
                 max_cyl, max_head, spt = 79, 1, 18
             elif media == 0xF8:  # 1.2MB
@@ -560,55 +653,9 @@ class BIOS:
             cpu.ch = max_cyl & 0xFF
             cpu.cl = (spt & 0x3F) | ((max_cyl >> 2) & 0xC0)
             cpu.dh = max_head
-            cpu.dl = 0x01
+            cpu.dl = self._num_drives
             cpu.di = self.mem.read_word(0x1E * 4)
             cpu.es = self.mem.read_word(0x1E * 4 + 2)
-            cpu.flags &= ~0x01
-        elif ah == 0x04:  # Verify sectors (CHS)
-            res = self._chs_to_lba(cpu)
-            if res is None:
-                cpu.ax = 0x0400
-                cpu.flags |= 0x01
-                return
-            lba, sectors = res
-            ok = True
-            for s in range(sectors):
-                buf = bytearray(512)
-                if not self.disk.read_sector(lba + s, buf):
-                    ok = False
-                    break
-            if not ok:
-                cpu.ax = 0x0004
-                cpu.flags |= 0x01
-                return
-            cpu.ah = 0x00
-            cpu.al = sectors
-            cpu.flags &= ~0x01
-        elif ah == 0x05:  # Format track
-            # ES:BX -> address-field table, 4 bytes/sector: C,H,R,N.
-            # Zero-fill each addressed sector so a fresh FORMAT victim is
-            # actually blank on the host side (FORMAT then SYS rely on this).
-            count = cpu.al
-            spt, max_cyl, max_head = self._disk_geometry()
-            nheads = max_head + 1
-            es, bx = cpu.es, cpu.bx
-            zeros = bytearray(512)
-            ok = True
-            for i in range(count):
-                c = self.mem.read_byte((es << 4) + bx + i * 4 + 0)
-                h = self.mem.read_byte((es << 4) + bx + i * 4 + 1)
-                r = self.mem.read_byte((es << 4) + bx + i * 4 + 2)
-                if r == 0 or r > spt or h > max_head or c > max_cyl:
-                    ok = False
-                    break
-                lba = (c * nheads + h) * spt + (r - 1)
-                self.disk.write_sector(lba, zeros)
-            if not ok:
-                cpu.ax = 0x0400
-                cpu.flags |= 0x01
-                return
-            cpu.ah = 0x00
-            cpu.al = count
             cpu.flags &= ~0x01
         elif ah == 0x06:  # Check drive status (Compaq)
             cpu.al = 0x00  # No error
@@ -627,12 +674,13 @@ class BIOS:
             cpu.flags &= ~0x01
         elif ah == 0x15:  # Get disk type
             # AL: 1=no disk, 2=floppy w/ change-line, 3=hard disk.
-            cpu.al = 2          # our floppies report a change-line
+            cpu.al = 2 if disk is not None else 1
             cpu.flags &= ~0x01
         elif ah == 0x16:  # Media change status
-            if getattr(self.disk, 'media_changed', False):
+            if getattr(disk, 'media_changed', False) if disk else False:
                 cpu.ah = 0x06   # media changed
-                self.disk.media_changed = False
+                if disk is not None:
+                    disk.media_changed = False
             else:
                 cpu.ah = 0x00   # media not changed
             cpu.al = 0x00
@@ -654,7 +702,10 @@ class BIOS:
                 cpu.flags |= 0x01
         elif ah == 0x42:  # Extended read (LBA, DAP)
             # DL = drive, DS:SI = pointer to Disk Access Packet (16 bytes)
-            # DAP: [0]size(4), [4]reserved(2), [6]count(2), [8]buf_seg(2), [A]buf_off(2), [C]lba(4)
+            if disk is None:
+                cpu.ah = 0x01
+                cpu.flags |= 0x01
+                return
             si = cpu.si
             ds = cpu.ds
             dap_base = (ds << 4) + si
@@ -669,7 +720,7 @@ class BIOS:
             ok = True
             for s in range(count):
                 buf = bytearray(512)
-                if not self.disk.read_sector(lba + s, buf):
+                if not disk.read_sector(lba + s, buf):
                     ok = False
                     break
                 # Write each sector immediately to buf_seg:buf_off + s*512, wrapping offset modulo 64K
@@ -683,11 +734,10 @@ class BIOS:
                 cpu.ax = 0x0004  # CRC/error
                 cpu.flags |= 0x01
         elif ah == 0x43:  # Check drive type (extended disk services)
-            # Returns drive geometry in DAP-like structure
-            # DL = drive, DS:SI = pointer to parameter block
-            # For simplicity, just return success with media type info
-            media = self.disk.media_type if hasattr(self.disk, 'media_type') else 0xF9
-            spt = {0xF9: 18, 0xF8: 15, 0xF0: 15, 0xF1: 9, 0xFD: 9, 0xF2: 9}.get(media, 18)
+            if disk is None:
+                cpu.ah = 0x01
+                cpu.flags |= 0x01
+                return
             cpu.ax = 0x0001  # Success
             cpu.flags &= ~0x01
         else:

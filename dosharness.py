@@ -25,7 +25,7 @@ from main import Emulator  # noqa: E402
 # Canonical 5.25" DOS 3.3 distribution images shipped in this repo.
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DISK01 = os.path.join(REPO_ROOT, 'DOS3_3_525', 'DISK01.IMG')
-DISK02 = os.path.join(REPO_ROOT, 'DOS3_3_525', 'DOS02.IMG')
+DISK02 = os.path.join(REPO_ROOT, 'DOS3_3_525', 'DISK02.IMG')
 
 # Marker printed by errorlevel() — chosen to never appear in normal DOS
 # output.  The probe checks for it as a *standalone line* (not a
@@ -113,7 +113,8 @@ class DOSHarness:
         load_path = self._materialise(image_path)
         load_path_b = self._materialise(image_b) if image_b else None
 
-        self.emu = Emulator(boot_file=None, step_mode=False, floppy_image=load_path)
+        self.emu = Emulator(boot_file=None, step_mode=False,
+                             floppy_image=load_path, floppy_b=load_path_b)
         self.emu.bios.initialize()
         if self.emu.pic:
             self.emu.pic.initialize()
@@ -134,8 +135,8 @@ class DOSHarness:
         cpu.sp = 0x7C00
         self.emu._install_bios_interrupt_hook()
 
-        # Keep the drive-B path for later phases; the Emulator does not yet
-        # accept a second floppy (added with the disk-tool phase).
+        # Keep the drive-B path for reference; the Emulator loaded it above
+        # (drive B), wiring it into the BIOS for INT 13h DL=01 dispatch.
         self._load_path_b = load_path_b
 
         bios_ref = self.emu.bios
@@ -371,6 +372,45 @@ class DOSHarness:
         # the now-current visible screen (which may include probe text).
         output = self._transcript(self._cmd_scroll_start)
 
+        return CommandResult(
+            screen=screen,
+            output=output,
+            errorlevel=errorlevel,
+            timed_out=timed_out,
+            steps=steps,
+        )
+
+    def run_dialog(self, cmd, prompts, max_steps=8_000_000,
+                   timeout_steps=None, probe_errorlevel=True):
+        """Drive an interactive tool that prompts for input.
+
+        Types ``cmd`` + Enter, then for each ``(wait_text, response)`` in
+        ``prompts`` waits for ``wait_text`` to appear on screen and types
+        ``response``.  After the last response, waits for the prompt to
+        return.  Pre-feeding all responses up front does NOT work: DOS's line
+        editor consumes the extra keystrokes during command typing, leaving
+        the interactive prompt starved (the tool then spins on INT 16h AH=00's
+        'no key' return with IF=0).  Sequential wait-then-type avoids that.
+        """
+        self.run_steps(20000)  # settle
+        self._cmd_scroll_start = len(self._scrollback)
+        prev = self.vga_str()
+        self.inject_string(cmd + '\r')
+        timed_out = False
+        for wait_text, response in prompts:
+            self.wait_for(wait_text, max_steps=max_steps)
+            if wait_text not in self.vga_str():
+                timed_out = True
+                break
+            self.inject_string(response)
+        steps = 0
+        if not timed_out:
+            steps, timed_out = self._wait_prompt(prev, max_steps, timeout_steps)
+        screen = self.vga_str()
+        errorlevel = None
+        if not timed_out and probe_errorlevel:
+            errorlevel = self.errorlevel()
+        output = self._transcript(self._cmd_scroll_start)
         return CommandResult(
             screen=screen,
             output=output,

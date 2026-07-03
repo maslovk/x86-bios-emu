@@ -796,3 +796,63 @@ class FAT12:
         for i, b in enumerate(data):
             mem.write_byte(dest_addr + i, b)
         return data
+
+
+def make_blank_image(path, size=360 * 1024):
+    """Write a valid formatted-empty FAT12 image to ``path``.
+
+    Used as FORMAT's victim and DISKCOPY's target.  Geometry is taken from
+    the standard DOS media-descriptor table keyed on the image's total sector
+    count (so 360KB -> 0xFD 5.25", 1.2MB -> 0xF9, 1.44MB -> 0xF0).  The boot
+    sector carries a minimal BPB + 0xAA55 signature, both FAT copies are
+    initialised with the media/reserved entries (0/1) and the root directory is
+    empty.  Returns the path.
+    """
+    SECTOR = 512
+    total = size // SECTOR
+    geom = _DOS_MEDIA_GEOMETRIES.get(total)
+    if geom is None:
+        # Fall back to 1.44MB-ish defaults for unknown sizes.
+        geom = dict(bytes_per_sector=512, sectors_per_cluster=1,
+                    reserved_sectors=1, num_fats=2, root_entries=224,
+                    sectors_per_fat=max(1, (total * 3 // 2 + SECTOR - 1) // SECTOR),
+                    media=0xF0, sectors_per_track=18, heads=2)
+
+    bps = geom['bytes_per_sector']
+    spc = geom['sectors_per_cluster']
+    reserved = geom['reserved_sectors']
+    num_fats = geom['num_fats']
+    root_entries = geom['root_entries']
+    spf = geom['sectors_per_fat']
+    media = geom['media']
+    spt = geom['sectors_per_track']
+    heads = geom['heads']
+
+    img = bytearray(total * bps)
+    img[0:3] = b'\xEB\x3C\x90'               # jump
+    img[3:11] = b'BLANKF12 '                  # OEM
+    img[11:13] = bps.to_bytes(2, 'little')
+    img[13] = spc
+    img[14:16] = reserved.to_bytes(2, 'little')
+    img[16] = num_fats
+    img[17:19] = root_entries.to_bytes(2, 'little')
+    img[19:21] = total.to_bytes(2, 'little')
+    img[21] = media
+    img[22:24] = spf.to_bytes(2, 'little')
+    img[24:26] = spt.to_bytes(2, 'little')
+    img[26:28] = heads.to_bytes(2, 'little')
+    img[510:512] = b'\x55\xAA'
+
+    fat_start = reserved * bps
+    fat_bytes = bytearray(spf * bps)
+    fat_bytes[0] = media                       # entry 0: media descriptor
+    fat_bytes[1] = 0xFF                        # entry 0 high nibble / entry 1 low
+    fat_bytes[2] = 0xFF                        # entry 1 high byte (reserved EOC)
+    for copy in range(num_fats):
+        off = fat_start + copy * spf * bps
+        img[off:off + len(fat_bytes)] = fat_bytes
+    # Root directory region is left zeroed (empty).
+
+    with open(path, 'wb') as f:
+        f.write(img)
+    return path

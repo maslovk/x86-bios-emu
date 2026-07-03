@@ -33,6 +33,14 @@ class FakeCPU:
     @ah.setter
     def ah(self, v): self.ax = (self.ax & 0x00FF) | ((v & 0xFF) << 8)
     @property
+    def bl(self): return self.bx & 0xFF
+    @bl.setter
+    def bl(self, v): self.bx = (self.bx & 0xFF00) | (v & 0xFF)
+    @property
+    def bh(self): return (self.bx >> 8) & 0xFF
+    @bh.setter
+    def bh(self, v): self.bx = (self.bx & 0x00FF) | ((v & 0xFF) << 8)
+    @property
     def cl(self): return self.cx & 0xFF
     @cl.setter
     def cl(self, v): self.cx = (self.cx & 0xFF00) | (v & 0xFF)
@@ -40,6 +48,14 @@ class FakeCPU:
     def ch(self): return (self.cx >> 8) & 0xFF
     @ch.setter
     def ch(self, v): self.cx = (self.cx & 0x00FF) | ((v & 0xFF) << 8)
+    @property
+    def dl(self): return self.dx & 0xFF
+    @dl.setter
+    def dl(self, v): self.dx = (self.dx & 0xFF00) | (v & 0xFF)
+    @property
+    def dh(self): return (self.dx >> 8) & 0xFF
+    @dh.setter
+    def dh(self, v): self.dx = (self.dx & 0x00FF) | ((v & 0xFF) << 8)
 
 
 # CHS (cyl=1, head=1, sector=2) on a 1.44MB image -> LBA 55, for 2 sectors.

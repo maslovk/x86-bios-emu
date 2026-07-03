@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from dosharness import DOSHarness, DISK01  # noqa: E402
+from dosharness import DOSHarness, DISK01, DISK02  # noqa: E402
 
 _REPO_IMG_DIR = os.path.join(
     os.path.dirname(__file__), '..', '..', 'DOS3_3_525')
@@ -49,6 +49,18 @@ def dos():
 def dos_rw():
     """Fresh writable DISK01 harness (temp image copy) per test."""
     h = DOSHarness(image_path=DISK01, writable=True)
+    try:
+        h.boot_to_prompt()
+        yield h
+    finally:
+        h.cleanup()
+
+
+@pytest.fixture(scope='module')
+def dos_b():
+    """Booted harness with drive A=DISK01 and drive B=DISK02 (writable temp
+    copies), shared across one test module.  For drive-B read/COPY tests."""
+    h = DOSHarness(image_path=DISK01, image_b=DISK02, writable=True)
     try:
         h.boot_to_prompt()
         yield h

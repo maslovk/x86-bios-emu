@@ -13,7 +13,7 @@ Constraints:
    (c) make it execute the INT 2Fh instruction by reading IVT and jumping.
    We override unicorn's interrupt hook to do exactly that.
 """
-import sys, struct
+import sys, struct, os
 sys.path.insert(0, '.')
 
 from capstone import Cs, CS_ARCH_X86, CS_MODE_16
@@ -307,7 +307,7 @@ def just_executed_has_undefined_flags(ram, cs, ip_before):
     return False
 
 # Run up to N steps, comparing after each.
-N = 20000
+N = int(os.environ.get('DIFF_STEPS', '20000'))
 log(f"=== Differential trace: mine vs unicorn from OPEN-CON entry {regs['cs']:04X}:{regs['ip']:04X} ===")
 log(f"initial regs: {regs}")
 log(f"{'step':>5}  {'mine CS:IP':<14} {'unicorn CS:IP':<14}  mine_opcode  diverge?")

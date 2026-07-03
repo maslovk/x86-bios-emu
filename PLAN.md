@@ -376,7 +376,7 @@ divergences; `pytest.skip` otherwise.
 
 | Tool | Tier | Test | Status |
 |------|------|------|--------|
-| DIR/TYPE/VER/... (internal, read-only) | 1 | test_internal_basic.py | ✅ (pre-existing) |
+| DIR/TYPE/VER/... (internal, read-only) | 1 | test_internal_basic.py | ✅ Phase E (VER/VOL/CLS/ECHO/SET/PATH/DATE/TIME) |
 | COPY/DEL/REN/MD/CD/RD | 1 | test_file_io.py (core) | ✅ Phase B (wildcards in test_internal_files.py: ⬜ Phase E) |
 | Batch files | 1 | test_batch.py | ⬜ Phase E |
 | ATTRIB / LABEL | 1 | test_attrib_label.py | ⬜ Phase E |

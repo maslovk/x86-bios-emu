@@ -10,7 +10,7 @@ x86-bios-emu/
 ├── bios.py            # BIOS ROM (IVT, POST, INT 10h–2Bh)
 ├── video.py           # VGA 80x25 text + I/O ports + COM1 serial + keyboard + disk
 ├── hardware.py        # PIT (8254), PIC (8259A), CMOS RTC (MC146818), Keyboard (i8042)
-├── fat12.py           # FAT12 filesystem reader (BPB, FAT, directory, cluster chains)
+├── fat12.py           # FAT12 filesystem reader + writer (BPB, FAT, dir, chains, blank-image factory)
 ├── main.py            # Emulator harness + sample boot sector + IRQ dispatch + floppy loader
 ├── gtdisplay.py       # Optional GTK window display (real keyboard capture, CGA colours)
 ├── trace_boot.py      # Boot tracer with INT 13h/INT 10h call logging
@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (477 tests: CPU, BIOS, video, hardware, keyboard, FAT12, shift/XLAT/LAHF/REPE, DOS boot)
+└── tests/             # pytest suite (1337 fast + 26 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
 ```
 
 ## Components
@@ -33,13 +33,14 @@ x86-bios-emu/
 - Flags: CF, PF, AF, ZF, SF, TF, IF, DF, OF
 - Instruction support:
   - Data transfer: MOV (all forms), PUSH (reg/imm/memory), POP (reg/memory), XCHG, LES/LDS, MOV r/m,imm (C6/C7)
-  - Arithmetic: ADD, SUB, INC, DEC, NEG, MUL, IMUL, DIV, IDIV, AAM, AAD, SALC
+  - Arithmetic: ADD, SUB, INC, DEC, NEG, MUL, IMUL, DIV, IDIV, AAM, AAD, SALC, DAA, DAS, AAA, AAS (BCD, SDM-verified vs Unicorn)
   - Logic: AND, OR, XOR, NOT, TEST, SHL, SHR, SAR, ROL, ROR
   - Control flow: JMP (near/far), JE/JZ, JNE/JNZ, JB/JAE, JL/JGE, JBE/JA, JO/JNO, JPE/JPO, CALL, RET, RETF, LOOP, JCXZ
   - String: MOVS[BW], CMPS[BW], STOS[BW], LODS[BW], SCAS[BW] (DF-aware, REP/REPNE)
   - Stack: PUSHA/POPA, ENTER/LEAVE
-  - Flags: PUSHF/POPF, STC/CLD/STD/CMC, SETcc (all 16 conditions)
-  - System: INT, IRET, CLI, STI, HLT, XLAT (honours segment-override prefix)
+  - Flags: PUSHF/POPF, STC/CLD/STD/CMC, SETcc (all 16 conditions), LAHF/SAHF
+  - System: INT, IRET, CLI, STI, HLT, WAIT (no-op, no 8087), XLAT (honours segment-override prefix)
+  - Trap flag single-step: TF set -> INT 1 after the instruction (with the one-instruction POPF/IRET delay), enabling DEBUG -T
   - LAHF/SAHF store/load flags low byte to/from AH (not AL)
   - Segment overrides: ES:/CS:/SS:/DS: prefixes (applied to next memory instruction, including XLAT)
   - BP-based addressing defaults to SS segment (per x86 spec); all offsets masked to 16 bits
@@ -134,13 +135,14 @@ x86-bios-emu/
 - Self-test (0xAA), input port read (0xD0), command byte (0x20)
 
 ### FAT12 Filesystem (`fat12.py`)
-- Full FAT12 parser for 1.44 MB floppy images
-- BPB parsing: sector size, cluster size, FAT count, root entries
-- FAT table: 12-bit packed entries, cluster chain following
-- Root directory: 224 entries, 8.3 filename format
-- File operations: find by name, read cluster chains, load to memory
+- Full FAT12 parser for 1.44 MB / 360 KB floppy images (BPB + DOS 1.x media fallback)
+- BPB parsing: sector size, cluster size, FAT count, root entries; cluster-chain following
+- Read: find by name, read cluster chains, load to memory, read subdirectory (read_dir)
+- **Write (host side)**: write_file (first-fit cluster alloc, both FAT copies mirrored, root
+  dir entry), delete_file, set_fat_entry, free_cluster_count; make_blank_image() factory
 - Extended INT 13h (AH=42h): LBA sector reads via Disk Access Packet (DAP)
-- CLI: `--floppy image.img` loads and mounts FAT12 automatically
+- CLI: `--floppy image.img` loads and mounts FAT12 automatically; `--persist` writes
+  guest-modified sectors back to the image on clean exit
 
 ### BIOS Interrupt Handlers
 - **INT 08h**: IRQ 0 timer handler (increments BDA ticks at 0x046C, calls INT 1Ch)
@@ -186,6 +188,8 @@ python3 main.py --boot dos3.3.img --step  # Step through DOS 3.3 boot
 | `--gtk-font-size PT` | Pango font point size for `--gtk` (default 18) |
 | `--no-serial` | Disable COM1 serial port output |
 | `--floppy IMG` / `-f` | Load floppy image (FAT12, auto-detects 360KB–1.44MB) and mount filesystem |
+| `--floppy-b IMG` | Load a second floppy image as drive B: (enables `DIR B:`, `COPY B:..`, DISKCOPY/DISKCOMP) |
+| `--persist` | Write guest-modified disk sectors back to the `--floppy` image on exit (default off; never use on the shipped repo images) |
 
 The emulator runs for ~1 second, displays the VGA screen, then exits with final CPU state.
 
@@ -375,16 +379,27 @@ instruction-emulation divergence against a trusted reference.
 
 ## Limitations
 
-- No protected mode support
-- No DMA emulation
-- Single floppy disk only (FAT12, auto-detects size)
-- FAT12 read-only (no write support) — `COPY`, `FORMAT`, `DISKCOPY`, `SYS` will fail
-- DOS external commands that need disk writes (FORMAT, DISKCOPY, FDISK, SYS, RECOVER) don't work
-- Step mode mnemonics are approximate (operand decoding is simplified)
-- PIT timing is instruction-count-based (not real-time), ~500 insns per PIT tick
+- No protected mode support; no DMA emulation
+- Two floppy drives max (A: and B: via `--floppy` / `--floppy-b`); no hard disk
+  (FDISK is out of scope; it must fail gracefully)
+- FAT12 **write** is supported (guest `COPY`/`DEL`/`REN`/`MKDIR`/`FORMAT`/`DISKCOPY`/
+  `SYS` persist via INT 13h AH=03, and host-side `fat12.FAT12.write_file` can
+  inject fixtures). Use `--persist` to write the temp image back on exit.
+- `DISKCOPY`/`DISKCOMP` of a *full* 360KB disk exceed the watchdog step budget at
+  the current ~40k inst/s emulated instruction rate — xfailed until a CPU
+  performance pass (see `tests/tools/test_disk_tools.py`).
+- EDLIN insert-mode Ctrl-C (INT 23h handling) is not yet wired — EDLIN is
+  xfailed in `tests/tools/test_file_io.py`.
+- Step-mode mnemonics are approximate (operand decoding is simplified)
+- PIT timing is instruction-count-based (~500 insns per tick), not real-time
 - CMOS RTC syncs with host time (no independent battery-backed clock)
-- DOS DATE/TIME prompts require `--gtk` or `--interactive` (cbreak mode) to type input
-- Undefined x86 flag bits (AF after INC, MUL/IMUL SF/ZF/PF) may differ from real hardware — the differential tracer masks these out since DOS never branches on them
+- DOS DATE/TIME prompts accept typed input via the harness / `--interactive` / `--gtk`
+- Undefined x86 flag bits (AF after INC, MUL/IMUL SF/ZF/PF) are masked out by
+  the differential tracer — verified instruction-exact vs Unicorn on the
+  checked-in snapshot (`tests/test_diff_smoke.py`)
+
+See `PLAN.md` for the per-tool status matrix and the remaining phase work
+(Phase E full tool sweep, Phase F differential hardening).
 
 ## Extending
 

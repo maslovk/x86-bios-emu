@@ -564,27 +564,86 @@ class BIOS:
             cpu.di = self.mem.read_word(0x1E * 4)
             cpu.es = self.mem.read_word(0x1E * 4 + 2)
             cpu.flags &= ~0x01
-        elif ah == 0x04:  # Re-calibrate drive
-            cpu.ax = 0x0000
+        elif ah == 0x04:  # Verify sectors (CHS)
+            res = self._chs_to_lba(cpu)
+            if res is None:
+                cpu.ax = 0x0400
+                cpu.flags |= 0x01
+                return
+            lba, sectors = res
+            ok = True
+            for s in range(sectors):
+                buf = bytearray(512)
+                if not self.disk.read_sector(lba + s, buf):
+                    ok = False
+                    break
+            if not ok:
+                cpu.ax = 0x0004
+                cpu.flags |= 0x01
+                return
+            cpu.ah = 0x00
+            cpu.al = sectors
             cpu.flags &= ~0x01
-        elif ah == 0x05:  # Check media changed
-            cpu.al = 0x00  # Media not changed
+        elif ah == 0x05:  # Format track
+            # ES:BX -> address-field table, 4 bytes/sector: C,H,R,N.
+            # Zero-fill each addressed sector so a fresh FORMAT victim is
+            # actually blank on the host side (FORMAT then SYS rely on this).
+            count = cpu.al
+            spt, max_cyl, max_head = self._disk_geometry()
+            nheads = max_head + 1
+            es, bx = cpu.es, cpu.bx
+            zeros = bytearray(512)
+            ok = True
+            for i in range(count):
+                c = self.mem.read_byte((es << 4) + bx + i * 4 + 0)
+                h = self.mem.read_byte((es << 4) + bx + i * 4 + 1)
+                r = self.mem.read_byte((es << 4) + bx + i * 4 + 2)
+                if r == 0 or r > spt or h > max_head or c > max_cyl:
+                    ok = False
+                    break
+                lba = (c * nheads + h) * spt + (r - 1)
+                self.disk.write_sector(lba, zeros)
+            if not ok:
+                cpu.ax = 0x0400
+                cpu.flags |= 0x01
+                return
+            cpu.ah = 0x00
+            cpu.al = count
             cpu.flags &= ~0x01
         elif ah == 0x06:  # Check drive status (Compaq)
             cpu.al = 0x00  # No error
             cpu.flags &= ~0x01
         elif ah == 0x07:  # Set disk parameters (ignore)
             cpu.flags &= ~0x01
-        elif ah == 0x0D:  # Get disk type (IBM)
-            media = self.disk.media_type if hasattr(self.disk, 'media_type') else 0xF9
-            disk_type = {0xF0: 2, 0xF1: 3, 0xF8: 0, 0xF9: 3, 0xFD: 0, 0xF2: 3}.get(media, 3)
-            cpu.al = disk_type
-            cpu.flags &= ~0x01
-        elif ah == 0x0E:  # Verify sectors (no-op)
-            cpu.ax = 0x0001
-            cpu.flags &= ~0x01
-        elif ah == 0x0F:  # Format track (no-op)
+        elif ah == 0x0D:  # (IBM) Get disk type — moved to AH=15h; invalid here
+            cpu.ah = 0x01
+            cpu.al = 0x00
+            cpu.flags |= 0x01
+        elif ah == 0x0E:  # Controller RAM diagnostic (no-op)
             cpu.ax = 0x0000
+            cpu.flags &= ~0x01
+        elif ah == 0x0F:  # Write sector buffer (no-op)
+            cpu.ax = 0x0000
+            cpu.flags &= ~0x01
+        elif ah == 0x15:  # Get disk type
+            # AL: 1=no disk, 2=floppy w/ change-line, 3=hard disk.
+            cpu.al = 2          # our floppies report a change-line
+            cpu.flags &= ~0x01
+        elif ah == 0x16:  # Media change status
+            if getattr(self.disk, 'media_changed', False):
+                cpu.ah = 0x06   # media changed
+                self.disk.media_changed = False
+            else:
+                cpu.ah = 0x00   # media not changed
+            cpu.al = 0x00
+            cpu.flags &= ~0x01
+        elif ah == 0x17:  # Set disk type for format
+            cpu.ah = 0x00
+            cpu.flags &= ~0x01
+        elif ah == 0x18:  # Set media type for format -> ES:DI = param table
+            cpu.di = self.mem.read_word(0x1E * 4)
+            cpu.es = self.mem.read_word(0x1E * 4 + 2)
+            cpu.ah = 0x00
             cpu.flags &= ~0x01
         elif ah == 0x41:  # Extended INT 13h check
             if cpu.bx == 0x55AA:

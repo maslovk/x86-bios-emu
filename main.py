@@ -221,7 +221,7 @@ class Emulator:
 
     def __init__(self, boot_file=None, step_mode=False, interactive=False,
                  enable_hardware=True, floppy_image=None, gtk=False,
-                 gtk_font_size=18):
+                 gtk_font_size=18, persist=False):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -270,6 +270,11 @@ class Emulator:
         # FAT12 filesystem
         self.floppy_image = floppy_image
         self.fat = None
+        # Original (pre-padding) sector count of the loaded image, so --persist
+        # writes back exactly the image's on-disk size instead of the 1.44MB
+        # in-memory padding.
+        self._image_sectors = None
+        self.persist = persist
         if floppy_image:
             self._load_floppy(floppy_image)
 
@@ -322,6 +327,7 @@ class Emulator:
 
         # Detect image size and media type
         actual_sectors = len(data) // 512
+        self._image_sectors = actual_sectors
         media_byte = data[0x15] if len(data) > 0x15 else 0xF9
         media_names = {0xF8: '360KB (5.25")', 0xF0: '1.2MB (5.25")',
                        0xF9: '1.44MB (3.5")', 0xF1: '720KB (3.5")', 0xF2: '2.88MB (3.5")'}
@@ -625,6 +631,28 @@ class Emulator:
             # Tear down the GTK window if it was opened.
             if self.gtk and self.gtk_display is not None:
                 self.gtk_display.close()
+            self._persist_floppy()
+
+    def _persist_floppy(self):
+        """Write dirty disk sectors back to the loaded image (only if --persist).
+
+        Writes exactly ``_image_sectors`` sectors so a 360KB image stays
+        360KB on disk rather than ballooning to the 1.44MB in-memory padding.
+        """
+        if not self.persist or not self.floppy_image:
+            return
+        if not getattr(self.disk, 'dirty', False):
+            return
+        n = self._image_sectors or len(self.disk.sectors)
+        try:
+            with open(self.floppy_image, 'r+b') as f:
+                f.seek(0)
+                for i in range(n):
+                    f.write(self.disk.sectors[i])
+            print(f"[persist] wrote {n} sectors back to {self.floppy_image}",
+                  file=sys.stderr)
+        except OSError as e:
+            print(f"[persist] failed: {e}", file=sys.stderr)
 
         # Final display (terminal path only; GTK window already closed).
         if not self.gtk:
@@ -669,6 +697,10 @@ def main():
     parser.add_argument('--gtk-font-size', type=int, default=18,
                         metavar='PT',
                         help='Pango font point size for --gtk (default: 18)')
+    parser.add_argument('--persist', action='store_true',
+                        help='Write guest-modified disk sectors back to the '
+                             '--floppy image on clean exit (default: off; '
+                             'never use on the shipped repo images)')
     args = parser.parse_args()
 
     print("=" * 60, file=sys.stderr)
@@ -687,7 +719,8 @@ def main():
 
     emu = Emulator(boot_file=args.boot, step_mode=args.step,
                    interactive=args.interactive, floppy_image=args.floppy,
-                   gtk=args.gtk, gtk_font_size=args.gtk_font_size)
+                   gtk=args.gtk, gtk_font_size=args.gtk_font_size,
+                   persist=args.persist)
     emu.run()
 
 

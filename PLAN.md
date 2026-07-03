@@ -377,13 +377,13 @@ divergences; `pytest.skip` otherwise.
 | Tool | Tier | Test | Status |
 |------|------|------|--------|
 | DIR/TYPE/VER/... (internal, read-only) | 1 | test_internal_basic.py | ✅ (pre-existing) |
-| COPY/DEL/REN/MD/CD/RD | 1 | test_internal_files.py | ⬜ Phase B |
+| COPY/DEL/REN/MD/CD/RD | 1 | test_file_io.py (core) | ✅ Phase B (wildcards in test_internal_files.py: ⬜ Phase E) |
 | Batch files | 1 | test_batch.py | ⬜ Phase E |
 | ATTRIB / LABEL | 1 | test_attrib_label.py | ⬜ Phase E |
 | CHKDSK | 1 | test_chkdsk.py | ⬜ Phase E |
 | FIND/SORT/MORE/COMP/FC | 1 | test_text_tools.py | ⬜ Phase E |
 | TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ⬜ Phase E |
-| EDLIN | 1 | test_edlin.py | ⬜ Phase B/D |
+| EDLIN | 1 | test_file_io.py (xfail) | ⬜ Phase D (needs Ctrl-C) |
 | DEBUG | 1 | test_debug_tool.py | ⬜ Phase D |
 | EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ⬜ Phase E |
 | FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | ⬜ Phase C |

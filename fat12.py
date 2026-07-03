@@ -558,6 +558,231 @@ class FAT12:
         entries = self.read_root_directory()
         return [e for e in entries if not e.deleted and not e.eof]
 
+    # ── Write support (host side: tests, file injection, verification) ──
+    #
+    # These operate directly on the underlying Disk sectors, mirroring what
+    # the guest does via INT 13h, so a host-written file is visible to DOS
+    # (after a fresh mount / boot) and a guest-written file is visible to a
+    # fresh FAT12 mount.  Only the root directory is writable from the host;
+    # guest-created subdirectories can be *read* via read_dir().
+
+    @staticmethod
+    def _split_83(name: str):
+        """Split a filename into padded 8-byte base + 3-byte ext (uppercase)."""
+        name = name.upper()
+        if '.' in name:
+            base, ext = name.rsplit('.', 1)
+        else:
+            base, ext = name, ''
+        base = base[:8].ljust(8)
+        ext = ext[:3].ljust(3)
+        return base, ext
+
+    @staticmethod
+    def _names_match(raw: bytes, base: str, ext: str) -> bool:
+        """True if a 32-byte dir entry's 8.3 fields equal base/ext (padded)."""
+        nb = raw[0:8].rstrip(b' \x00').decode('ascii', errors='replace')
+        ne = raw[8:11].rstrip(b' \x00').decode('ascii', errors='replace')
+        return nb == base.rstrip() and ne == ext.rstrip()
+
+    def _read_root_bytes(self) -> bytearray:
+        b = bytearray(self.root_sectors * self.bytes_per_sector)
+        for i in range(self.root_sectors):
+            buf = bytearray(self.bytes_per_sector)
+            self.disk.read_sector(self.root_start + i, buf)
+            b[i * self.bytes_per_sector:(i + 1) * self.bytes_per_sector] = buf
+        return b
+
+    def _write_root_sector(self, root_bytes: bytearray, entry_index: int):
+        """Write back the root-region sector holding entry ``entry_index``."""
+        bps = self.bytes_per_sector
+        sec_idx = (entry_index * 32) // bps
+        buf = bytearray(bps)
+        buf[:] = root_bytes[sec_idx * bps:(sec_idx + 1) * bps]
+        self.disk.write_sector(self.root_start + sec_idx, buf)
+        self._root_entries = None  # invalidate parsed-entry cache
+
+    def _make_dir_entry(self, base: str, ext: str, first_cluster: int,
+                        size: int, attr: int = DirEntry.ATTR_ARCHIVE) -> bytes:
+        # Fixed 1980-01-01 00:00 timestamp (deterministic for tests).
+        date = ((0 << 9) | (1 << 5) | 1) & 0xFFFF   # 0x0021
+        time = 0
+        e = bytearray(32)
+        e[0:8] = base.encode('ascii', errors='replace')[:8].ljust(8)
+        e[8:11] = ext.encode('ascii', errors='replace')[:3].ljust(3)
+        e[11] = attr
+        e[14:16] = time.to_bytes(2, 'little')      # create time
+        e[16:18] = date.to_bytes(2, 'little')      # create date
+        e[18:20] = date.to_bytes(2, 'little')      # last access date
+        e[20:22] = (0).to_bytes(2, 'little')       # high cluster (FAT32)
+        e[22:24] = time.to_bytes(2, 'little')      # last mod time
+        e[24:26] = date.to_bytes(2, 'little')       # last mod date
+        e[26:28] = (first_cluster & 0xFFFF).to_bytes(2, 'little')
+        e[28:32] = (size & 0xFFFFFFFF).to_bytes(4, 'little')
+        return bytes(e)
+
+    def set_fat_entry(self, cluster: int, value: int):
+        """Write a 12-bit FAT entry and mirror it to every FAT copy on disk."""
+        fat = self._read_fat()
+        off = cluster * 3 // 2
+        if off + 1 >= len(fat):
+            raise FAT12Error(f"FAT entry {cluster} out of range")
+        if cluster % 2 == 0:
+            fat[off] = value & 0xFF
+            fat[off + 1] = (fat[off + 1] & 0xF0) | ((value >> 8) & 0x0F)
+        else:
+            fat[off] = (fat[off] & 0x0F) | ((value << 4) & 0xF0)
+            fat[off + 1] = (value >> 4) & 0xFF
+        self._flush_fat_entry(cluster)
+
+    def _flush_fat_entry(self, cluster: int):
+        """Write the one or two FAT sectors touched by ``cluster``'s entry."""
+        fat = self._read_fat()
+        bps = self.bytes_per_sector
+        off = cluster * 3 // 2
+        sectors = {off // bps, (off + 1) // bps}
+        for copy in range(self.num_fats):
+            base = self.fat_start + copy * self.sectors_per_fat
+            for s in sectors:
+                buf = bytearray(bps)
+                buf[:] = fat[s * bps:(s + 1) * bps]
+                self.disk.write_sector(base + s, buf)
+
+    def _alloc_clusters(self, n: int) -> list:
+        """First-fit allocate ``n`` free clusters, link them, return the chain."""
+        if n <= 0:
+            return []
+        chain = []
+        cluster = 2
+        while cluster < self.total_clusters + 2 and len(chain) < n:
+            if self.get_fat_entry(cluster) == self.FAT12_FREE:
+                chain.append(cluster)
+            cluster += 1
+        if len(chain) < n:
+            raise FAT12Error(
+                f"disk full: need {n} clusters, only {len(chain)} free")
+        prev = None
+        for c in chain:
+            if prev is not None:
+                self.set_fat_entry(prev, c)
+            prev = c
+        self.set_fat_entry(chain[-1], self.FAT12_EOC)
+        return chain
+
+    def _free_chain(self, chain: list):
+        for c in chain:
+            self.set_fat_entry(c, self.FAT12_FREE)
+
+    def write_file(self, name: str, data: bytes) -> int:
+        """Create or replace a root-directory file with ``data``.
+
+        Allocates clusters (first-fit), writes both FAT copies, writes the
+        data sectors, and adds/replaces a root directory entry (8.3 name,
+        ARCHIVE attribute, fixed timestamp, size).  Returns the first cluster.
+        """
+        base, ext = self._split_83(name)
+        data = bytes(data)
+        if len(data) == 0:
+            chain, first = [], 0
+        else:
+            n = (len(data) + self.cluster_size - 1) // self.cluster_size
+            chain = self._alloc_clusters(n)
+            first = chain[0]
+            for i, c in enumerate(chain):
+                chunk = data[i * self.cluster_size:(i + 1) * self.cluster_size]
+                sector = self._cluster_to_sector(c)
+                buf = bytearray(self.cluster_size)
+                buf[:len(chunk)] = chunk
+                for j in range(self.sectors_per_cluster):
+                    self.disk.write_sector(
+                        sector + j,
+                        buf[j * self.bytes_per_sector:(j + 1) * self.bytes_per_sector])
+        self._put_root_entry(base, ext, first, len(data))
+        return first
+
+    def _put_root_entry(self, base: str, ext: str, first_cluster: int,
+                        size: int, attr: int = DirEntry.ATTR_ARCHIVE):
+        """Place/replace a root dir entry; frees the prior cluster chain."""
+        root_bytes = self._read_root_bytes()
+        bps = self.bytes_per_sector
+        idx = None
+        existing = False
+        for i in range(self.root_entries):
+            raw = root_bytes[i * 32:(i + 1) * 32]
+            if raw[0] == 0x00:
+                idx = i            # first end-of-directory slot (all after free)
+                break
+            if raw[0] == 0xE5:
+                if idx is None:
+                    idx = i        # reuse a deleted slot
+                continue
+            if self._names_match(raw, base, ext):
+                existing = True
+                idx = i
+                break
+        if idx is None:
+            raise FAT12Error("root directory full")
+        if existing:
+            old_first = int.from_bytes(
+                root_bytes[idx * 32 + 26:idx * 32 + 28], 'little')
+            if old_first >= 2:
+                self._free_chain(self.follow_chain(old_first))
+            root_bytes = self._read_root_bytes()  # FAT flush may have moved ptrs
+        entry = self._make_dir_entry(base, ext, first_cluster, size, attr)
+        root_bytes[idx * 32:(idx + 1) * 32] = entry
+        self._write_root_sector(root_bytes, idx)
+
+    def delete_file(self, name: str) -> bool:
+        """Delete a root-directory file: mark entry 0xE5 and free its chain."""
+        base, ext = self._split_83(name)
+        root_bytes = self._read_root_bytes()
+        for i in range(self.root_entries):
+            raw = root_bytes[i * 32:(i + 1) * 32]
+            if raw[0] == 0x00:
+                return False       # reached end of directory; not found
+            if raw[0] == 0xE5:
+                continue
+            if self._names_match(raw, base, ext) and not (raw[11] & DirEntry.ATTR_DIRECTORY):
+                old_first = int.from_bytes(raw[26:28], 'little')
+                if old_first >= 2:
+                    self._free_chain(self.follow_chain(old_first))
+                root_bytes[i * 32] = 0xE5
+                self._write_root_sector(root_bytes, i)
+                return True
+        return False
+
+    def read_file_by_name(self, name: str):
+        """Return a file's bytes by name, or None if not found."""
+        e = self.find_file(name)
+        if e is None or e.is_dir:
+            return None
+        return self.read_file(e.first_cluster, e.size)
+
+    def read_dir(self, cluster: int) -> list:
+        """Parse a subdirectory's 32-byte entries from its cluster chain."""
+        if cluster < 2:
+            return []
+        chain = self.follow_chain(cluster)
+        data = bytearray()
+        for c in chain:
+            data.extend(self.read_cluster(c))
+        entries = []
+        for off in range(0, len(data), 32):
+            raw = data[off:off + 32]
+            entry = DirEntry(raw)
+            if entry.eof:
+                break
+            entries.append(entry)
+        return entries
+
+    def free_cluster_count(self) -> int:
+        """Number of free data clusters (for CHKDSK-style assertions)."""
+        free = 0
+        for cluster in range(2, self.total_clusters + 2):
+            if self.get_fat_entry(cluster) == self.FAT12_FREE:
+                free += 1
+        return free
+
     def load_to_memory(self, first_cluster: int, size: int, dest_addr: int, mem):
         """Read a file and write it to emulated memory.
 

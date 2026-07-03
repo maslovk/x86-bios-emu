@@ -98,6 +98,22 @@ class BIOS:
             stub_off += 4
 
     def handle_interrupt(self, cpu, n):
+        # INT 1 (single-step) and INT 3 (breakpoint) are the vectors DEBUG
+        # hooks; if the application replaced them, transfer to its handler so
+        # -T/-g-style tracing works.  Other registered vectors always use the
+        # built-in Python handler: the BIOS IVT stubs are `INT n; IRET`, so an
+        # app that hooks and *chains* to the old vector (e.g. IO.SYS's INT 13h)
+        # would recurse if we transferred, and the Python handler is what boots
+        # DOS correctly.
+        if n in (0x01, 0x03):
+            ip = self.mem.read_word(n * 4)
+            cs = self.mem.read_word(n * 4 + 2)
+            stub = self.ivt_stubs.get(n)
+            if stub is not None and (cs, ip) != stub and (ip, cs) != (0, 0):
+                cpu.cs = cs
+                cpu.ip = ip
+                cpu.int_no_return = True
+                return
         handler = self.handlers.get(n)
         if handler:
             handler(cpu)

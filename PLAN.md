@@ -383,8 +383,8 @@ divergences; `pytest.skip` otherwise.
 | CHKDSK | 1 | test_chkdsk.py | ⬜ Phase E |
 | FIND/SORT/MORE/COMP/FC | 1 | test_text_tools.py | ⬜ Phase E |
 | TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ⬜ Phase E |
-| EDLIN | 1 | test_file_io.py (xfail) | ⬜ Phase D (needs Ctrl-C) |
-| DEBUG | 1 | test_debug_tool.py | ⬜ Phase D |
+| EDLIN | 1 | test_file_io.py (xfail) | ⬜ Phase D (insert-mode Ctrl-C/INT 23h remaining) |
+| DEBUG | 1 | test_debug_tool.py | ✅ Phase D (-A/-T/-R/-D/-E/-Q) |
 | EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ⬜ Phase E |
 | FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | FORMAT ✅ Phase C; DISKCOPY/DISKCOMP xfail (slow); SYS ⬜ Phase E |
 | RECOVER | 2 | test_disk_tools.py | ⬜ Phase C |

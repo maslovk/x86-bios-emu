@@ -173,11 +173,13 @@ class TestLahfSahf:
         """SAHF: flags low byte = AH, AH unchanged, AL untouched."""
         cpu = make_cpu([0x9E])   # SAHF
         cpu.ax = 0x4699           # AH=0x46, AL=0x99
-        cpu.flags = 0xFF00       # high byte set, low byte cleared
+        # High byte set with TF clear so the single-step trap (Phase D)
+        # does not fire after SAHF and disturb the flags we are checking.
+        cpu.flags = 0xFE00       # high byte set (TF clear), low byte cleared
         cpu.execute()
         assert cpu.flags & 0xFF == 0x46, \
             f"SAHF must load AH into flags low byte; got 0x{cpu.flags&0xFF:02X}"
-        assert (cpu.flags >> 8) & 0xFF == 0xFF, \
+        assert (cpu.flags >> 8) & 0xFF == 0xFE, \
             "SAHF must preserve flags high byte"
         assert cpu.ax == 0x4699, \
             f"SAHF must not alter AX; got 0x{cpu.ax:04X}"

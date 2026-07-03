@@ -323,13 +323,15 @@ class TestAAM:
         assert cpu.ax == 0
 
     def test_aam_div_by_zero_halts(self):
+        # AAM with imm=0 is a divide-by-zero (#DE); with no #DE handler
+        # wired in the bare CPU, this halts (graceful, matching the name).
         cpu = _make_cpu()
         cpu.ax = 0x00FF
         cpu.cs = 0; cpu.ip = 0
         cpu.mem.write_byte(0, 0xD4)
         cpu.mem.write_byte(1, 0x00)
         cpu.execute()
-        assert cpu.cf == True
+        assert cpu.halted is True
 
 
 # ── AAD (D5) ─────────────────────────────────────────────────────
@@ -366,14 +368,19 @@ class TestAAD:
         cpu.execute()
         assert cpu.ax == 0
 
-    def test_aad_div_by_zero_halts(self):
+    def test_aad_imm_zero_is_not_divide_by_zero(self):
+        # AAD multiplies (not divides), so imm=0 is valid: AL = AH*0 + AL,
+        # AH = 0 (per SDM; verified against Unicorn).  The old behaviour
+        # treated this as #DE and set CF, which was wrong.
         cpu = _make_cpu()
         cpu.ax = 0x0101
         cpu.cs = 0; cpu.ip = 0
         cpu.mem.write_byte(0, 0xD5)
         cpu.mem.write_byte(1, 0x00)
         cpu.execute()
-        assert cpu.cf == True
+        assert cpu.al == 0x01
+        assert cpu.ah == 0x00
+        assert cpu.cf is False
 
 
 # ── SALC (D6) ────────────────────────────────────────────────────

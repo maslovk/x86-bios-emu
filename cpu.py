@@ -331,6 +331,15 @@ class CPU:
         self.of = False
         self.pf = bin(r).count('1') % 2 == 0
 
+    def _set_szp8(self, r):
+        """Set ZF/SF/PF from an 8-bit result, leaving CF/AF/OF untouched
+        (used by DAA/DAS, whose CF/AF are set explicitly and whose OF is
+        undefined per the SDM)."""
+        r &= 0xFF
+        self.zf = r == 0
+        self.sf = bool(r & 0x80)
+        self.pf = bin(r).count('1') % 2 == 0
+
     def _flags_logic16(self, r):
         r &= 0xFFFF
         self.zf = r == 0
@@ -613,6 +622,12 @@ class CPU:
         self.insn_count += 1
         save_ip = self.ip
         save_cs = self.cs
+        # Latch the Trap Flag as it was *before* this instruction.  The
+        # single-step trap (INT 1) fires after the instruction completes iff
+        # TF was set coming in.  Latching implements the one-instruction delay
+        # for POPF/IRET that set TF (their incoming TF is the old value, so the
+        # setting instruction itself doesn't trap; the next one does).
+        was_tf = self.tf
         # Consume segment prefixes before main opcode
         self._seg_override = None
         self._rep_prefix = None
@@ -654,6 +669,12 @@ class CPU:
             return False
         if self._irq_shadow:
             self._irq_shadow -= 1
+        # Single-step trap: fire INT 1 after the instruction if TF was set
+        # at the start AND the instruction did not itself clear TF (INT/IRET
+        # clear TF and transfer control, so self.tf/__read back as clear and
+        # int_no_return guards the handoff).  This is what DEBUG's T needs.
+        if was_tf and self.tf and not self.int_no_return:
+            self._do_interrupt(1)
         if self.step_mode:
             self._step_print(opc, save_ip)
         return True
@@ -921,8 +942,61 @@ class CPU:
 
         # Segment prefixes (handled in execute() loop now)
 
-        # Skip unimplemented BCD instructions
-        if opc in (0x27, 0x2F, 0x37, 0x3F): return
+        # 27 DAA — Decimal Adjust AL after Addition
+        if opc == 0x27:
+            old_al = self.al
+            old_cf = self.cf
+            if ((self.al & 0x0F) > 9) or self.af:
+                self.al = (self.al + 6) & 0xFF
+                self.cf = old_cf or (old_al + 6 > 0xFF)
+                self.af = True
+            else:
+                self.af = False
+            if (old_al > 0x99) or old_cf:
+                self.al = (self.al + 0x60) & 0xFF
+                self.cf = True
+            else:
+                self.cf = False
+            self._set_szp8(self.al)
+            return
+        # 2F DAS — Decimal Adjust AL after Subtraction
+        if opc == 0x2F:
+            old_al = self.al
+            old_cf = self.cf
+            if ((self.al & 0x0F) > 9) or self.af:
+                self.cf = old_cf or (old_al < 6)
+                self.al = (self.al - 6) & 0xFF
+                self.af = True
+            else:
+                self.af = False
+            if (old_al > 0x99) or old_cf:
+                self.al = (self.al - 0x60) & 0xFF
+                self.cf = True
+            # else: CF retains the value from the low-nibble adjust above.
+            self._set_szp8(self.al)
+            return
+        # 37 AAA — ASCII Adjust after Addition
+        if opc == 0x37:
+            if ((self.al & 0x0F) > 9) or self.af:
+                self.ax = (self.ax + 0x0106) & 0xFFFF
+                self.af = True
+                self.cf = True
+            else:
+                self.af = False
+                self.cf = False
+            self.al = self.al & 0x0F
+            return
+        # 3F AAS — ASCII Adjust after Subtraction
+        if opc == 0x3F:
+            if ((self.al & 0x0F) > 9) or self.af:
+                self.ax = (self.ax - 0x0106) & 0xFFFF
+                self.af = True
+                self.cf = True
+            else:
+                self.af = False
+                self.cf = False
+            self.al = self.al & 0x0F
+            return
 
         # 40-47 INC r16
         if 0x40 <= opc <= 0x47:
@@ -1570,19 +1644,24 @@ class CPU:
         if opc == 0xD4:
             factor = self._fetchb()
             if factor == 0:
-                self.cf = True; return
+                # Divide-by-zero -> #DE (INT 0); stop the CPU in the simple
+                # unit-test path where exception machinery isn't wired.
+                self.halted = True
+                return
             ah_val = (self.ax & 0xFF) // factor
             al_val = (self.ax & 0xFF) % factor
             self.ax = (ah_val << 8) | al_val
+            self._set_szp8(self.al)
             return
 
         # D5 AAD — ASCII Adjust before Add
         if opc == 0xD5:
             factor = self._fetchb()
-            if factor == 0:
-                self.cf = True; return
+            # AAD multiplies (not divides), so factor==0 is well-defined:
+            # AL = AH*0 + AL = AL, AH = 0.
             ax_val = ((self.ax >> 8) & 0xFF) * factor + (self.ax & 0xFF)
             self.ax = ax_val & 0xFF
+            self._set_szp8(self.al)
             return
 
         # D6 SALC — Set AL on Carry
@@ -1873,6 +1952,11 @@ class CPU:
 
         # F9 STC
         if opc == 0xF9: self.cf = True; return
+
+        # 9B WAIT/FWAIT -- no 8087 present, so waiting for the FPU is a no-op
+        # (the equipment word reports no coprocessor, so software uses FP).
+        if opc == 0x9B:
+            return
 
         # FA CLI
         if opc == 0xFA: self.if_flag = False; return

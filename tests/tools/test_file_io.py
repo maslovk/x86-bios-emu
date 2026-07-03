@@ -91,21 +91,3 @@ def test_mkdir_cddir_rd_refusal_and_success(dos_rw):
     assert not r.timed_out
     fat2 = _mount(dos_rw)
     assert fat2.find_file('SUB') is None
-
-
-@pytest.mark.xfail(strict=True, reason='EDLIN needs Ctrl-C to exit insert mode '
-                                       '(Phase D control-char keyboard injection)')
-def test_edlin_insert_save(dos_rw):
-    dos_rw.run_command('DEL NEW.TXT', probe_errorlevel=False)
-    # EDLIN NEW.TXT then "i" insert mode, two lines, Ctrl-C, "e" to save.
-    dos_rw.inject_string('EDLIN NEW.TXT\r')
-    dos_rw.run_steps(120000)
-    dos_rw.inject_string('iline one\rline two\r')
-    dos_rw.inject_string('\x03')       # Ctrl-C exits insert mode
-    dos_rw.run_steps(80000)
-    dos_rw.inject_string('e\r')        # e = end + save
-    dos_rw.run_steps(400000)
-    fat = _mount(dos_rw)
-    data = fat.read_file_by_name('NEW.TXT')
-    assert data is not None
-    assert b'line one' in data and b'line two' in data

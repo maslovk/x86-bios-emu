@@ -382,14 +382,14 @@ divergences; `pytest.skip` otherwise.
 | ATTRIB / LABEL | 1 | test_attrib_label.py | ✅ Phase E (+R/-R host-verified, LABEL/VOL round-trip) |
 | CHKDSK | 1 | test_chkdsk.py | ✅ Phase E (totals match host-side FAT12 math) |
 | FIND/SORT/MORE/COMP/FC | 1 | test_text_tools.py | ✅ Phase E (redirection<>, no pipes; FC via B:) |
-| TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ⬜ Phase E |
-| EDLIN | 1 | test_file_io.py (xfail) | ⬜ Phase D (insert-mode Ctrl-C/INT 23h remaining) |
+| TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ✅ Phase E (TREE/B:XCOPY host-verified); REPLACE xfail (hangs) |
+| EDLIN | 1 | test_edlin.py | ⬜ Phase D (insert-mode Ctrl-C/INT 23h remaining) — xfail |
 | DEBUG | 1 | test_debug_tool.py | ✅ Phase D (-A/-T/-R/-D/-E/-Q) |
-| EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ⬜ Phase E |
-| FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | FORMAT ✅ Phase C; DISKCOPY/DISKCOMP xfail (slow); SYS ⬜ Phase E |
-| RECOVER | 2 | test_disk_tools.py | ⬜ Phase C |
-| BACKUP/RESTORE | 2 | test_disk_tools.py | ⬜ Phase C |
-| GWBASIC | 2 | test_gwbasic.py | ⬜ Phase D |
-| TSRs (SHARE/FASTOPEN/APPEND/PRINT/MODE/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ⬜ Phase E |
-| CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ⬜ Phase E |
-| FDISK/KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ⬜ Phase E |
+| EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ✅ Phase E (EXE2BIN usage; LINK loads banner+prompt) |
+| FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | FORMAT ✅ Phase C; SYS ✅ Phase E (IO.SYS/MSDOS.SYS host-verified); DISKCOPY/DISKCOMP xfail (slow) |
+| RECOVER | 2 | test_disk_tools.py | ✅ Phase E (usage returns, no crash) |
+| BACKUP/RESTORE | 2 | test_disk_tools.py | RESTORE loads ✅; BACKUP xfail (reboots) — Phase F |
+| GWBASIC | 2 | test_gwbasic.py | ⬜ xfail — halts at 0000:9611 (control-flow corruption) pending Phase F |
+| TSRs (SHARE/FASTOPEN/APPEND/PRINT/MODE/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E (load-without-crash + SUBST E: functional); PRINT xfail (stack overflow) |
+| CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E (boot-smoke); RAMDRIVE DIR C: xfail |
+| FDISK/KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |

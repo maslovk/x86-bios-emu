@@ -381,15 +381,29 @@ instruction-emulation divergence against a trusted reference.
 
 - No protected mode support; no DMA emulation
 - Two floppy drives max (A: and B: via `--floppy` / `--floppy-b`); no hard disk
-  (FDISK is out of scope; it must fail gracefully)
-- FAT12 **write** is supported (guest `COPY`/`DEL`/`REN`/`MKDIR`/`FORMAT`/`DISKCOPY`/
-  `SYS` persist via INT 13h AH=03, and host-side `fat12.FAT12.write_file` can
-  inject fixtures). Use `--persist` to write the temp image back on exit.
-- `DISKCOPY`/`DISKCOMP` of a *full* 360KB disk exceed the watchdog step budget at
-  the current ~40k inst/s emulated instruction rate — xfailed until a CPU
+  (FDISK is out of scope; it must fail gracefully — exercised in
+  `tests/tools/test_tier3_graceful.py`)
+- FAT12 **write** is supported (guest `COPY`/`DEL`/`REN`/`MKDIR`/`FORMAT`/`SYS`/
+  `XCOPY` persist via INT 13h AH=03, and host-side `fat12.FAT12.write_file` can
+  inject fixtures, including `CONFIG.SYS` for driver boot-smoke tests).
+  Use `--persist` to write the temp image back on exit.
+- INT 20h program-terminate routes to the DOS-owned IVT entry (programs that
+  exit via the old-style `INT 20h`, e.g. COMP.COM after its "Compare more files?"
+  prompt, return to COMMAND.COM instead of halting the CPU).
+- Redirection (`<`, `>`, `>>`) works; **pipes** (`|`) are not implemented by
+  this COMMAND.COM build ("Invalid parameter") — pipelines are expressed with
+  explicit redirection in the tool tests.
+- `DISKCOPY`/`DISKCOMP` of a *full* 360KB disk exceed the watchdog step budget
+  at the current ~40k inst/s emulated instruction rate — xfailed until a CPU
   performance pass (see `tests/tools/test_disk_tools.py`).
-- EDLIN insert-mode Ctrl-C (INT 23h handling) is not yet wired — EDLIN is
-  xfailed in `tests/tools/test_file_io.py`.
+- Tools whose full path hits a CPU/interrupt emulation gap are `xfail(strict)`
+  with the symptom documented in the test, pending Phase F differential
+  hardening: **GWBASIC** (control-flow corruption, halts at `0000:9611`),
+  **REPLACE** (hangs after invocation), **PRINT** (`Internal stack overflow`
+  during TSR install), **BACKUP** (reboots), **EDLIN** (insert-mode Ctrl-C /
+  INT 23h break semantics). The boot-loadable `CONFIG.SYS` drivers load to the
+  `A>` prompt; ANSI escape sequences print literally (the built-in INT 29h
+  putchar is always used) and RAMDRIVE's `C:` is not registered.
 - Step-mode mnemonics are approximate (operand decoding is simplified)
 - PIT timing is instruction-count-based (~500 insns per tick), not real-time
 - CMOS RTC syncs with host time (no independent battery-backed clock)
@@ -399,7 +413,7 @@ instruction-emulation divergence against a trusted reference.
   checked-in snapshot (`tests/test_diff_smoke.py`)
 
 See `PLAN.md` for the per-tool status matrix and the remaining phase work
-(Phase E full tool sweep, Phase F differential hardening).
+(Phase F differential hardening of the xfailed tools).
 
 ## Extending
 

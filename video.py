@@ -28,6 +28,11 @@ class Video:
         self.mode = 3
         self.mem = None
         self.text_base = 0xB8000
+        # Optional callback invoked with a stripped text line each time a row
+        # scrolls off the top of the visible 80x25 window.  Harnesses use it to
+        # accumulate a full scrollback transcript, since output longer than 25
+        # rows is otherwise lost (only the final visible screen survives).
+        self.on_scroll_line = None
 
     def attach_memory(self, mem):
         self.mem = mem
@@ -81,6 +86,11 @@ class Video:
             self.scroll()
 
     def scroll(self):
+        if self.on_scroll_line is not None:
+            top = self.buffer[0]
+            line = ''.join(chr(ch) if 0x20 <= ch <= 0x7E else ' '
+                            for ch, _attr in top).rstrip()
+            self.on_scroll_line(line)
         self.buffer = self.buffer[1:]
         self.buffer.append([(0x20, self.ATTR_NORMAL) for _ in range(self.width)])
         self.cur_y = self.height - 1
@@ -349,6 +359,8 @@ class Disk:
     def __init__(self):
         self.sectors = [bytearray(512) for _ in range(2880)]  # 1.44MB floppy
         self.media_type = 0xF9  # Default: 1.44MB 3.5" floppy
+        self.dirty = False          # set by write_sector; cleared by writeback
+        self.media_changed = False  # set by swap_disk for AH=16h reporting
 
     def read_sector(self, lba, buf):
         if not 0 <= lba < len(self.sectors):
@@ -362,6 +374,7 @@ class Disk:
             return False
         for i in range(512):
             self.sectors[lba][i] = buf[i]
+        self.dirty = True
         return True
 
     def write_boot_sector(self, code):

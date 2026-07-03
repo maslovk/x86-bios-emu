@@ -450,6 +450,39 @@ class BIOS:
 
     # ── INT 13h: Disk Services ─────────────────────────────────
 
+    _SPT_BY_MEDIA = {0xF9: 18, 0xF8: 15, 0xF0: 15, 0xF1: 9, 0xFD: 9, 0xF2: 18}
+    # (max_cylinder, max_head) per media descriptor byte; heads = max_head+1.
+    _GEO_BY_MEDIA = {
+        0xF9: (79, 1), 0xF8: (79, 1), 0xF0: (79, 1),  # 1.44MB / 1.2MB
+        0xFD: (39, 1), 0xF1: (39, 1), 0xF2: (79, 1),  # 360KB / 720KB / 2.88MB
+    }
+
+    def _disk_geometry(self):
+        """Return (sectors_per_track, max_cyl, max_head) for the loaded disk."""
+        media = getattr(self.disk, 'media_type', 0xF9)
+        spt = self._SPT_BY_MEDIA.get(media, 18)
+        max_cyl, max_head = self._GEO_BY_MEDIA.get(media, (79, 1))
+        return spt, max_cyl, max_head
+
+    def _chs_to_lba(self, cpu):
+        """Decode INT 13h CHS registers, validate, return (lba, count).
+
+        AL=sector count, CL[0:6]=sector, CL[6:8]+CH=cylinder, DH=head.
+        Returns None when the request is out of range (caller reflects
+        AH=04h, CF=1).  Number of heads is max_head+1 (2 for these floppies).
+        """
+        count = cpu.al
+        sector = cpu.cl & 0x3F
+        head = (cpu.dx >> 8) & 0xFF
+        cyl = cpu.ch | ((cpu.cl & 0xC0) << 2)
+        spt, max_cyl, max_head = self._disk_geometry()
+        nheads = max_head + 1
+        if (count == 0 or sector == 0 or sector > spt
+                or head > max_head or cyl > max_cyl):
+            return None
+        lba = (cyl * nheads + head) * spt + (sector - 1)
+        return lba, count
+
     def _int13h(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
 
@@ -457,40 +490,12 @@ class BIOS:
             cpu.ax = 0
             cpu.flags &= ~0x01
         elif ah == 0x02:  # Read sectors (CHS)
-            sectors = cpu.al
-            sector = cpu.cl & 0x3F
-            head = (cpu.dx >> 8) & 0xFF
-            cyl = cpu.ch | ((cpu.cl & 0xC0) << 2)
-            media = self.disk.media_type if hasattr(self.disk, 'media_type') else 0xF9
-            spt = {0xF9: 18, 0xF8: 15, 0xF0: 15, 0xF1: 9, 0xFD: 9, 0xF2: 18}.get(media, 18)
-            nheads = 2
-            raw_lba = (cyl * nheads + head) * spt + (sector - 1)
-            print(f"[BIOS] INT 13h AH=02 Raw: sector={sector}, head={head}, cyl={cyl}, count={sectors}, media=0x{media:02X}, spt={spt} -> Raw LBA={raw_lba} (IP={cpu.ip:04X}, CS={cpu.cs:04X})", file=sys.stderr)
-
-            max_cyl = 79 # Default
-            max_head = 1
-            if hasattr(self.disk, 'media_type'):
-                media_type = self.disk.media_type
-                if media_type == 0xFD: # 360KB
-                    max_cyl, max_head = 39, 1
-                elif media_type == 0xF1: # 720KB
-                    max_cyl, max_head = 39, 1
-                elif media_type == 0xF9: # 1.44MB
-                    max_cyl, max_head = 79, 1
-
-            if (
-                sectors == 0
-                or sector == 0
-                or sector > spt
-                or head > max_head
-                or cyl > max_cyl
-            ):
+            res = self._chs_to_lba(cpu)
+            if res is None:
                 cpu.ax = 0x0400
                 cpu.flags |= 0x01
                 return
-
-            lba = (cyl * nheads + head) * spt + (sector - 1)
-            print(f"[BIOS] INT 13h AH=02 CHS OK: sector={sector}, head={head}, cyl={cyl} -> LBA={lba}", file=sys.stderr)
+            lba, sectors = res
             es = cpu.es
             bx = cpu.bx
             ok = True
@@ -499,27 +504,42 @@ class BIOS:
                 if not self.disk.read_sector(lba + s, buf):
                     ok = False
                     break
-                # Write each sector immediately to ES:BX + s*512, wrapping offset modulo 64K
+                # Write each sector immediately to ES:BX + s*512, wrapping
+                # the offset modulo 64K (real INT 13h wraps at the segment).
                 for i in range(512):
                     self.mem.write_byte((es << 4) + ((bx + s * 512 + i) & 0xFFFF), buf[i])
             if not ok:
                 cpu.ax = 0x0004
                 cpu.flags |= 0x01
                 return
-
-            # Log the first 16 bytes of the buffer being read into
-            try:
-                buf_addr = (cpu.es << 4) + cpu.bx
-                data = bytearray(self.mem.read_byte(buf_addr + i) for i in range(16))
-                print(f"[BIOS] INT 13h AH=02 Read {sectors} sectors from LBA={lba} into {hex(buf_addr)}: {data.hex(' ')}", file=sys.stderr)
-            except Exception as e:
-                print(f"[BIOS] INT 13h AH=02 Buffer log error: {e}", file=sys.stderr)
-
             cpu.ah = 0x00
             cpu.al = sectors
             cpu.flags &= ~0x01
-        elif ah == 0x03:  # Write sectors
+        elif ah == 0x03:  # Write sectors (CHS)
+            res = self._chs_to_lba(cpu)
+            if res is None:
+                cpu.ax = 0x0400
+                cpu.flags |= 0x01
+                return
+            lba, sectors = res
+            es = cpu.es
+            bx = cpu.bx
+            buf = bytearray(512)
+            ok = True
+            for s in range(sectors):
+                # Read each sector's worth of guest memory from ES:BX,
+                # wrapping the offset modulo 64K, then write it to disk.
+                for i in range(512):
+                    buf[i] = self.mem.read_byte((es << 4) + ((bx + s * 512 + i) & 0xFFFF))
+                if not self.disk.write_sector(lba + s, buf):
+                    ok = False
+                    break
+            if not ok:
+                cpu.ax = 0x0004
+                cpu.flags |= 0x01
+                return
             cpu.ah = 0x00
+            cpu.al = sectors
             cpu.flags &= ~0x01
         elif ah == 0x08:  # Get disk params
             media = self.disk.media_type if hasattr(self.disk, 'media_type') else 0xF9

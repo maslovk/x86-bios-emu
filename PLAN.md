@@ -377,11 +377,11 @@ divergences; `pytest.skip` otherwise.
 | Tool | Tier | Test | Status |
 |------|------|------|--------|
 | DIR/TYPE/VER/... (internal, read-only) | 1 | test_internal_basic.py | ✅ Phase E (VER/VOL/CLS/ECHO/SET/PATH/DATE/TIME) |
-| COPY/DEL/REN/MD/CD/RD | 1 | test_file_io.py (core) | ✅ Phase B (wildcards in test_internal_files.py: ⬜ Phase E) |
-| Batch files | 1 | test_batch.py | ⬜ Phase E |
-| ATTRIB / LABEL | 1 | test_attrib_label.py | ⬜ Phase E |
-| CHKDSK | 1 | test_chkdsk.py | ⬜ Phase E |
-| FIND/SORT/MORE/COMP/FC | 1 | test_text_tools.py | ⬜ Phase E |
+| COPY/DEL/REN/MD/CD/RD | 1 | test_file_io.py (core) | ✅ Phase B; wildcards in test_internal_files.py ✅ Phase E |
+| Batch files | 1 | test_batch.py | ✅ Phase E (IF EXIST/GOTO/@ECHO OFF, FOR, %1 args, REM/PAUSE) |
+| ATTRIB / LABEL | 1 | test_attrib_label.py | ✅ Phase E (+R/-R host-verified, LABEL/VOL round-trip) |
+| CHKDSK | 1 | test_chkdsk.py | ✅ Phase E (totals match host-side FAT12 math) |
+| FIND/SORT/MORE/COMP/FC | 1 | test_text_tools.py | ✅ Phase E (redirection<>, no pipes; FC via B:) |
 | TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ⬜ Phase E |
 | EDLIN | 1 | test_file_io.py (xfail) | ⬜ Phase D (insert-mode Ctrl-C/INT 23h remaining) |
 | DEBUG | 1 | test_debug_tool.py | ✅ Phase D (-A/-T/-R/-D/-E/-Q) |

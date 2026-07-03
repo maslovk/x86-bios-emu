@@ -383,7 +383,7 @@ divergences; `pytest.skip` otherwise.
 | CHKDSK | 1 | test_chkdsk.py | ✅ Phase E (totals match host-side FAT12 math) |
 | FIND/SORT/MORE/COMP/FC | 1 | test_text_tools.py | ✅ Phase E (redirection<>, no pipes; FC via B:) |
 | TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ✅ Phase E (TREE/B:XCOPY host-verified); REPLACE xfail (hangs) |
-| EDLIN | 1 | test_edlin.py | ⬜ Phase D (insert-mode Ctrl-C/INT 23h remaining) — xfail |
+| EDLIN | 1 | test_edlin.py | ⬜ Phase F (insert-mode Ctrl-C/INT 23h remaining) — xfail |
 | DEBUG | 1 | test_debug_tool.py | ✅ Phase D (-A/-T/-R/-D/-E/-Q) |
 | EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ✅ Phase E (EXE2BIN usage; LINK loads banner+prompt) |
 | FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | FORMAT ✅ Phase C; SYS ✅ Phase E (IO.SYS/MSDOS.SYS host-verified); DISKCOPY/DISKCOMP xfail (slow) |

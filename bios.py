@@ -392,14 +392,15 @@ class BIOS:
                 self.mem.write_byte(0x00408, 3)
                 self.mem.write_word(0x00406, 80)
         elif ah == 0x02:  # Set cursor position
-            row = dx & 0xFF
-            col = (dx >> 8) & 0xFF
+            # BIOS convention is DH=row, DL=column.
+            row = (dx >> 8) & 0xFF
+            col = dx & 0xFF
             self.video.cur_x = col
             self.video.cur_y = row
-            self.mem.write_byte(0x00404, row)
-            self.mem.write_byte(0x00405, col)
+            # BDA 40:50 stores page-0 cursor position as CH=row, CL=column.
+            self.mem.write_word(0x00450, (row << 8) | col)
         elif ah == 0x03:  # Get cursor position
-            cpu.ax = (self.video.cur_y << 8) | self.video.cur_x
+            cpu.dx = (self.video.cur_y << 8) | self.video.cur_x
             cpu.cx = 0x0607
         elif ah == 0x06:  # Scroll up
             rows = al if al else 25

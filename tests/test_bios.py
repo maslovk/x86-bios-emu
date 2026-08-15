@@ -147,18 +147,20 @@ class TestINT10h:
 
     def test_set_cursor(self, bios_env):
         bios_env.initialize()
-        # INT 10h AH=02: row = dx & 0xFF, col = (dx >> 8) & 0xFF
-        # dx=0x0A05 → row=5, col=10
-        self._call(bios_env, ax=0x0200, dx=0x0A05)
+        # INT 10h AH=02: DH=row, DL=column.
+        # dx=0x050A → row=5, col=10
+        self._call(bios_env, ax=0x0200, dx=0x050A)
         assert bios_env.video.cur_x == 10
         assert bios_env.video.cur_y == 5
+        assert bios_env.mem.read_word(0x00450) == 0x050A
 
     def test_get_cursor(self, bios_env):
         bios_env.initialize()
         bios_env.video.cur_x = 20; bios_env.video.cur_y = 10
         cpu = self._call(bios_env, ax=0x0300)
-        assert (cpu.ax >> 8) & 0xFF == 10
-        assert cpu.ax & 0xFF == 20
+        assert (cpu.dx >> 8) & 0xFF == 10
+        assert cpu.dx & 0xFF == 20
+        assert cpu.cx == 0x0607
 
     def test_get_text_mode(self, bios_env):
         bios_env.initialize()

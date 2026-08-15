@@ -44,6 +44,20 @@ class TestBootSector:
 # ── Emulator Integration ───────────────────────────────────────
 
 class TestEmulatorIntegration:
+    def test_irq_setup_preserves_bios_int1c_stub(self):
+        """Timer-hooking guests must be able to chain to the old INT 1Ch."""
+        from main import Emulator
+        emu = Emulator(enable_hardware=True)
+        emu.bios.initialize()
+        before = (emu.mem.read_word(0x1C * 4),
+                  emu.mem.read_word(0x1C * 4 + 2))
+
+        emu._setup_ivt_irq_handlers()
+
+        after = (emu.mem.read_word(0x1C * 4),
+                 emu.mem.read_word(0x1C * 4 + 2))
+        assert before == after == tuple(reversed(emu.bios.ivt_stubs[0x1C]))
+
     def test_boot_sector_prints_hello(self):
         from main import Emulator
         emu = Emulator()

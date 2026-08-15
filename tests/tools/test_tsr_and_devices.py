@@ -1,9 +1,9 @@
 """Phase E TSR / device driver tools (Tier 2): load-without-crash + functional probes.
 
-Each DOS 3.3 TSR loads resident and returns to the A> prompt (except PRINT,
-which stays resident but the system keeps responding — that is the expected
-behaviour of a print spooler).  The bar is "loads without crashing the
-emulator and a follow-up command still works".
+Each DOS 3.3 TSR loads resident and returns to the A> prompt.  PRINT remains
+resident as expected for a spooler, but returns control to COMMAND.COM and the
+system keeps responding.  The bar is "loads without crashing the emulator and
+a follow-up command still works".
 
 functional probes:
   * SUBST E: A:\\ then DIR E: lists drive A's files.
@@ -55,9 +55,6 @@ def test_subst_functional(dos_rw):
     assert 'File(s)' in r.output
 
 
-@pytest.mark.xfail(strict=True, reason="PRINT install hits 'Internal "
-    "stack overflow / System halted' - a deep-interrupt-nesting / emulation "
-    "gap in PRINT TSR init; pending Phase F investigation")
 def test_print_resident_keeps_system_alive(dos_rw):
     """PRINT installs resident; after naming the list device the prompt returns.
 

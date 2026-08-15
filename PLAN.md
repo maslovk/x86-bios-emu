@@ -389,7 +389,7 @@ divergences; `pytest.skip` otherwise.
 | FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | FORMAT ✅ Phase C; SYS ✅ Phase E (IO.SYS/MSDOS.SYS host-verified); DISKCOPY/DISKCOMP xfail (slow) |
 | RECOVER | 2 | test_disk_tools.py | ✅ Phase E (usage returns, no crash) |
 | BACKUP/RESTORE | 2 | test_disk_tools.py | RESTORE loads ✅; BACKUP xfail (reboots) — Phase F |
-| GWBASIC | 2 | test_gwbasic.py | ⬜ xfail — halts at 0000:9611 (control-flow corruption) pending Phase F |
-| TSRs (SHARE/FASTOPEN/APPEND/PRINT/MODE/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E (load-without-crash + SUBST E: functional); PRINT xfail (stack overflow) |
+| GWBASIC | 2 | test_gwbasic.py | ✅ Phase F (reaches `Ok`; fixed null old-INT-1Ch chain and INT 10h cursor ABI) |
+| TSRs (SHARE/FASTOPEN/APPEND/PRINT/MODE/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E/F (load-without-crash + SUBST E: functional; PRINT resident and follow-up command verified) |
 | CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E (boot-smoke); RAMDRIVE DIR C: xfail |
 | FDISK/KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |

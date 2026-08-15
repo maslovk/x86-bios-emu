@@ -314,11 +314,18 @@ class Emulator:
         return Mem()
 
     def _setup_ivt_irq_handlers(self):
-        """Set up IVT entries for IRQ handlers."""
-        # INT 1Ch (timer tick callback) → empty by default
-        int1c_addr = 0x1C * 4
-        self.mem.write_word(int1c_addr, 0x0000)
-        self.mem.write_word(int1c_addr + 2, 0x0000)
+        """Keep the BIOS-installed IRQ callback vectors intact.
+
+        ``BIOS.initialize()`` installs an IRET-compatible ROM stub for INT
+        1Ch.  Guest programs commonly hook the timer callback and chain to
+        the vector they found during installation, so replacing that stub
+        with ``0000:0000`` is not equivalent to an empty callback: the guest
+        eventually executes the IVT as code.  There is no additional IRQ IVT
+        setup required here; hardware IRQ dispatch already consults the IVT.
+
+        The method remains as a compatibility hook for the harness and the
+        diagnostic scripts that call it after BIOS initialization.
+        """
 
     def _load_floppy(self, path: str):
         """Load a floppy image file and mount FAT12."""

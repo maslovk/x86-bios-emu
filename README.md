@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1340 fast + 70 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
+└── tests/             # pytest suite (1340 fast + 71 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
 ```
 
 ## Components
@@ -319,8 +319,8 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 
 ```bash
 python3 -m pytest -q -m "not slow"      # fast tests (1340 tests, ~13s)
-python3 -m pytest -q -m slow            # DOS boot/tool integration tests (70 tests)
-python3 -m pytest -q                    # all 1410 tests
+python3 -m pytest -q -m slow            # DOS boot/tool integration tests (71 tests)
+python3 -m pytest -q                    # all 1411 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```
@@ -397,13 +397,14 @@ instruction-emulation divergence against a trusted reference.
   performance pass (see `tests/tools/test_disk_tools.py`).
 - Tools whose full path hits a CPU/interrupt emulation gap are `xfail(strict)`
   with the symptom documented in the test, pending Phase F differential
-  hardening: **BACKUP** (reboots). EDLIN and REPLACE were fixed in Phase F by
+  hardening. EDLIN and REPLACE were fixed in Phase F by
   decoding memory shift/rotate effective addresses only once; the old
   read-modify-write path consumed the displacement again on write and skipped
   into the next instruction. GWBASIC and PRINT were fixed by preserving the
   BIOS INT 1Ch callback stub instead of replacing its vector with `0000:0000`;
   GWBASIC also exposed and now guards the standard INT 10h cursor register ABI.
-  The boot-loadable `CONFIG.SYS`
+  BACKUP/RESTORE now have a host-verified single-file round-trip. The
+  boot-loadable `CONFIG.SYS`
   drivers load to the `A>` prompt. Guest-installed INT 29h handlers are honored
   (so ANSI.SYS receives escape sequences), though complete ANSI cursor/color
   rendering still lacks an end-to-end regression; RAMDRIVE's `C:` is not

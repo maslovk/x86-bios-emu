@@ -388,7 +388,7 @@ divergences; `pytest.skip` otherwise.
 | EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ✅ Phase E (EXE2BIN usage; LINK loads banner+prompt) |
 | FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | FORMAT ✅ Phase C; SYS ✅ Phase E (IO.SYS/MSDOS.SYS host-verified); DISKCOPY/DISKCOMP xfail (slow) |
 | RECOVER | 2 | test_disk_tools.py | ✅ Phase E (usage returns, no crash) |
-| BACKUP/RESTORE | 2 | test_disk_tools.py | RESTORE loads ✅; BACKUP xfail (reboots) — Phase F |
+| BACKUP/RESTORE | 2 | test_disk_tools.py | ✅ Phase F (single-file BACKUP→delete→RESTORE round-trip host-verified) |
 | GWBASIC | 2 | test_gwbasic.py | ✅ Phase F (reaches `Ok`; fixed null old-INT-1Ch chain and INT 10h cursor ABI) |
 | TSRs (SHARE/FASTOPEN/APPEND/PRINT/MODE/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E/F (load-without-crash + SUBST E: functional; PRINT resident and follow-up command verified) |
 | CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E/F (boot-smoke; guest INT 29h hooks honored); ANSI visual regression and RAMDRIVE DIR C: remain |

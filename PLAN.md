@@ -214,9 +214,8 @@ written image agrees with what DOS shows in `DIR`.
     harness; afterwards host-side mount succeeds and shows 0 files;
     "bytes available" line matches 362496-ish for 360K.
   - `SYS B:` after FORMAT (needs FORMAT /S or SYS) → host-side mount shows
-    IO.SYS/MSDOS.SYS first two directory entries; **stretch**: boot a second
-    emulator from the resulting B image to the `A>` prompt (COMMAND.COM must
-    be copied too).
+    IO.SYS/MSDOS.SYS first two directory entries; copy COMMAND.COM and boot a
+    second emulator from the resulting B image to the `A>` prompt.
   - `XCOPY A:*.COM B:` → host-side count of `.COM` files matches source.
   - `BACKUP A:*.TXT B:` / `RESTORE B: A:*.TXT` roundtrip (Tier 2 — content
     check only, accept its control-file format as opaque).
@@ -379,7 +378,7 @@ divergences; `pytest.skip` otherwise.
 | EDLIN | 1 | test_edlin.py | ✅ Phase F (insert/save host-verified; fixed memory shift/rotate displacement double-decode) |
 | DEBUG | 1 | test_debug_tool.py | ✅ Phase D (-A/-T/-R/-D/-E/-Q) |
 | EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ✅ Phase E (EXE2BIN usage; LINK loads banner+prompt) |
-| FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | ✅ Phase C/E/F (FORMAT/SYS host-verified; DISKCOPY exact 720-sector match; DISKCOMP identical/different paths) |
+| FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | ✅ Phase C/E/F (FORMAT/SYS host-verified; SYS disk boots a fresh emulator; DISKCOPY exact 720-sector match; DISKCOMP identical/different paths) |
 | RECOVER | 2 | test_disk_tools.py | ✅ Phase E (usage returns, no crash) |
 | BACKUP/RESTORE | 2 | test_disk_tools.py | ✅ Phase F (single-file BACKUP→delete→RESTORE round-trip host-verified) |
 | GWBASIC | 2 | test_gwbasic.py | ✅ Phase F (reaches `Ok`; fixed null old-INT-1Ch chain and INT 10h cursor ABI) |

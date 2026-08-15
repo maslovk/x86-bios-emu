@@ -58,10 +58,11 @@ def test_diskcopy_a_to_b(tmp_path):
 
 
 def test_sys_b_transfers_system(tmp_path):
-    """``SYS B:`` writes IO.SYS/MSDOS.SYS as the first two entries (host-verified).
+    """``SYS B:`` creates a system disk that boots in a fresh emulator.
 
     In DOS 3.3 SYS takes a single destination drive (``SYS d:``), not the
-    two-argument ``SYS src: dst:`` form added in DOS 4+.
+    two-argument ``SYS src: dst:`` form added in DOS 4+.  SYS does not copy
+    COMMAND.COM, so copy it separately before exercising the generated image.
     """
     blank = str(tmp_path / 'BLANK.IMG')
     make_blank_image(blank, 360 * 1024)
@@ -80,6 +81,22 @@ def test_sys_b_transfers_system(tmp_path):
         names = [e.full_name for e in fb.list_root()]
         # The system files must be the first two entries (IO.SYS, MSDOS.SYS).
         assert names[:2] == ['IO.SYS', 'MSDOS.SYS']
+
+        copied = h.run_command('COPY COMMAND.COM B:', max_steps=4_000_000)
+        assert not copied.timed_out
+        assert copied.errorlevel == 0
+
+        # Guest writes live in the harness's in-memory disk.  Export the
+        # original 360KB medium, then prove a completely fresh emulator can
+        # boot it rather than relying only on host-side directory inspection.
+        system_disk = tmp_path / 'SYSTEM.IMG'
+        system_disk.write_bytes(b''.join(h.emu.disk_b.sectors[:720]))
+        boot = DOSHarness(image_path=str(system_disk), writable=False)
+        try:
+            boot.boot_to_prompt()
+            assert boot.vga_str().rstrip().endswith('A>')
+        finally:
+            boot.cleanup()
     finally:
         h.cleanup()
 

@@ -164,31 +164,62 @@ class Video:
 
 
 class Serial:
-    """COM1 serial port (0x3F8-0x3FF). Outputs to stderr."""
+    """Minimal 8250-compatible COM1 serial port (0x3F8-0x3FF)."""
 
     def __init__(self):
-        self.data = 0
-        self.llsr_thre = 0x20  # THR empty = ready
-        self.line_ctrl = 0x03  # 8N1 default
-        self.msr = 0xC0        | 0x20  # DCD+CTS active
-        self.iir = 0x01        # No interrupt pending
-        self.lsr = 0x60        # THRE+DATA_READY
-        self.baud = 9600
+        self.rx_buffer = []
         self.output = []
+        self.ier = 0
+        self.divisor = 12       # 115200 / 12 = 9600 baud
+        self.line_ctrl = 0x03  # 8N1 default
+        self.mcr = 0
+        self.msr = 0xB0        # DCD + DSR + CTS active
+        self.iir = 0x01        # No interrupt pending
+        self.lsr = 0x60        # THR empty + transmitter empty
+        self.baud = 9600
+
+    def inject_string(self, text):
+        """Queue bytes that the guest can receive from COM1."""
+        self.rx_buffer.extend(ord(ch) & 0xFF for ch in text)
+        if self.rx_buffer:
+            self.lsr |= 0x01
 
     def inb(self, offset):
-        if offset == 0x00:     # RBR (receive buffer)
-            return self.data
-        if offset == 0x04:     # LSR (line status)
-            return self.lsr
-        if offset == 0x05:     # MSR (modem status)
-            return self.msr
+        dlab = bool(self.line_ctrl & 0x80)
+        if offset == 0x00:
+            if dlab:           # Divisor latch low byte
+                return self.divisor & 0xFF
+            if not self.rx_buffer:
+                return 0
+            value = self.rx_buffer.pop(0)
+            if not self.rx_buffer:
+                self.lsr &= ~0x01
+            return value
+        if offset == 0x01:
+            return (self.divisor >> 8) & 0xFF if dlab else self.ier
         if offset == 0x02:     # IIR (interrupt id)
             return self.iir
+        if offset == 0x03:     # LCR (line control)
+            return self.line_ctrl
+        if offset == 0x04:     # MCR (modem control)
+            return self.mcr
+        if offset == 0x05:     # LSR (line status)
+            return self.lsr
+        if offset == 0x06:     # MSR (modem status)
+            return self.msr
         return 0x00
 
     def outb(self, offset, val):
-        if offset == 0x00:     # THR (transmit holding)
+        val &= 0xFF
+        dlab = bool(self.line_ctrl & 0x80)
+        if offset == 0x00 and dlab:
+            self.divisor = (self.divisor & 0xFF00) | val
+            self._update_baud()
+        elif offset == 0x01 and dlab:
+            self.divisor = (self.divisor & 0x00FF) | (val << 8)
+            self._update_baud()
+        elif offset == 0x00:   # THR (transmit holding)
+            self.output.append(val)
             if val >= 0x20:
                 sys.stderr.write(f"[COM1] {chr(val)}")
             elif val == 0x0A:
@@ -197,10 +228,16 @@ class Serial:
                 sys.stderr.write('\r')
             sys.stderr.flush()
             self.lsr |= 0x20  # THRE set
-        elif offset == 0x04:   # LCR (line control)
+        elif offset == 0x01:   # IER (interrupt enable)
+            self.ier = val
+        elif offset == 0x03:   # LCR (line control)
             self.line_ctrl = val
-        elif offset == 0x08:   # MCR (modem control)
-            pass
+        elif offset == 0x04:   # MCR (modem control)
+            self.mcr = val
+
+    def _update_baud(self):
+        if self.divisor:
+            self.baud = 115200 // self.divisor
 
 
 class IO:

@@ -14,7 +14,7 @@ Phases A–F are complete. MS-DOS 3.3 boots from the shipped floppy images,
 the full internal/external tool matrix is covered, writable workflows operate
 on temporary images, and the shipped images are protected by a session-level
 hash guard. The complete acceptance command, `python3 -m pytest -q`, passes
-all 1,416 tests (1,343 fast and 73 slow) with no xfails.
+all 1,421 tests (1,346 fast and 75 slow) with no xfails.
 
 The original blocking gaps are resolved: writable and multi-drive INT 13h,
 FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
@@ -295,12 +295,12 @@ fixing whatever falls out. Known small features:
 1. `PRINT` needs INT 17h to report printer ready (exists at `bios.py:694` —
    verify status bits) and a way to observe output: give the BIOS printer
    handler an `output: list` the harness can read.
-2. `MODE COM1:9600,N,8,1` exercises INT 14h AH=00 (exists) — just test it.
+2. `MODE COM1:96,N,8,1` exercises INT 14h AH=00 (DOS 3.3 expresses the
+   baud rate in hundreds) — just test it.
 3. `SHARE`/`FASTOPEN`/`APPEND` are TSRs: test = loads without crash, prompt
    returns, and a follow-up `DIR` still works (memory not corrupted).
-4. `CTTY COM1` + serial: redirect console via the existing `Serial` —
-   Tier 2 stretch; skip if DOS device chain fights back, but it must not
-   hang (watchdog catches it).
+4. `CTTY COM1` + serial: redirect console via `Serial`, execute a command over
+   COM1, then switch back with `CTTY CON`; the watchdog ensures it cannot hang.
 
 ### Tests — one file per tool family in `tests/tools/`
 
@@ -382,6 +382,6 @@ divergences; `pytest.skip` otherwise.
 | RECOVER | 2 | test_disk_tools.py | ✅ Phase E (usage returns, no crash) |
 | BACKUP/RESTORE | 2 | test_disk_tools.py | ✅ Phase F (single-file BACKUP→delete→RESTORE round-trip host-verified) |
 | GWBASIC | 2 | test_gwbasic.py | ✅ Phase F (reaches `Ok`; fixed null old-INT-1Ch chain and INT 10h cursor ABI) |
-| TSRs (SHARE/FASTOPEN/APPEND/PRINT/MODE/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E/F (load-without-crash + SUBST E: functional; PRINT resident and follow-up command verified) |
+| TSRs/devices (SHARE/FASTOPEN/APPEND/PRINT/MODE/CTTY/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E/F (load-without-crash; SUBST E: functional; PRINT resident; MODE COM1 configured; CTTY COM1 round-trip) |
 | CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E/F (boot-smoke; RAMDRIVE C: read/write; ANSI clear/cursor/colour rendering in VRAM) |
 | FDISK/KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |

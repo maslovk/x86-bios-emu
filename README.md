@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1343 fast + 73 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
+└── tests/             # pytest suite (1346 fast + 75 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
 ```
 
 ## Components
@@ -318,9 +318,9 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1343 tests, ~13s)
+python3 -m pytest -q -m "not slow"      # fast tests (1346 tests, ~13s)
 python3 -m pytest -q -m slow            # DOS boot/tool integration tests (73 tests)
-python3 -m pytest -q                    # all 1416 tests
+python3 -m pytest -q                    # all 1421 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```

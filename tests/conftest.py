@@ -86,6 +86,6 @@ def cpu(memory, io_ports):
 
 
 @pytest.fixture
-def bios_env(memory, video, kbd, disk):
+def bios_env(memory, video, kbd, disk, serial):
     """Full BIOS environment."""
-    return BIOS(memory, video, kbd, disk)
+    return BIOS(memory, video, kbd, disk, serial=serial)

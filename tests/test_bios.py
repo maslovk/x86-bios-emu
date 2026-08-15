@@ -281,6 +281,10 @@ class TestINT13h:
 # ── INT 14h: Serial Services ───────────────────────────────────
 
 class TestINT14h:
+    def test_bda_advertises_com1(self, bios_env):
+        bios_env.initialize()
+        assert bios_env.mem.read_word(0x400) == 0x03F8
+
     def test_serial_init_returns_ready_status(self, bios_env):
         bios_env.initialize()
         cpu = FakeCPU(ax=0x00A3, dx=0x0000)
@@ -293,7 +297,19 @@ class TestINT14h:
         cpu = FakeCPU(ax=0x0300, dx=0x0001)
         bios_env.handlers[0x14](cpu)
         assert cpu.ah == 0x60
-        assert cpu.al == 0x00
+        assert cpu.al == 0xB0
+
+    def test_serial_transmit_and_receive(self, bios_env):
+        bios_env.initialize()
+        bios_env.serial.inject_string('R')
+        cpu = FakeCPU(ax=0x0200, dx=0x0000)
+        bios_env.handlers[0x14](cpu)
+        assert cpu.al == ord('R')
+        assert not cpu.ah & 0x80
+
+        cpu.ax = 0x0154
+        bios_env.handlers[0x14](cpu)
+        assert bios_env.serial.output[-1] == ord('T')
 
 
 # ── INT 17h: Printer Services ──────────────────────────────────

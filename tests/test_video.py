@@ -292,11 +292,11 @@ class TestSerial:
         assert '[COM1]' not in captured.err
 
     def test_read_lsr(self, serial):
-        val = serial.inb(0x04)
+        val = serial.inb(0x05)
         assert val & 0x20
 
     def test_read_msr(self, serial):
-        val = serial.inb(0x05)
+        val = serial.inb(0x06)
         assert val & 0x20
 
     def test_read_iir(self, serial):
@@ -304,8 +304,15 @@ class TestSerial:
         assert val == 0x01
 
     def test_write_lcr(self, serial):
-        serial.outb(0x04, 0x07)
+        serial.outb(0x03, 0x07)
         assert serial.line_ctrl == 0x07
+
+    def test_receive_queue_sets_and_clears_data_ready(self, serial):
+        serial.inject_string('AB')
+        assert serial.inb(0x05) & 0x01
+        assert serial.inb(0x00) == ord('A')
+        assert serial.inb(0x00) == ord('B')
+        assert not serial.inb(0x05) & 0x01
 
 
 # ── Keyboard ────────────────────────────────────────────────────

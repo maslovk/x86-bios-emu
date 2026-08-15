@@ -246,7 +246,7 @@ class Emulator:
         self.cpu.step_mode = step_mode
         self.bios = BIOS(self.mem, self.video, self.kbd, self.disk,
                          pit=self.pit, pic=self.pic, cmos=self.cmos,
-                         kbd_ctrl=self.kbd_ctrl)
+                         kbd_ctrl=self.kbd_ctrl, serial=self.serial)
         self.boot_file = boot_file
         self.interactive = interactive or gtk   # --gtk implies interactive
         self.enable_hardware = enable_hardware

@@ -12,7 +12,8 @@ import sys
 class BIOS:
     """Minimal BIOS ROM implementation."""
 
-    def __init__(self, memory, video, keyboard, disk, pit=None, pic=None, cmos=None, kbd_ctrl=None, disk_b=None):
+    def __init__(self, memory, video, keyboard, disk, pit=None, pic=None,
+                 cmos=None, kbd_ctrl=None, disk_b=None, serial=None):
         self.mem = memory
         self.video = video
         self.kbd = keyboard
@@ -22,6 +23,7 @@ class BIOS:
         self.pic = pic
         self.cmos = cmos
         self.kbd_ctrl = kbd_ctrl
+        self.serial = serial
         self.handlers = {}
         self.ivt_stubs = {}
 
@@ -138,6 +140,10 @@ class BIOS:
 
     def _setup_bda(self):
         bda = 0x00400
+        # I/O base-address table.  DOS device utilities use this table to
+        # decide whether COM1 exists before calling INT 14h.
+        self.mem.write_word(bda + 0x00, 0x03F8)  # COM1
+        self.mem.write_word(bda + 0x02, 0x0000)  # COM2 absent
         # Populate the standard text-mode BDA fields DOS probes during boot.
         self.mem.write_word(bda + 0x04, 0x0000)  # Cursor pos page 0
         self.mem.write_word(bda + 0x06, 80)      # Columns
@@ -290,16 +296,23 @@ class BIOS:
 
     def _int14h(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
-        status = 0x60  # transmitter holding + shift registers empty
-        modem = 0x00
+        status = self.serial.lsr if self.serial else 0x60
+        modem = self.serial.msr if self.serial else 0x00
 
         if ah == 0x00:  # Initialize port
             cpu.ah = status
         elif ah == 0x01:  # Transmit character
+            if self.serial:
+                self.serial.outb(0x00, cpu.al)
+                status = self.serial.lsr
             cpu.ah = status
         elif ah == 0x02:  # Receive character
-            cpu.al = 0x00
-            cpu.ah = status
+            if self.serial and self.serial.rx_buffer:
+                cpu.al = self.serial.inb(0x00)
+                cpu.ah = self.serial.lsr
+            else:
+                cpu.al = 0x00
+                cpu.ah = status | 0x80  # timeout
         elif ah == 0x03:  # Get port status
             cpu.ax = (status << 8) | modem
         else:

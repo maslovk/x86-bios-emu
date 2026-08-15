@@ -7,7 +7,8 @@ a follow-up command still works".
 
 functional probes:
   * SUBST E: A:\\ then DIR E: lists drive A's files.
-  * MODE LPT1: sets printer/status without error.
+  * MODE configures COM1 for 9600 baud.
+  * CTTY COM1 exchanges a command over serial and returns to CON.
 """
 import os
 import sys
@@ -70,3 +71,29 @@ def test_print_resident_keeps_system_alive(dos_rw):
                             probe_errorlevel=False)
     assert not ok.timed_out
     assert 'alive' in ok.output
+
+
+def test_mode_configures_com1(dos_rw):
+    """MODE sees the BIOS-advertised COM1 port and configures 9600 8N1."""
+    r = dos_rw.run_command('MODE COM1:96,N,8,1', max_steps=3_000_000,
+                           probe_errorlevel=False)
+    assert not r.timed_out
+    assert 'COM1: 9600,n,8,1' in r.output
+
+
+def test_ctty_com1_roundtrip(dos_rw):
+    """CTTY redirects DOS to COM1, accepts a command, and returns to VGA."""
+    previous_screen = dos_rw.vga_str()
+    dos_rw.inject_string('CTTY COM1\r')
+    dos_rw.run_steps(100_000)  # let DOS finish switching console devices
+
+    dos_rw.emu.serial.inject_string('ECHO serial-ok\rCTTY CON\r')
+    _steps, timed_out = dos_rw._wait_prompt(previous_screen, 4_000_000)
+    assert not timed_out
+
+    serial_text = bytes(dos_rw.emu.serial.output).decode(
+        'ascii', errors='replace')
+    assert 'A>ECHO serial-ok' in serial_text
+    assert '\r\nserial-ok\r\n' in serial_text
+    assert 'A>CTTY CON' in serial_text
+    assert dos_rw.vga_str().rstrip().endswith('A>')

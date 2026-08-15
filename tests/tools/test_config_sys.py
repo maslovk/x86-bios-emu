@@ -1,13 +1,11 @@
-"""Phase E CONFIG.SYS device drivers (Tier 2): boot-smoke.
+"""Phase E/F CONFIG.SYS device-driver coverage (Tier 2).
 
 Each driver is loaded via an injected ``CONFIG.SYS`` (written host-side into the
 in-memory disk with :class:`fat12.FAT12` *before* the boot steps run, so DOS
-finds it during IO.SYS/MSDOS.SYS startup).  The Tier-2 bar is "boots to ``A>``
-with the driver loaded"; the ANSI escape-attribute effect and the RAMDRIVE
-``DIR C:`` functional probe remain stretches. ANSI.SYS can now own its hooked
-INT 29h vector, but complete cursor/attribute rendering still needs an
-end-to-end regression; RAMDRIVE loads but does not register a visible ``C:``
-drive.
+finds it during IO.SYS/MSDOS.SYS startup).  RAMDRIVE.SYS ships on DISK02, so
+its tests mount that image as B: and use ``DEVICE=B:\\RAMDRIVE.SYS``.  ANSI.SYS
+can own its hooked INT 29h vector, but complete cursor/attribute rendering
+still needs an end-to-end regression.
 """
 import os
 import sys
@@ -16,15 +14,15 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from dosharness import DOSHarness, DISK01  # noqa: E402
+from dosharness import DOSHarness, DISK01, DISK02  # noqa: E402
 from fat12 import FAT12  # noqa: E402
 
 pytestmark = [pytest.mark.slow, pytest.mark.tools]
 
 
-def _boot_with_config(config):
+def _boot_with_config(config, image_b=None):
     """Boot DISK01 (writable copy) with the given CONFIG.SYS injected pre-boot."""
-    h = DOSHarness(image_path=DISK01, writable=True)
+    h = DOSHarness(image_path=DISK01, image_b=image_b, writable=True)
     fat = FAT12(h.emu.disk)
     fat.mount()
     fat.write_file('CONFIG.SYS', config.encode())
@@ -42,23 +40,30 @@ def test_ansi_sys_boots():
 
 
 def test_ramdrive_sys_boots():
-    """Booting with DEVICE=RAMDRIVE.SYS reaches the A> prompt."""
-    h = _boot_with_config('DEVICE=RAMDRIVE.SYS\r\n')
+    """Booting RAMDRIVE from B: registers virtual disk C:."""
+    h = _boot_with_config('DEVICE=B:\\RAMDRIVE.SYS\r\n', image_b=DISK02)
     try:
         assert 'A>' in h.vga_str()
+        assert 'Microsoft RAMDrive' in h.vga_str()
+        assert 'Bad or missing' not in h.vga_str()
     finally:
         h.cleanup()
 
 
-@pytest.mark.xfail(strict=True, reason='RAMDRIVE loads but does not register a '
-                                       'visible C: drive (DIR C: -> Invalid drive '
-                                       'specification); functional probe pending')
 def test_ramdrive_dir_c():
-    h = _boot_with_config('DEVICE=RAMDRIVE.SYS\r\n')
+    """Create, list, and read a file on the RAMDRIVE C: block device."""
+    h = _boot_with_config('DEVICE=B:\\RAMDRIVE.SYS\r\n', image_b=DISK02)
     try:
+        h.create_file('C:\\RAM.TXT', 'ram-body')
         r = h.run_command('DIR C:', max_steps=4_000_000, probe_errorlevel=False)
         assert not r.timed_out
-        assert 'File(s)' in r.output
+        assert 'MS-RAMDRIVE' in r.output
+        assert 'RAM      TXT' in r.output
+
+        r = h.run_command('TYPE C:\\RAM.TXT', max_steps=4_000_000,
+                          probe_errorlevel=False)
+        assert not r.timed_out
+        assert 'ram-body' in r.output
     finally:
         h.cleanup()
 

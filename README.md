@@ -407,8 +407,8 @@ instruction-emulation divergence against a trusted reference.
   boot-loadable `CONFIG.SYS`
   drivers load to the `A>` prompt. Guest-installed INT 29h handlers are honored
   (so ANSI.SYS receives escape sequences), though complete ANSI cursor/color
-  rendering still lacks an end-to-end regression; RAMDRIVE's `C:` is not
-  registered.
+  rendering still lacks an end-to-end regression. RAMDRIVE registers `C:`;
+  creating, listing, and reading a file there is covered end-to-end.
 - Step-mode mnemonics are approximate (operand decoding is simplified)
 - PIT timing is instruction-count-based (~500 insns per tick), not real-time
 - CMOS RTC syncs with host time (no independent battery-backed clock)

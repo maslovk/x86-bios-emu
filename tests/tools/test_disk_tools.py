@@ -1,10 +1,10 @@
-"""Phase C/E/F disk-tool tests.
+"""Phase C/E/F disk-tool tests, including full-disk copy/compare.
 
-FORMAT, SYS, and BACKUP/RESTORE are verified host-side with FAT12;
-DISKCOPY/DISKCOMP remain xfailed because full-disk operation is too slow at
-the current emulated instruction rate.
+FORMAT, SYS, DISKCOPY, and BACKUP/RESTORE are verified host-side; DISKCOMP
+covers both identical and differing 360KB images.
 """
 import os
+import shutil
 import sys
 
 import pytest
@@ -39,12 +39,6 @@ def test_format_b_blank_then_host_verify(tmp_path):
         h.cleanup()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='DISKCOPY of a full 360KB disk reads+writes 720 sectors via INT 13h '
-           'and exceeds a practical step budget at the current ~40k inst/s '
-           'emulated instruction rate (>10M steps, watchdog timeout). '
-           'Revisit after a CPU performance / Phase-F pass.')
 def test_diskcopy_a_to_b(tmp_path):
     blank = str(tmp_path / 'BLANK.IMG')
     make_blank_image(blank, 360 * 1024)
@@ -56,11 +50,9 @@ def test_diskcopy_a_to_b(tmp_path):
             [('Press any key when ready', '\r'), ('Copy another', 'N\r')],
             max_steps=2_000_000, probe_errorlevel=False)
         assert not r.timed_out
-        from fat12 import FAT12 as _F
-        a = _F(h.emu.disk); a.mount()
-        b = _F(h.emu.disk_b); b.mount()
-        assert (sorted(e.full_name for e in a.list_root()) ==
-                sorted(e.full_name for e in b.list_root()))
+        # A 360KB disk is exactly 720 sectors.  Compare the entire copied
+        # medium, not just its FAT directory listing.
+        assert h.emu.disk_b.sectors[:720] == h.emu.disk.sectors[:720]
     finally:
         h.cleanup()
 
@@ -181,22 +173,45 @@ def test_backup_restore_roundtrip(tmp_path):
         h.cleanup()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='DISKCOMP compares the full 360KB disk track-by-track and exceeds '
-           'the step budget at the current instruction rate; companion to the '
-           'DISKCOPY xfail.')
+def _run_diskcomp(h):
+    """Run DISKCOMP after each complete media prompt is ready for input."""
+    h.run_steps(20_000)
+    scroll_start = len(h._scrollback)
+    prev = h.vga_str()
+    h.inject_string('DISKCOMP A: B:\r')
+    h.wait_for('Press any key when ready . . .', max_steps=2_000_000)
+    h.inject_string('\r')
+    h.wait_for('Compare another diskette (Y/N) ?', max_steps=2_000_000)
+    # On identical disks the final prompt follows Compare OK immediately;
+    # allow the program to reach its input loop before sending N.
+    h.run_steps(100_000)
+    h.inject_string('N\r')
+    _, timed_out = h._wait_prompt(prev, 2_000_000)
+    return timed_out, h._transcript(scroll_start)
+
+
 def test_diskcomp_a_b(tmp_path):
-    blank = str(tmp_path / 'BLANK.IMG')
+    identical = str(tmp_path / 'IDENTICAL.IMG')
+    shutil.copy2(DISK01, identical)
+    h = DOSHarness(image_path=DISK01, image_b=identical, writable=True)
+    try:
+        h.boot_to_prompt()
+        timed_out, output = _run_diskcomp(h)
+        assert not timed_out
+        assert 'Compare OK' in output
+    finally:
+        h.cleanup()
+
+
+def test_diskcomp_reports_differences(tmp_path):
+    blank = str(tmp_path / 'DIFFERENT.IMG')
     make_blank_image(blank, 360 * 1024)
     h = DOSHarness(image_path=DISK01, image_b=blank, writable=True)
     try:
         h.boot_to_prompt()
-        r = h.run_dialog(
-            'DISKCOMP A: B:',
-            [('Press any key when ready', '\r'), ('Compare another', 'N\r')],
-            max_steps=2_000_000, probe_errorlevel=False)
-        assert not r.timed_out
-        assert 'Compare OK' in r.output
+        timed_out, output = _run_diskcomp(h)
+        assert not timed_out
+        assert 'Compare error on side' in output
+        assert 'Compare OK' not in output
     finally:
         h.cleanup()

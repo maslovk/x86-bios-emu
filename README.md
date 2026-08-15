@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1343 fast + 72 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
+└── tests/             # pytest suite (1343 fast + 73 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
 ```
 
 ## Components
@@ -319,8 +319,8 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 
 ```bash
 python3 -m pytest -q -m "not slow"      # fast tests (1343 tests, ~13s)
-python3 -m pytest -q -m slow            # DOS boot/tool integration tests (72 tests)
-python3 -m pytest -q                    # all 1415 tests
+python3 -m pytest -q -m slow            # DOS boot/tool integration tests (73 tests)
+python3 -m pytest -q                    # all 1416 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```
@@ -392,12 +392,10 @@ instruction-emulation divergence against a trusted reference.
 - Redirection (`<`, `>`, `>>`) works; **pipes** (`|`) are not implemented by
   this COMMAND.COM build ("Invalid parameter") — pipelines are expressed with
   explicit redirection in the tool tests.
-- `DISKCOPY`/`DISKCOMP` of a *full* 360KB disk exceed the watchdog step budget
-  at the current ~40k inst/s emulated instruction rate — xfailed until a CPU
-  performance pass (see `tests/tools/test_disk_tools.py`).
-- Tools whose full path hits a CPU/interrupt emulation gap are `xfail(strict)`
-  with the symptom documented in the test, pending Phase F differential
-  hardening. EDLIN and REPLACE were fixed in Phase F by
+- Full-disk `DISKCOPY` and `DISKCOMP` complete within the bounded tool-test
+  budget. DISKCOPY is checked across all 720 sectors; DISKCOMP covers both
+  identical and deliberately different images.
+- Phase F differential hardening fixed EDLIN and REPLACE by
   decoding memory shift/rotate effective addresses only once; the old
   read-modify-write path consumed the displacement again on write and skipped
   into the next instruction. GWBASIC and PRINT were fixed by preserving the
@@ -417,8 +415,8 @@ instruction-emulation divergence against a trusted reference.
   the differential tracer — verified instruction-exact vs Unicorn on the
   checked-in snapshot (`tests/test_diff_smoke.py`)
 
-See `PLAN.md` for the per-tool status matrix and the remaining phase work
-(Phase F differential hardening of the xfailed tools).
+See `PLAN.md` for the completed per-tool status matrix and the Phase F
+differential-hardening workflow used to close tool regressions.
 
 ## Extending
 

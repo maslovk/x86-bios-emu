@@ -386,7 +386,7 @@ divergences; `pytest.skip` otherwise.
 | EDLIN | 1 | test_edlin.py | ✅ Phase F (insert/save host-verified; fixed memory shift/rotate displacement double-decode) |
 | DEBUG | 1 | test_debug_tool.py | ✅ Phase D (-A/-T/-R/-D/-E/-Q) |
 | EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ✅ Phase E (EXE2BIN usage; LINK loads banner+prompt) |
-| FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | FORMAT ✅ Phase C; SYS ✅ Phase E (IO.SYS/MSDOS.SYS host-verified); DISKCOPY/DISKCOMP xfail (slow) |
+| FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | ✅ Phase C/E/F (FORMAT/SYS host-verified; DISKCOPY exact 720-sector match; DISKCOMP identical/different paths) |
 | RECOVER | 2 | test_disk_tools.py | ✅ Phase E (usage returns, no crash) |
 | BACKUP/RESTORE | 2 | test_disk_tools.py | ✅ Phase F (single-file BACKUP→delete→RESTORE round-trip host-verified) |
 | GWBASIC | 2 | test_gwbasic.py | ✅ Phase F (reaches `Ok`; fixed null old-INT-1Ch chain and INT 10h cursor ABI) |

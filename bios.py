@@ -406,11 +406,21 @@ class BIOS:
             cpu.dx = (self.video.cur_y << 8) | self.video.cur_x
             cpu.cx = 0x0607
         elif ah == 0x06:  # Scroll up
-            rows = al if al else 25
+            top = (cx >> 8) & 0xFF
+            left = cx & 0xFF
+            # IBM-compatible callers commonly use 19FF as an open-ended
+            # lower-right corner (ANSI.SYS does this for ESC[2J).  Clip that
+            # corner to the active text geometry rather than rejecting it.
+            bottom = min((dx >> 8) & 0xFF, 24)
+            right = min(dx & 0xFF, 79)
+            if top >= 25 or left >= 80 or top > bottom or left > right:
+                return
+            height = bottom - top + 1
+            rows = min(al, height) if al else height
             attr = bh
-            for y in range(25):
-                for x in range(80):
-                    if y + rows < 25:
+            for y in range(top, bottom + 1):
+                for x in range(left, right + 1):
+                    if y + rows <= bottom:
                         self.video.buffer[y][x] = self.video.buffer[y + rows][x]
                     else:
                         self.video.buffer[y][x] = (0x20, attr)
@@ -423,8 +433,15 @@ class BIOS:
                 ch, attr = self.video.buffer[y][x]
                 cpu.ax = (attr << 8) | ch
         elif ah == 0x09:  # Write char/attr at cursor
-            for _ in range(cx if cx else 1):
-                self.video.putc(al, bh)
+            # BH selects the display page; BL is the attribute.  This service
+            # writes at and after the cursor but does not move it (ANSI.SYS
+            # advances explicitly with AH=02 after drawing each character).
+            start = self.video.cur_y * 80 + self.video.cur_x
+            for i in range(cx):
+                pos = start + i
+                if pos >= 80 * 25:
+                    break
+                self.video.write(pos % 80, pos // 80, al, bl)
         elif ah == 0x0C:  # Write char at row/col
             row = (dx >> 8) & 0xFF
             col = dx & 0xFF

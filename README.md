@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1340 fast + 71 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
+└── tests/             # pytest suite (1343 fast + 72 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
 ```
 
 ## Components
@@ -318,9 +318,9 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1340 tests, ~13s)
-python3 -m pytest -q -m slow            # DOS boot/tool integration tests (71 tests)
-python3 -m pytest -q                    # all 1411 tests
+python3 -m pytest -q -m "not slow"      # fast tests (1343 tests, ~13s)
+python3 -m pytest -q -m slow            # DOS boot/tool integration tests (72 tests)
+python3 -m pytest -q                    # all 1415 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```
@@ -406,9 +406,9 @@ instruction-emulation divergence against a trusted reference.
   BACKUP/RESTORE now have a host-verified single-file round-trip. The
   boot-loadable `CONFIG.SYS`
   drivers load to the `A>` prompt. Guest-installed INT 29h handlers are honored
-  (so ANSI.SYS receives escape sequences), though complete ANSI cursor/color
-  rendering still lacks an end-to-end regression. RAMDRIVE registers `C:`;
-  creating, listing, and reading a file there is covered end-to-end.
+  and ANSI.SYS clear/cursor/colour effects are verified directly in VGA text
+  memory. RAMDRIVE registers `C:`; creating, listing, and reading a file there
+  is covered end-to-end.
 - Step-mode mnemonics are approximate (operand decoding is simplified)
 - PIT timing is instruction-count-based (~500 insns per tick), not real-time
 - CMOS RTC syncs with host time (no independent battery-backed clock)

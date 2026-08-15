@@ -4,8 +4,8 @@ Each driver is loaded via an injected ``CONFIG.SYS`` (written host-side into the
 in-memory disk with :class:`fat12.FAT12` *before* the boot steps run, so DOS
 finds it during IO.SYS/MSDOS.SYS startup).  RAMDRIVE.SYS ships on DISK02, so
 its tests mount that image as B: and use ``DEVICE=B:\\RAMDRIVE.SYS``.  ANSI.SYS
-can own its hooked INT 29h vector, but complete cursor/attribute rendering
-still needs an end-to-end regression.
+owns its hooked INT 29h vector; its clear-screen, cursor-position, and colour
+rendering are verified directly in VGA text memory.
 """
 import os
 import sys
@@ -20,12 +20,14 @@ from fat12 import FAT12  # noqa: E402
 pytestmark = [pytest.mark.slow, pytest.mark.tools]
 
 
-def _boot_with_config(config, image_b=None):
+def _boot_with_config(config, image_b=None, files=None):
     """Boot DISK01 (writable copy) with the given CONFIG.SYS injected pre-boot."""
     h = DOSHarness(image_path=DISK01, image_b=image_b, writable=True)
     fat = FAT12(h.emu.disk)
     fat.mount()
     fat.write_file('CONFIG.SYS', config.encode())
+    for name, data in (files or {}).items():
+        fat.write_file(name, data)
     h.boot_to_prompt()
     return h
 
@@ -35,6 +37,32 @@ def test_ansi_sys_boots():
     h = _boot_with_config('DEVICE=ANSI.SYS\r\n')
     try:
         assert 'A>' in h.vga_str()
+    finally:
+        h.cleanup()
+
+
+def test_ansi_escape_rendering():
+    """ANSI clears the screen, positions the cursor, and applies/reset colour."""
+    data = (b'\x1b[2J'
+            b'\x1b[10;20H\x1b[31mRED\x1b[0m'
+            b'\x1b[20;1HDONE\r\n')
+    h = _boot_with_config('DEVICE=ANSI.SYS\r\n', files={'ANSI.TXT': data})
+    try:
+        r = h.run_command('TYPE ANSI.TXT', max_steps=2_000_000,
+                          probe_errorlevel=False)
+        assert not r.timed_out
+
+        def cell(row, col):
+            addr = 0xB8000 + (row * 80 + col) * 2
+            return (h.emu.mem.read_byte(addr),
+                    h.emu.mem.read_byte(addr + 1))
+
+        # ANSI coordinates are one-based: 10;20H maps to row 9, column 19.
+        assert [cell(9, col) for col in range(19, 22)] == [
+            (ord('R'), 0x04), (ord('E'), 0x04), (ord('D'), 0x04)]
+        assert [cell(19, col) for col in range(4)] == [
+            (ord('D'), 0x07), (ord('O'), 0x07),
+            (ord('N'), 0x07), (ord('E'), 0x07)]
     finally:
         h.cleanup()
 

@@ -172,9 +172,31 @@ class TestINT10h:
     def test_scroll_up(self, bios_env):
         bios_env.initialize()
         bios_env.video.write(0, 2, ord('X'))
-        self._call(bios_env, ax=0x0601, bx=0x0007)
+        self._call(bios_env, ax=0x0601, bx=0x0007, cx=0x0000, dx=0x184F)
         ch, _ = bios_env.video.buffer[1][0]
         assert ch == ord('X')
+
+    def test_scroll_up_honors_window_and_fill_attribute(self, bios_env):
+        bios_env.initialize()
+        bios_env.video.write(4, 4, ord('O'), 0x07)
+        bios_env.video.write(5, 6, ord('X'), 0x0A)
+
+        self._call(bios_env, ax=0x0601, bx=0x1E00,
+                   cx=0x0505, dx=0x0606)
+
+        assert bios_env.video.buffer[4][4] == (ord('O'), 0x07)
+        assert bios_env.video.buffer[5][5] == (ord('X'), 0x0A)
+        assert bios_env.video.buffer[6][5] == (0x20, 0x1E)
+
+    def test_scroll_clear_clips_ansi_open_ended_window(self, bios_env):
+        """ANSI.SYS clears the display with lower-right coordinate 19FF."""
+        bios_env.initialize()
+        bios_env.video.write(79, 24, ord('X'), 0x0C)
+
+        self._call(bios_env, ax=0x0600, bx=0x0700,
+                   cx=0x0000, dx=0x19FF)
+
+        assert bios_env.video.buffer[24][79] == (0x20, 0x07)
 
     def test_write_char_attr(self, bios_env):
         bios_env.initialize()
@@ -182,6 +204,18 @@ class TestINT10h:
         self._call(bios_env, ax=0x0941, bx=0x000C, cx=1)
         ch, attr = bios_env.video.buffer[3][5]
         assert ch == ord('A')
+        assert attr == 0x0C
+        assert (bios_env.video.cur_x, bios_env.video.cur_y) == (5, 3)
+
+    def test_write_char_attr_repeats_without_moving_cursor(self, bios_env):
+        bios_env.initialize()
+        bios_env.video.cur_x = 79; bios_env.video.cur_y = 3
+
+        self._call(bios_env, ax=0x095A, bx=0x000E, cx=2)
+
+        assert bios_env.video.buffer[3][79] == (ord('Z'), 0x0E)
+        assert bios_env.video.buffer[4][0] == (ord('Z'), 0x0E)
+        assert (bios_env.video.cur_x, bios_env.video.cur_y) == (79, 3)
 
     def test_read_char_attr(self, bios_env):
         bios_env.initialize()

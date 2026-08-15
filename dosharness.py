@@ -402,6 +402,12 @@ class DOSHarness:
             if wait_text not in self.vga_str():
                 timed_out = True
                 break
+            # A prompt can become visible while the guest is still inside its
+            # output routine.  Some DOS tools subsequently use INT 21h/AH=0Ch
+            # (flush keyboard buffer and read), which discards a response
+            # injected immediately after the text first appears.  Let the
+            # guest finish rendering and reach its input wait before typing.
+            self.run_steps(20000)
             self.inject_string(response)
         steps = 0
         if not timed_out:

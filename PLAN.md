@@ -8,25 +8,18 @@ depend on earlier ones. After every phase: `python3 -m pytest -q` must stay
 green (including `-m slow`), and nothing in `DOS3_3_525/` may be modified
 (tests always work on temp copies of the images).
 
-## 0. Current state (verified 2026-07-03)
+## 0. Current state (verified 2026-08-16)
 
-Working: DOS 3.3 boots from `DOS3_3_525/DISK01.IMG` to the `A>` prompt;
-`DIR`, `VER`, `CLS`, `TYPE`-style internal commands work; 477 tests pass.
+Phases A–F are complete. MS-DOS 3.3 boots from the shipped floppy images,
+the full internal/external tool matrix is covered, writable workflows operate
+on temporary images, and the shipped images are protected by a session-level
+hash guard. The complete acceptance command, `python3 -m pytest -q`, passes
+all 1,416 tests (1,343 fast and 73 slow) with no xfails.
 
-Verified gaps that block "test all DOS tools":
-
-| # | Gap | Where | Symptom |
-|---|-----|-------|---------|
-| 1 | INT 13h AH=03 (write sectors) returns success **without writing** | `bios.py:521` | COPY/FORMAT/SYS/EDLIN save all silently fail or corrupt |
-| 2 | INT 13h subfunction semantics wrong: AH=04 handled as "recalibrate" (real: Verify), AH=05 as "media changed" (real: Format Track), AH=0D as "get disk type" (real AH=15h), AH=16h/17h/18h missing | `bios.py:547-568` | FORMAT and media-detection paths mis-dispatch |
-| 3 | DAA/DAS/AAA/AAS silently skipped | `cpu.py:925` | Wrong decimal output in tools that use BCD (DEBUG, GWBASIC, CHKDSK stats) |
-| 4 | TF set → no INT 1 after instruction; INT 3/INTO exist as vectors but single-step trap never fires | `cpu.py` `execute()` | DEBUG `T`/`P` commands can't work |
-| 5 | FPU escapes D8–DF skipped (ModR/M consumed) | `cpu.py:1603` | OK for most tools (equipment word reports no 8087, so GWBASIC uses software FP) — keep, but must consume ModR/M *with displacement* correctly |
-| 6 | Single floppy drive only; DL ignored in INT 13h | `bios.py::_int13h`, `main.py` | DISKCOPY/DISKCOMP/`COPY A: B:` impossible |
-| 7 | `fat12.py` is read-only | `fat12.py` | Tests can't inject fixture files pre-boot, can't verify guest writes host-side |
-| 8 | No image persistence / copy-on-write; guest writes (once fixed) mutate only in-memory sectors | `main.py::_load_floppy`, `video.py::Disk` | Can't assert on written files after emulator exit; risk of mutating repo images |
-| 9 | `DOSHarness` lives inside `tests/test_dos_boot.py` | tests | Not reusable for a per-tool suite |
-| 10 | No Ctrl-C / Ctrl-Break path (INT 1Bh, kbd controller has no break scan-code injection) | `hardware.py`, `bios.py` | Can't test BREAK, can't abort runaway tools (MORE, SORT, PRINT) |
+The original blocking gaps are resolved: writable and multi-drive INT 13h,
+FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
+CPU semantics, safe FPU escape decoding, image persistence/copy-on-write, and
+Ctrl-C/Ctrl-Break injection all have implementation and regression coverage.
 
 ## 1. Tool inventory and target tiers
 

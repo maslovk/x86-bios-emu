@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1338 fast + 70 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
+└── tests/             # pytest suite (1340 fast + 70 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
 ```
 
 ## Components
@@ -318,10 +318,10 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1338 tests, ~13s)
+python3 -m pytest -q -m "not slow"      # fast tests (1340 tests, ~13s)
 python3 -m pytest -q -m slow            # DOS boot/tool integration tests (70 tests)
-python3 -m pytest -q                    # all 1408 tests
-python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (20 tests)
+python3 -m pytest -q                    # all 1410 tests
+python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```
 
@@ -397,13 +397,17 @@ instruction-emulation divergence against a trusted reference.
   performance pass (see `tests/tools/test_disk_tools.py`).
 - Tools whose full path hits a CPU/interrupt emulation gap are `xfail(strict)`
   with the symptom documented in the test, pending Phase F differential
-  hardening: **REPLACE** (hangs after invocation), **BACKUP** (reboots), and
-  **EDLIN** (insert-mode Ctrl-C / INT 23h break semantics). GWBASIC and PRINT
-  were fixed in Phase F by preserving the BIOS INT 1Ch callback stub instead
-  of replacing its vector with `0000:0000`; GWBASIC also exposed and now guards
-  the standard INT 10h cursor register ABI. The boot-loadable `CONFIG.SYS`
-  drivers load to the `A>` prompt; ANSI escape sequences print literally (the
-  built-in INT 29h putchar is always used) and RAMDRIVE's `C:` is not registered.
+  hardening: **BACKUP** (reboots). EDLIN and REPLACE were fixed in Phase F by
+  decoding memory shift/rotate effective addresses only once; the old
+  read-modify-write path consumed the displacement again on write and skipped
+  into the next instruction. GWBASIC and PRINT were fixed by preserving the
+  BIOS INT 1Ch callback stub instead of replacing its vector with `0000:0000`;
+  GWBASIC also exposed and now guards the standard INT 10h cursor register ABI.
+  The boot-loadable `CONFIG.SYS`
+  drivers load to the `A>` prompt. Guest-installed INT 29h handlers are honored
+  (so ANSI.SYS receives escape sequences), though complete ANSI cursor/color
+  rendering still lacks an end-to-end regression; RAMDRIVE's `C:` is not
+  registered.
 - Step-mode mnemonics are approximate (operand decoding is simplified)
 - PIT timing is instruction-count-based (~500 insns per tick), not real-time
 - CMOS RTC syncs with host time (no independent battery-backed clock)

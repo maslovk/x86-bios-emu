@@ -105,13 +105,16 @@ class BIOS:
         #     boot; programs that exit via the old-style `INT 20h` (e.g.
         #     COMP.COM after answering its "Compare more files?" prompt with
         #     N) must return to their parent (COMMAND.COM), not halt the CPU.
+        #   * INT 29h (fast console output) - filter drivers such as ANSI.SYS
+        #     hook this vector and must see characters before optionally
+        #     chaining to the original BIOS putchar stub.
         # When such a vector has been repointed away from the BIOS stub, hand
         # control to the replacement handler instead of the built-in one.  The
         # other registered vectors always use the built-in Python handler: the
         # BIOS IVT stubs are `INT n; IRET`, so an app that hooks and *chains*
         # to the old vector (e.g. IO.SYS's INT 13h) would recurse if we
         # transferred, and the Python handler is what boots DOS correctly.
-        if n in (0x01, 0x03, 0x20):
+        if n in (0x01, 0x03, 0x20, 0x29):
             ip = self.mem.read_word(n * 4)
             cs = self.mem.read_word(n * 4 + 2)
             stub = self.ivt_stubs.get(n)

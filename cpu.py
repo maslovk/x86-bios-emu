@@ -2079,9 +2079,16 @@ class CPU:
 
         is_word = opc in (0xD1, 0xD3)
         if mod == 3:
+            addr = None
             val = self._get_reg16(rm) if is_word else self._get_reg8_modrm(rm)
         else:
-            val = self._ea_word(mod, rm) if is_word else self._ea_byte(mod, rm)
+            # Decode the effective address exactly once.  These are
+            # read-modify-write instructions, so calling _ea_* again for the
+            # write would consume the displacement a second time and advance
+            # IP into the following instruction (EDLIN's ``SHR word
+            # [13F2],1`` exposed this with a direct disp16 operand).
+            addr = self._ea(mod, rm)
+            val = self._readw(addr) if is_word else self._readb(addr)
 
         size = 16 if is_word else 8
         mask = 0xFFFF if is_word else 0xFF
@@ -2125,12 +2132,12 @@ class CPU:
             if mod == 3:
                 self._set_reg16(rm, val)
             else:
-                self._ea_write_word(mod, rm, val)
+                self._writew(addr, val)
         else:
             if mod == 3:
                 self._set_reg8_modrm(rm, val)
             else:
-                self._ea_write_byte(mod, rm, val)
+                self._writeb(addr, val)
 
         if count != 1:
             self.of = False

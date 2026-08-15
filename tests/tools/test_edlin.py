@@ -1,14 +1,11 @@
-"""Phase D/E EDLIN — currently xfail (insert-mode termination).
+"""Phase F EDLIN insert/save regression.
 
 EDLIN enters insert mode on ``1i`` and accepts lines terminated by CR; to end
-insert mode it expects a Ctrl-C (0x03) or Ctrl-Break.  The harness injects the
-raw 0x03 byte directly into the keyboard buffer (Phase D control-char path),
-but EDLIN reads its input through DOS console functions that intercept Ctrl-C
-as the break character (INT 23h) before EDLIN sees it as a plain end-of-insert
-byte, so insert mode never terminates and the edited lines are never written
-to disk.  Flipping this needs the Ctrl-Break → INT 1Bh/23h break-injection
-semantics from Phase D item 2 fully wired through the keyboard controller /
-DOS console input path.
+insert mode it expects Ctrl-C (0x03).  The harness's exact-byte keyboard path
+delivers that character successfully.  The former failure happened earlier:
+a memory shift decoded its displacement twice, skipped into the following
+CALL operand, and sent EDLIN into zero-filled memory.  The CPU regression is
+covered by ``tests/test_shift_flags.py``.
 """
 import os
 import sys
@@ -22,9 +19,6 @@ from fat12 import FAT12  # noqa: E402
 pytestmark = [pytest.mark.slow, pytest.mark.tools]
 
 
-@pytest.mark.xfail(strict=True, reason='EDLIN insert-mode needs Ctrl-C to fire '
-                                       'INT 23h break semantics through DOS '
-                                       'console input (Phase D item 2)')
 def test_edlin_insert_save(dos_rw):
     dos_rw.run_command('DEL NEW.TXT', probe_errorlevel=False)
     dos_rw.inject_string('EDLIN NEW.TXT\r')

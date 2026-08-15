@@ -477,6 +477,19 @@ class TestExceptions:
         assert cpu.halted is False
 
 
+class TestRepointableINT29h:
+    def test_transfers_to_guest_fast_console_handler(self, bios_env):
+        bios_env.initialize()
+        bios_env.mem.write_word(0x29 * 4, 0x3456)
+        bios_env.mem.write_word(0x29 * 4 + 2, 0x1234)
+        cpu = FakeCPU(ax=ord('A'))
+
+        bios_env.handle_interrupt(cpu, 0x29)
+
+        assert (cpu.cs, cpu.ip) == (0x1234, 0x3456)
+        assert cpu.int_no_return is True
+
+
 class TestINT13hMultiSector:
     """Test INT 13h AH=02 multi-sector read fix."""
 

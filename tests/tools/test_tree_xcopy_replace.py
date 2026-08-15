@@ -1,4 +1,4 @@
-"""Phase E TREE / XCOPY / REPLACE.
+"""Phase E/F TREE / XCOPY / REPLACE.
 
 TREE.EXE, XCOPY.EXE and REPLACE.COM all ship on DISK02 (drive B), so they are
 invoked as ``B:TREE`` etc. on a harness with B:=DISK02.  XCOPY/REPLACE need
@@ -49,11 +49,12 @@ def test_xcopy_a_to_b(dos_b):
     dos_b.run_command('DEL SRC.TXT', probe_errorlevel=False)
 
 
-@pytest.mark.xfail(strict=True, reason='B:REPLACE hangs after invocation (no output, '
-    'watchdog timeout) — an emulation gap in REPLACE.EXE; Tier-1 tool '
-    'pending Phase F differential investigation')
 def test_replace_updates_destination(dos_b):
-    """B:REPLACE overwrites a newer source file onto the destination on B."""
+    """B:REPLACE overwrites a newer source file onto the destination on B.
+
+    Phase F fixed the memory shift/rotate displacement double-decode that
+    corrupted control flow before REPLACE initialized its DOS list head.
+    """
     dos_b.create_file('R.TXT', 'old-version')
     dos_b.run_command('COPY R.TXT B:', max_steps=4_000_000, probe_errorlevel=False)
     dos_b.run_command('DEL R.TXT', probe_errorlevel=False)

@@ -4,10 +4,10 @@ Each driver is loaded via an injected ``CONFIG.SYS`` (written host-side into the
 in-memory disk with :class:`fat12.FAT12` *before* the boot steps run, so DOS
 finds it during IO.SYS/MSDOS.SYS startup).  The Tier-2 bar is "boots to ``A>``
 with the driver loaded"; the ANSI escape-attribute effect and the RAMDRIVE
-``DIR C:`` functional probe are stretches documented as xfail (ANSI.SYS hooks
-INT 29h, which the emulator always services with its built-in putchar, so
-escape sequences print literally rather than altering VRAM attributes; RAMDRIVE
-loads but does not register a visible ``C:`` drive).
+``DIR C:`` functional probe remain stretches. ANSI.SYS can now own its hooked
+INT 29h vector, but complete cursor/attribute rendering still needs an
+end-to-end regression; RAMDRIVE loads but does not register a visible ``C:``
+drive.
 """
 import os
 import sys

@@ -175,9 +175,9 @@ Track status in a table at the bottom of this file; update it as tests land.
   - `DEL`, `REN`, `MD SUB` + `CD SUB` + file create in subdir + `RD` refusal
     while non-empty, success when empty.
   - `EDLIN NEW.TXT` — insert two lines (`1i`, text, Ctrl-C, `E`), verify file
-    host-side. (EDLIN uses Ctrl-C to exit insert mode — needs Phase D item 2;
-    if not yet available, use Ctrl-Z? No — EDLIN needs Ctrl-C, so mark this
-    test `xfail` until Phase D and note it here.)
+    host-side. EDLIN's Ctrl-C insert terminator works through the exact-byte
+    keyboard path; Phase F fixed the memory-shift RMW decoder bug that had
+    skipped into the following instruction before termination was reached.
 
 ### Acceptance
 
@@ -382,8 +382,8 @@ divergences; `pytest.skip` otherwise.
 | ATTRIB / LABEL | 1 | test_attrib_label.py | ✅ Phase E (+R/-R host-verified, LABEL/VOL round-trip) |
 | CHKDSK | 1 | test_chkdsk.py | ✅ Phase E (totals match host-side FAT12 math) |
 | FIND/SORT/MORE/COMP/FC | 1 | test_text_tools.py | ✅ Phase E (redirection<>, no pipes; FC via B:) |
-| TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ✅ Phase E (TREE/B:XCOPY host-verified); REPLACE xfail (hangs) |
-| EDLIN | 1 | test_edlin.py | ⬜ Phase F (insert-mode Ctrl-C/INT 23h remaining) — xfail |
+| TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ✅ Phase E/F (all host-verified; REPLACE fixed by memory shift/rotate displacement single-decode) |
+| EDLIN | 1 | test_edlin.py | ✅ Phase F (insert/save host-verified; fixed memory shift/rotate displacement double-decode) |
 | DEBUG | 1 | test_debug_tool.py | ✅ Phase D (-A/-T/-R/-D/-E/-Q) |
 | EXE2BIN / LINK | 1/2 | test_exe2bin_link.py | ✅ Phase E (EXE2BIN usage; LINK loads banner+prompt) |
 | FORMAT/SYS/DISKCOPY/DISKCOMP | 1 | test_disk_tools.py | FORMAT ✅ Phase C; SYS ✅ Phase E (IO.SYS/MSDOS.SYS host-verified); DISKCOPY/DISKCOMP xfail (slow) |
@@ -391,5 +391,5 @@ divergences; `pytest.skip` otherwise.
 | BACKUP/RESTORE | 2 | test_disk_tools.py | RESTORE loads ✅; BACKUP xfail (reboots) — Phase F |
 | GWBASIC | 2 | test_gwbasic.py | ✅ Phase F (reaches `Ok`; fixed null old-INT-1Ch chain and INT 10h cursor ABI) |
 | TSRs (SHARE/FASTOPEN/APPEND/PRINT/MODE/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E/F (load-without-crash + SUBST E: functional; PRINT resident and follow-up command verified) |
-| CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E (boot-smoke); RAMDRIVE DIR C: xfail |
+| CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E/F (boot-smoke; guest INT 29h hooks honored); ANSI visual regression and RAMDRIVE DIR C: remain |
 | FDISK/KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |

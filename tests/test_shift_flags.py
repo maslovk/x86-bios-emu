@@ -118,6 +118,22 @@ class TestShiftFlags:
         assert cpu.zf is False
         # OF is undefined for count != 1, but the arithmetic flags must match
 
+    def test_memory_shift_consumes_displacement_once(self):
+        """A memory RMW shift must not decode its displacement twice.
+
+        EDLIN uses ``D1 2E F2 13`` (SHR word [13F2],1).  Recomputing the
+        effective address for the write consumed two bytes from the following
+        instruction and resumed execution in its operand.
+        """
+        cpu = make_cpu([0xD1, 0x2E, 0xF2, 0x13, 0x90])
+        cpu.mem.write_word(0x13F2, 0x0002)
+
+        cpu.execute()
+
+        assert cpu.mem.read_word(0x13F2) == 0x0001
+        assert cpu.ip == 0x7C04
+        assert cpu.mem.read_byte(cpu.ip) == 0x90
+
     def test_rol_does_not_touch_zf_pf_sf(self):
         """ROL only updates CF/OF; it must NOT modify SF/ZF/PF (per Intel SDM).
 

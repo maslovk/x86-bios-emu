@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from bios import BIOS
 from main import Emulator
 from tests.test_two_drives import FakeCPU
-from video import Disk
+from video import Disk, DiskView
 
 
 CYLINDERS = 306
@@ -101,3 +101,18 @@ def test_hard_disk_persistence_is_opt_in(tmp_path):
         sector = image.read(512)
     assert sector[446:450] == b'MBR!'
     assert not emulator.hard_disk.dirty
+
+
+def test_disk_view_offsets_io_and_preserves_bounds():
+    disk = Disk(100)
+    view = DiskView(disk, 17, 40)
+    marker = bytearray([0xA5] * 512)
+    assert view.write_sector(0, marker)
+    assert disk.sectors[17] == marker
+    assert disk.dirty
+
+    result = bytearray(512)
+    assert view.read_sector(0, result)
+    assert result == marker
+    assert not view.read_sector(40, result)
+    assert not view.write_sector(40, marker)

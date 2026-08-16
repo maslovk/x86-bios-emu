@@ -10,11 +10,11 @@ green (including `-m slow`), and nothing in `DOS3_3_525/` may be modified
 
 ## 0. Current state (verified 2026-08-16)
 
-Phases A–G are complete. MS-DOS 3.3 boots from the shipped floppy images,
+Phases A–H are complete. MS-DOS 3.3 boots from the shipped floppy images,
 the full internal/external tool matrix is covered, writable workflows operate
 on temporary images, and the shipped images are protected by a session-level
 hash guard. The complete acceptance command, `python3 -m pytest -q`, passes
-all 1,428 tests (1,351 fast and 77 slow) with no xfails.
+all 1,430 tests (1,352 fast and 78 slow) with no xfails.
 
 The original blocking gaps are resolved: writable and multi-drive INT 13h,
 FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
@@ -382,8 +382,34 @@ divergences; `pytest.skip` otherwise.
 
 FDISK reaches its normal restart prompt after writing a valid active FAT12
 partition spanning sectors 17–20807; the full suite stays green and shipped
-floppy hashes remain unchanged. FAT16 formatting and booting C: are follow-on
-work, not Phase G acceptance requirements.
+floppy hashes remain unchanged.
+
+---
+
+## Phase H — DOS drive C: and fixed-disk filesystem
+
+### Features
+
+1. `video.py::DiskView` provides a bounded, sector-offset view into a parent
+   disk so host filesystem tools can mount a partition without copying it;
+   writes propagate through the parent and preserve its dirty tracking.
+2. A fresh floppy boot discovers the Phase G active partition as drive C:.
+   DOS `FORMAT C:` creates its FAT12 BPB/FAT/root layout, after which normal
+   DOS file commands operate on the fixed disk.
+
+### Tests
+
+- `tests/test_hard_disk.py` (fast): partition-view offset I/O and bounds.
+- `tests/tools/test_hard_disk_filesystem.py` (slow): boot with the Phase G MBR
+  layout, verify C: visibility, complete fixed-disk FORMAT, write/read
+  `C:\HELLO.TXT` in DOS, mount the partition at LBA 17 with host FAT12, and
+  prove the original source image was not modified.
+
+### Acceptance
+
+`DIR C:`, `FORMAT C:`, guest file write/read, and host-side FAT12 verification
+all agree on a private 10MB image. Larger FAT16 partitions and booting from
+the hard disk remain follow-on work.
 
 ---
 
@@ -420,4 +446,5 @@ work, not Phase G acceptance requirements.
 | TSRs/devices (SHARE/FASTOPEN/APPEND/PRINT/MODE/CTTY/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E/F (load-without-crash; SUBST E: functional; PRINT resident; MODE COM1 configured; CTTY COM1 round-trip) |
 | CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E/F (boot-smoke; RAMDRIVE C: read/write; ANSI clear/cursor/colour rendering in VRAM) |
 | FDISK | 2 | test_fdisk.py | ✅ Phase G (active primary FAT12 partition; MBR host-verified on private HDD image) |
+| FORMAT C:/fixed-disk files | 2 | test_hard_disk_filesystem.py | ✅ Phase H (fresh-boot C: discovery; FORMAT and file round-trip host-verified) |
 | KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |

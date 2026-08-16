@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1351 fast + 77 slow: CPU/BIOS/disk/FAT12, DOS tools)
+└── tests/             # pytest suite (1352 fast + 78 slow: CPU/BIOS/disk/FAT12, DOS tools)
 ```
 
 ## Components
@@ -173,7 +173,8 @@ python3 main.py --interactive            # Interactive: read keys from stdin
 python3 main.py --gtk                    # GTK window display + real keyboard capture
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 truncate -s 10653696 harddisk.img        # Blank 306/4/17 CHS disk (~10 MB)
-python3 main.py --floppy disk.img --hard-disk harddisk.img --gtk
+python3 main.py --floppy disk.img --hard-disk harddisk.img --persist --gtk
+# In DOS: run FDISK, exit/relaunch the same command, then run FORMAT C:
 python3 main.py --boot file.bin --step   # Combine flags
 python3 main.py --floppy disk.img         # Load FAT12 floppy image (auto-detect size)
 python3 main.py --boot dos3.3.img         # Load DOS 3.3 boot sector
@@ -321,9 +322,9 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1351 tests, ~13s)
-python3 -m pytest -q -m slow            # DOS boot/tool integration tests (77 tests)
-python3 -m pytest -q                    # all 1428 tests
+python3 -m pytest -q -m "not slow"      # fast tests (1352 tests, ~13s)
+python3 -m pytest -q -m slow            # DOS boot/tool integration tests (78 tests)
+python3 -m pytest -q                    # all 1430 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```
@@ -384,9 +385,11 @@ instruction-emulation divergence against a trusted reference.
 - No protected mode support; no DMA emulation
 - Two floppy drives max (A: and B: via `--floppy` / `--floppy-b`) plus one
   legacy C/4/17 hard disk at BIOS drive 80h. FDISK can create a maximum-size
-  active primary partition and its MBR is host-verified. FAT16 formatting,
-  mounting the partition as C:, and booting from the hard disk are not yet
-  implemented.
+  active primary partition; after relaunch, DOS discovers it as C: and
+  `FORMAT C:` plus normal file I/O work. The MBR and partition filesystem are
+  host-verified. FDISK's requested warm restart is not emulated, so relaunch
+  the emulator after partitioning. Larger FAT16 geometries and booting from
+  the hard disk are not yet implemented.
 - FAT12 **write** is supported (guest `COPY`/`DEL`/`REN`/`MKDIR`/`FORMAT`/`SYS`/
   `XCOPY` persist via INT 13h AH=03, and host-side `fat12.FAT12.write_file` can
   inject fixtures, including `CONFIG.SYS` for driver boot-smoke tests).

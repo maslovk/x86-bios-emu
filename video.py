@@ -425,3 +425,30 @@ class Disk:
         # Set boot signature
         self.sectors[0][510] = 0x55
         self.sectors[0][511] = 0xAA
+
+
+class DiskView:
+    """Bounded sector-offset view into an existing :class:`Disk`.
+
+    Filesystem helpers can mount a partition through this view while reads,
+    writes, and the dirty flag continue to belong to the parent disk.
+    """
+
+    def __init__(self, disk, start_sector, sector_count):
+        if (start_sector < 0 or sector_count <= 0
+                or start_sector + sector_count > len(disk.sectors)):
+            raise ValueError("disk view exceeds parent disk bounds")
+        self.disk = disk
+        self.start_sector = start_sector
+        self.sectors = disk.sectors[
+            start_sector:start_sector + sector_count]
+
+    def read_sector(self, lba, buf):
+        if not 0 <= lba < len(self.sectors):
+            return False
+        return self.disk.read_sector(self.start_sector + lba, buf)
+
+    def write_sector(self, lba, buf):
+        if not 0 <= lba < len(self.sectors):
+            return False
+        return self.disk.write_sector(self.start_sector + lba, buf)

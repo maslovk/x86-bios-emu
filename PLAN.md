@@ -10,12 +10,12 @@ green (including `-m slow`), and nothing in `DOS3_3_525/` may be modified
 
 ## 0. Current state (verified 2026-08-16)
 
-Phases A–I are complete. MS-DOS 3.3 boots from the shipped floppy images or
+Phases A–J are complete. MS-DOS 3.3 boots from the shipped floppy images or
 from a prepared hard-disk image,
 the full internal/external tool matrix is covered, writable workflows operate
 on temporary images, and the shipped images are protected by a session-level
 hash guard. The complete acceptance command, `python3 -m pytest -q`, passes
-all 1,432 tests (1,353 fast and 79 slow) with no xfails.
+all 1,436 tests (1,356 fast and 80 slow) with no xfails.
 
 The original blocking gaps are resolved: writable and multi-drive INT 13h,
 FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
@@ -436,8 +436,39 @@ all agree on a private 10MB image.
 ### Acceptance
 
 The complete FDISK → FORMAT /S → MBR → partition boot chain reaches a
-working MS-DOS `C>` prompt on an isolated image. Larger FAT16 geometries remain
-follow-on work.
+working MS-DOS `C>` prompt on an isolated image.
+
+---
+
+## Phase J — FAT16 and larger hard disks
+
+### Features
+
+1. The existing variable-cylinder C/4/17 hard-disk path is validated at
+   615/4/17 (41,820 sectors, 21,411,840 bytes), beyond DOS 3.3's FAT12 size
+   range. No BIOS geometry change is needed; legacy CHS already supports the
+   larger image.
+2. `fat12.py::FAT16` reuses the DOS BPB, root-directory, cluster I/O, and
+   host mutation APIs while implementing 16-bit FAT entries, FAT16 cluster
+   range validation, mirrored FAT writes, allocation, and free-space handling.
+3. DOS FDISK selects partition type `04h`, FORMAT creates a FAT16 filesystem,
+   and `FORMAT C: /S` remains directly bootable through the MBR.
+
+### Tests
+
+- `tests/test_fat16.py` (fast): synthetic FAT16 BPB and multi-cluster reads,
+  last-cluster bounds, host writes through a `DiskView`, FAT mirror agreement,
+  fresh-mount round-trip, and rejection of FAT12-sized volumes.
+- `tests/tools/test_fat16_hard_disk.py` (slow): FDISK a private 615/4/17 disk,
+  assert its active `04h` partition, FORMAT it with system files, verify its
+  BPB and marker through host FAT16, then fresh-boot from drive `80h` and read
+  the marker at `C>`.
+
+### Acceptance
+
+The complete FDISK → FAT16 FORMAT /S → host verification → MBR boot workflow
+passes on an isolated 20 MB image, while the 10 MB FAT12 workflows remain
+green.
 
 ---
 
@@ -476,4 +507,5 @@ follow-on work.
 | FDISK | 2 | test_fdisk.py | ✅ Phase G (active primary FAT12 partition; MBR host-verified on private HDD image) |
 | FORMAT C:/fixed-disk files | 2 | test_hard_disk_filesystem.py | ✅ Phase H (fresh-boot C: discovery; FORMAT and file round-trip host-verified) |
 | Hard-disk boot | 2 | test_hard_disk_boot.py | ✅ Phase I (FDISK → FORMAT /S → fresh MBR boot to C>; file readback) |
+| FAT16 hard disk | 2 | test_fat16.py, test_fat16_hard_disk.py | ✅ Phase J (20MB type 04h partition; FORMAT /S, host round-trip, direct boot) |
 | KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |

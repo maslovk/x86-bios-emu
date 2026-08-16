@@ -1,8 +1,8 @@
 """
-Simple BIOS Emulator — FAT12 Filesystem
-========================================
-Parses 1.44 MB floppy images with FAT12 filesystem.
-Reads BPB, FAT table, root directory, and cluster chains.
+Simple BIOS Emulator — FAT12/FAT16 Filesystems
+===============================================
+Parses DOS FAT12 and FAT16 filesystems.  Both variants share BPB,
+directory, cluster I/O, and host-side file mutation support.
 """
 
 
@@ -450,7 +450,9 @@ class FAT12:
         chain = []
         cluster = first_cluster
         while cluster < self.FAT12_BAD:
-            if cluster > self.total_clusters:
+            # Data-cluster numbers start at 2, so a volume with N clusters
+            # has valid cluster numbers 2..N+1.
+            if cluster >= self.total_clusters + 2:
                 raise FAT12Error(f"Cluster {cluster} exceeds total {self.total_clusters}")
             chain.append(cluster)
             cluster = self.get_fat_entry(cluster)
@@ -796,6 +798,59 @@ class FAT12:
         for i, b in enumerate(data):
             mem.write_byte(dest_addr + i, b)
         return data
+
+
+class FAT16(FAT12):
+    """DOS FAT16 filesystem reader/writer.
+
+    FAT12 and FAT16 use the same DOS 2+ BPB and directory layout.  FAT16
+    differs only in its cluster-count range and its fixed-width, little-endian
+    16-bit FAT entries, so the common filesystem operations remain inherited.
+    """
+
+    MIN_CLUSTERS = 4085
+    MAX_CLUSTERS = 65524
+
+    def mount(self):
+        super().mount()
+        if not self.MIN_CLUSTERS <= self.total_clusters <= self.MAX_CLUSTERS:
+            raise FAT12Error(
+                f"FAT16 requires {self.MIN_CLUSTERS}..{self.MAX_CLUSTERS} "
+                f"clusters, found {self.total_clusters}")
+        self.geom_label = 'FAT16 BPB'
+        # Keep the inherited names for compatibility with its generic chain,
+        # allocation, and free-space helpers.
+        self.FAT12_EOC = 0xFFF8
+        self.FAT12_BAD = 0xFFF7
+        self.FAT12_FREE = 0x0000
+        return self
+
+    def get_fat_entry(self, cluster: int) -> int:
+        """Read one little-endian 16-bit FAT entry."""
+        fat = self._read_fat()
+        offset = cluster * 2
+        if offset + 1 >= len(fat):
+            raise FAT12Error(f"FAT entry {cluster} out of range")
+        return int.from_bytes(fat[offset:offset + 2], 'little')
+
+    def set_fat_entry(self, cluster: int, value: int):
+        """Write a 16-bit FAT entry and mirror it to every FAT copy."""
+        fat = self._read_fat()
+        offset = cluster * 2
+        if offset + 1 >= len(fat):
+            raise FAT12Error(f"FAT entry {cluster} out of range")
+        fat[offset:offset + 2] = (value & 0xFFFF).to_bytes(2, 'little')
+        self._flush_fat_entry(cluster)
+
+    def _flush_fat_entry(self, cluster: int):
+        """Write the FAT sector touched by a fixed-width FAT16 entry."""
+        fat = self._read_fat()
+        bps = self.bytes_per_sector
+        sector = (cluster * 2) // bps
+        buf = bytearray(fat[sector * bps:(sector + 1) * bps])
+        for copy in range(self.num_fats):
+            base = self.fat_start + copy * self.sectors_per_fat
+            self.disk.write_sector(base + sector, buf)
 
 
 def make_blank_image(path, size=360 * 1024):

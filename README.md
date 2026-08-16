@@ -218,7 +218,8 @@ The emulator supports two VGA output paths:
   paired with Reset (soft reboot), Paste (host clipboard text), and a live
   A:/B:/C: media-status bar; Ctrl+R and Ctrl+V provide keyboard shortcuts.
   The session indicator shows booting/running/stopped state and whether guest
-  disk writes will be persisted or discarded.
+  disk writes will be persisted or discarded. Dirty media is marked with `*`,
+  and closing with unpersisted writes requires confirmation.
   the recommended path for interactive DOS use: it sidesteps the cbreak /
   scan-code-remapping pitfalls of terminal stdin, and Enter yields `0x0D`
   (CR) — what COMMAND.COM's DATE/TIME prompts expect.  Ctrl+C in the

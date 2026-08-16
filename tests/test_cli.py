@@ -125,6 +125,17 @@ def test_cursor_blink_interval_matches_cga_16_field_rate():
     assert CURSOR_BLINK_INTERVAL_MS == 267
 
 
+def test_dirty_media_warning_only_applies_to_nonpersistent_sessions():
+    emulator = Emulator(enable_hardware=False, persist=False)
+    assert emulator._close_warning() is None
+    emulator.disk.dirty = True
+    assert 'A:' in emulator._close_warning()
+
+    persistent = Emulator(enable_hardware=False, persist=True)
+    persistent.disk.dirty = True
+    assert persistent._close_warning() is None
+
+
 def test_create_hard_disk_image_uses_exact_legacy_geometry(tmp_path):
     image = tmp_path / 'blank-hd.img'
 

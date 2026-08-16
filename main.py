@@ -333,10 +333,12 @@ class Emulator:
                     self.kbd.buffer.append(byte)
             self.gtk_display = GtkDisplay(
                 self.video, on_key=_on_key, on_reset=self.reset_guest,
+                close_warning=self._close_warning,
                 font_size=gtk_font_size)
 
         # FAT12 filesystem
         self.floppy_image = floppy_image
+        self.floppy_b_image = floppy_b
         self.fat = None
         # Original (pre-padding) sector count of the loaded image, so --persist
         # writes back exactly the image's on-disk size instead of the 1.44MB
@@ -354,10 +356,7 @@ class Emulator:
             self._load_hard_disk(hard_disk)
         self.bios.boot_drive = self.boot_drive
         if self.gtk_display is not None:
-            media = [f"A: {os.path.basename(self.floppy_image) if self.floppy_image else 'none'}"]
-            media.append(f"B: {os.path.basename(floppy_b) if floppy_b else 'none'}")
-            media.append(f"C: {os.path.basename(hard_disk) if hard_disk else 'none'}")
-            self.gtk_display.set_media_status('  '.join(media))
+            self.gtk_display.set_media_status(self._media_status())
             self.gtk_display.set_session_status(
                 'Ready • writes ' + ('enabled' if self.persist else 'discarded'))
 
@@ -391,6 +390,39 @@ class Emulator:
             self.pic.initialize()
         self._setup_ivt_irq_handlers()
         self._install_bios_interrupt_hook()
+        if self.gtk_display is not None:
+            self.gtk_display.set_session_status(
+                'Running • writes ' + ('enabled' if self.persist else 'discarded'))
+
+    def _media_status(self):
+        """Return compact GUI media labels, marking guest-dirty devices."""
+        def label(letter, path, disk):
+            name = os.path.basename(path) if path else 'none'
+            return f'{letter}: {name}' + (' *' if disk and disk.dirty else '')
+        return '  '.join((
+            label('A', self.floppy_image, self.disk),
+            label('B', getattr(self, 'floppy_b_image', None), self.disk_b),
+            label('C', self.hard_disk_image, self.hard_disk)))
+
+    def _close_warning(self):
+        """Return a GTK close warning only when non-persistent writes exist."""
+        if self.persist:
+            return None
+        dirty = self._dirty_media()
+        if not dirty:
+            return None
+        return ('Guest writes to ' + ', '.join(dirty) +
+                ' will be discarded. Close anyway?')
+
+    def _dirty_media(self):
+        dirty = []
+        if getattr(self.disk, 'dirty', False):
+            dirty.append('A:')
+        if self.disk_b and self.disk_b.dirty:
+            dirty.append('B:')
+        if self.hard_disk and self.hard_disk.dirty:
+            dirty.append('C:')
+        return dirty
 
     def _create_memory(self):
         """Create memory object compatible with CPU."""
@@ -771,6 +803,7 @@ class Emulator:
                                 self.stop_reason = 'GTK window closed'
                                 print("[GTK window closed]", file=sys.stderr)
                                 break
+                            self.gtk_display.set_media_status(self._media_status())
                 elif self.interactive:
                     try:
                         if select.select([sys.stdin], [], [], 0)[0]:
@@ -833,6 +866,11 @@ class Emulator:
             # Tear down the GTK window if it was opened.
             if self.gtk and self.gtk_display is not None:
                 self.gtk_display.close()
+            dirty_before_persist = self._dirty_media()
+            if dirty_before_persist and not self.persist:
+                print('[persist] discarded guest writes on ' +
+                      ', '.join(dirty_before_persist) +
+                      ' (--persist was not supplied)', file=sys.stderr)
             self._persist_floppy()
             self._persist_hard_disk()
 

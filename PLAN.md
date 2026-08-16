@@ -525,6 +525,9 @@ the emulator without changing guest compatibility.
   terminal and GTK session indicator.
 - ✅ GTK quality-of-life controls: soft reset, live media status, and clipboard
   paste (buttons plus Ctrl+R/Ctrl+V shortcuts).
+- ✅ Dirty-media warnings and true guest restart: modified A:/B:/C: media is
+  marked in GTK, non-persistent shutdowns warn before discarding writes, and
+  Reset reinitializes memory, CPU, BIOS, IRQ state, and boot execution.
 
 ---
 

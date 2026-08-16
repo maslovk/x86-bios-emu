@@ -88,6 +88,7 @@ class GtkDisplay:
     """
 
     def __init__(self, video, on_key=None, on_close=None, on_reset=None,
+                 close_warning=None,
                  media_status="A: none  B: none  C: none",
                  font_size=18, title="Simple BIOS Emulator — VGA Text"):
         # Lazy import so ``main.py`` can be imported without GTK installed
@@ -114,6 +115,7 @@ class GtkDisplay:
         self.on_key = on_key
         self.on_close = on_close
         self.on_reset = on_reset
+        self.close_warning = close_warning
         self.stop = False        # set when window closed -> loop should exit
         self.font_size = font_size
         self.cursor_visible = True
@@ -122,6 +124,7 @@ class GtkDisplay:
         # --- window + drawing area ---
         self.window = Gtk.Window()
         self.window.set_title(title)
+        self.window.connect('delete-event', self._on_delete)
         self.window.connect('destroy', self._on_destroy)
         self.window.connect('key-press-event', self._on_key_press)
 
@@ -173,6 +176,23 @@ class GtkDisplay:
             CURSOR_BLINK_INTERVAL_MS, self._blink_cursor)
 
     # ── Gtk signal handlers ────────────────────────────────────────
+
+    def _on_delete(self, _widget, _event):
+        if not self.close_warning:
+            return False
+        message = self.close_warning()
+        if not message:
+            return False
+        dialog = self._Gtk.MessageDialog(
+            transient_for=self.window,
+            flags=self._Gtk.DialogFlags.MODAL,
+            message_type=self._Gtk.MessageType.WARNING,
+            buttons=self._Gtk.ButtonsType.CANCEL,
+            text=message)
+        dialog.add_button('Close anyway', self._Gtk.ResponseType.OK)
+        response = dialog.run()
+        dialog.destroy()
+        return response != self._Gtk.ResponseType.OK
 
     def _on_destroy(self, _widget):
         self.stop = True

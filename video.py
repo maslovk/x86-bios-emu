@@ -256,8 +256,18 @@ class IO:
         self.cmos = cmos
         self.kbd_ctrl = kbd_ctrl  # Keyboard controller (8042)
         self._pit_pending_irqs = []  # IRQs fired since last check
+        # Ports not handled by a modeled device are recorded for diagnosing
+        # legacy guests (notably SCP/WD1791 disk drivers).
+        self.unhandled_ports = set()
 
     def inb(self, port):
+        # SCP support-card timer/control registers.  Legacy SCP IOSYS polls
+        # these during initialization; report an idle/ready value so it does
+        # not spin forever when the optional hardware is absent.
+        if port == 0xF4:
+            return 0x00
+        if port == 0xF5:
+            return 0xFF
         if port == 0x60:  # Keyboard data port
             if self.kbd_ctrl:
                 return self.kbd_ctrl.read_data()
@@ -293,6 +303,7 @@ class IO:
 
         if self.serial and 0x3F8 <= port <= 0x3FF:
             return self.serial.inb(port - 0x3F8)
+        self.unhandled_ports.add(port & 0xFFFF)
         return 0x00
 
     def inw(self, port):
@@ -301,6 +312,8 @@ class IO:
         return lo | (hi << 8)
 
     def outb(self, port, val):
+        if port in (0xF4, 0xF5):
+            return
         if port == 0x60:  # Keyboard data port
             if self.kbd_ctrl:
                 self.kbd_ctrl.write_data(val)
@@ -341,6 +354,8 @@ class IO:
 
         if self.serial and 0x3F8 <= port <= 0x3FF:
             self.serial.outb(port - 0x3F8, val)
+            return
+        self.unhandled_ports.add(port & 0xFFFF)
 
     def outw(self, port, val):
         self.outb(port, val & 0xFF)

@@ -101,6 +101,30 @@ class TestEmulatorIntegration:
         assert emu.cpu.halted is True
         assert emu.cpu.insn_count == 1
 
+    def test_legacy_dos1_media_descriptor_comes_from_fat(self, tmp_path):
+        """DOS 1.x disks use a reserved BPB byte but a valid FAT media byte."""
+        from main import Emulator
+        image = bytearray(640 * 512)
+        image[0x15] = 0xBB  # Compaq DOS 1.x reserved/BPB value
+        image[512] = 0xFF   # double-sided 320 KB FAT12 descriptor
+        path = tmp_path / 'dos1.img'
+        path.write_bytes(image)
+        emu = Emulator(floppy_image=str(path))
+        assert emu.disk.media_type == 0xFF
+        assert (emu.disk.cylinders, emu.disk.heads,
+                emu.disk.sectors_per_track) == (40, 2, 8)
+
+    def test_360k_image_uses_nine_sector_geometry(self, tmp_path):
+        from main import Emulator
+        image = bytearray(720 * 512)
+        image[0x15] = 0xFD
+        path = tmp_path / '360k.img'
+        path.write_bytes(image)
+        emu = Emulator(floppy_image=str(path))
+        assert emu.disk.media_type == 0xFD
+        assert (emu.disk.cylinders, emu.disk.heads,
+                emu.disk.sectors_per_track) == (40, 2, 9)
+
     def test_irq_wakes_halted_cpu(self):
         from main import Emulator
         emu = Emulator()

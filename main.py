@@ -512,7 +512,18 @@ class Emulator:
         actual_sectors = len(data) // 512
         self._image_sectors = actual_sectors
         media_byte = data[0x15] if len(data) > 0x15 else 0xF9
-        media_names = {0xF8: '360KB (5.25")', 0xF0: '1.2MB (5.25")',
+        # DOS 1.x system disks predate the conventional BPB.  Their byte
+        # at 15h is often a vendor/reserved value (the Compaq 1.10 image
+        # uses BBh), while the first FAT byte still carries the real media
+        # descriptor.  Prefer that descriptor for the small legacy formats
+        # so INT 13h geometry/media queries made by IOSYS work correctly.
+        if (media_byte not in (0xF0, 0xF1, 0xF2, 0xF8, 0xF9)
+                and actual_sectors in (320, 640) and len(data) >= 513):
+            fat_media = data[512]
+            if fat_media in (0xFE, 0xFF):
+                media_byte = fat_media
+        media_names = {0xFD: '360KB (5.25")', 0xFE: '160KB (5.25")', 0xFF: '320KB (5.25")',
+                       0xF8: '360KB (5.25")', 0xF0: '1.2MB (5.25")',
                        0xF9: '1.44MB (3.5")', 0xF1: '720KB (3.5")', 0xF2: '2.88MB (3.5")'}
         media_name = media_names.get(media_byte, f'unknown (0x{media_byte:02X})')
         print(f"  Floppy: {len(data)//1024}KB, {actual_sectors} sectors, media=0x{media_byte:02X} ({media_name})",
@@ -530,6 +541,18 @@ class Emulator:
 
         # Store media type for BIOS to use in INT 13h AH=08
         self.disk.media_type = media_byte
+        # Preserve the physical geometry of DOS 1.x images explicitly.  The
+        # boot sector has no standard BPB, so size alone is the reliable
+        # source of the 160/320 KB cylinder/head layout.
+        if actual_sectors == 320:
+            self.disk.cylinders, self.disk.heads = 40, 1
+            self.disk.sectors_per_track = 8
+        elif actual_sectors == 640:
+            self.disk.cylinders, self.disk.heads = 40, 2
+            self.disk.sectors_per_track = 8
+        elif actual_sectors == 720:
+            self.disk.cylinders, self.disk.heads = 40, 2
+            self.disk.sectors_per_track = 9
 
         # Mount FAT12
         try:

@@ -147,6 +147,64 @@ x86-bios-emu/
 - CLI: `--floppy image.img` loads and mounts FAT12 automatically; `--persist` writes
   guest-modified sectors back to the image on clean exit
 
+### Building a private DOS 1.x image
+
+`build_dos125_image.py` creates a non-destructive 160 KB DOS 1.x FAT12 image
+from a boot-sector image and rebuilt system files:
+
+```bash
+python3 build_dos125_image.py /tmp/dos125.img \
+  --io DOS_sources/v1.25/source/IO.SYS \
+  --msdos DOS_sources/v1.25/source/MSDOS.SYS \
+  --command DOS_sources/v1.25/source/COMMAND.COM
+```
+
+The output must not already exist; source images and source files are never
+modified.  DOS 1.x images without a conventional BPB are supported: when the
+reserved media byte is nonstandard, the emulator derives the floppy media
+descriptor from the first FAT byte (`FEh`/`FFh`) so IOSYS receives the correct
+geometry through INT 13h.
+
+The checked-out `DOS_sources/v1.25/source/IO.ASM` is configured for the
+320 KB double-sided 5.25-inch target (`SMALL=1`, `SMALLDS=1`); regenerate
+`IO.HEX` with the historical SCP assembler after changing this configuration.
+When using the host-folder bridge, SCP 2.44 selects source and HEX output
+drives from the filename extension.  With both files on bridged B:, run:
+
+```dos
+B:
+ASM IO.BB
+```
+
+### Historical OEM DOS images
+
+Historical source trees and disk images used for local experiments are kept
+outside the tracked project content.  They are useful compatibility fixtures,
+but are not bundled or redistributed by this repository.
+
+- DOS 1.x images with a legacy `FEh`/`FFh` FAT media byte are recognized as
+  160 KB/320 KB media even when their boot sectors have no conventional BPB.
+- A standard 360 KB image uses 40 cylinders, two heads, and nine sectors per
+  track.  This geometry is retained after the emulator pads an image in memory.
+- The Eagle Computer MS-DOS 2.0 reference image reaches its OEM DOS banner.
+  Its kernel then returns DOS error 3 (`path not found`) when opening
+  `\COMMAND.COM`, despite the file being present.  Resolving this requires an
+  Eagle OEM startup/device-path compatibility layer.
+- **MS-DOS 4.00 boots** (`DOS4/OPERATI3.IMG`, the bootable system disk): IO.SYS,
+  MSDOS.SYS, CONFIG.SYS handling, and COMMAND.COM all run to an interactive
+  `A>` prompt where `DIR`/`ECHO` and external programs like `GRAFTABL` work
+  (see `tests/test_dos4_boot.py`).  The single blocker had been INT 11h: DOS
+  4.0's SYSINIT tests equipment-word **bit 0** (floppy drives installed) and,
+  with it clear, fakes drives A:/B: by zeroing the CDS DPB pointers — every
+  path open then fails with error 3 and the boot ends at `Bad or missing
+  Command Interpreter`.  INT 11h and the BDA word at `0040:0010` now report
+  bit 0 set (and the memory size at `0040:0013` is a proper word).  Root
+  cause localised with `probe_dos4_open.py` (kernel canonicalizer at
+  `0286:8299` rejecting the CDS) and the MS-DOS 4.0 source release
+  (`SYSINIT1.ASM` TEMPCDS / `Fake_Floppy_Drv`).
+- Xerox and SCP OEM images use their own direct hardware controller paths;
+  they need dedicated device emulation rather than generic PC INT 13h support.
+
 ### BIOS Interrupt Handlers
 - **INT 08h**: IRQ 0 timer handler (increments BDA ticks at 0x046C, calls INT 1Ch)
 - **INT 09h**: IRQ 1 keyboard handler (reads ASCII from i8042, stores in kbd buffer, EOI)

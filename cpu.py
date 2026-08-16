@@ -12,8 +12,15 @@ import os
 class CPU:
     """Minimal x86 real-mode CPU emulator."""
 
+    _REG16_NAMES = ('ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di')
+
     def __init__(self, memory, io_ports):
         self.mem = memory
+        # The emulator's normal memory object exposes a flat 1 MiB bytearray.
+        # Keep a direct reference so the instruction hot path avoids a Python
+        # method call for every fetch/load/store; test doubles still use the
+        # generic memory interface below.
+        self._ram = getattr(memory, 'ram', None)
         self.io = io_ports
         self.halted = False
         self.int_no_return = False  # True when INT handler takes over (e.g., boot)
@@ -135,35 +142,28 @@ class CPU:
     # ── Register helpers ───────────────────────────────────────────
 
     def _reg16(self, r):
-        return [self.ax, self.cx, self.dx, self.bx,
-                self.sp, self.bp, self.si, self.di][r]
+        return (self.ax, self.cx, self.dx, self.bx,
+                self.sp, self.bp, self.si, self.di)[r]
 
     def _set_reg16(self, r, v):
-        names = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di']
-        setattr(self, names[r], v & 0xFFFF)
+        setattr(self, self._REG16_NAMES[r], v & 0xFFFF)
 
     def _get_reg16(self, r):
-        names = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di']
-        return getattr(self, names[r]) & 0xFFFF
+        return getattr(self, self._REG16_NAMES[r]) & 0xFFFF
 
     def _get_reg8(self, r):
         """Internal 8-bit register: 0=AL,1=AH,2=CL,3=CH,4=DL,5=DH,6=BL,7=BH."""
-        base = r // 2
-        lo = [self.ax & 0xFF, self.cx & 0xFF, self.dx & 0xFF, self.bx & 0xFF]
-        hi = [(self.ax >> 8) & 0xFF, (self.cx >> 8) & 0xFF, (self.dx >> 8) & 0xFF, (self.bx >> 8) & 0xFF]
-        return lo[base] if r % 2 == 0 else hi[base]
+        value = (self.ax, self.cx, self.dx, self.bx)[r >> 1]
+        return (value & 0xFF) if not (r & 1) else (value >> 8)
 
     def _set_reg8(self, r, v):
         """Internal 8-bit register: 0=AL,1=AH,2=CL,3=CH,4=DL,5=DH,6=BL,7=BH."""
-        base = r // 2
-        names_lo = ['ax', 'cx', 'dx', 'bx']
-        names_hi = ['ax', 'cx', 'dx', 'bx']
-        if r % 2 == 0:
-            setattr(self, names_lo[base],
-                    (getattr(self, names_lo[base]) & 0xFF00) | (v & 0xFF))
+        name = self._REG16_NAMES[r >> 1]
+        value = getattr(self, name)
+        if not (r & 1):
+            setattr(self, name, (value & 0xFF00) | (v & 0xFF))
         else:
-            setattr(self, names_hi[base],
-                    (getattr(self, names_hi[base]) & 0x00FF) | ((v & 0xFF) << 8))
+            setattr(self, name, (value & 0x00FF) | ((v & 0xFF) << 8))
 
     # ModR/M 8-bit register mapping: 0=AL,1=CL,2=DL,3=BL,4=AH,5=CH,6=DH,7=BH
     _modrm8_map = [0, 2, 4, 6, 1, 3, 5, 7]  # ModR/M idx → internal idx
@@ -181,18 +181,45 @@ class CPU:
     def _phys(self, seg, off):
         return ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
 
-    def _readb(self, a): return self.mem.read_byte(a)
-    def _readw(self, a): return self.mem.read_word(a)
-    def _writeb(self, a, v): self.mem.write_byte(a, v)
-    def _writew(self, a, v): self.mem.write_word(a, v)
+    def _readb(self, a):
+        if self._ram is not None:
+            return self._ram[a & 0xFFFFF]
+        return self.mem.read_byte(a)
+
+    def _readw(self, a):
+        if self._ram is not None:
+            a &= 0xFFFFF
+            return self._ram[a] | (self._ram[(a + 1) & 0xFFFFF] << 8)
+        return self.mem.read_word(a)
+
+    def _writeb(self, a, v):
+        if self._ram is not None:
+            self._ram[a & 0xFFFFF] = v & 0xFF
+        else:
+            self.mem.write_byte(a, v)
+
+    def _writew(self, a, v):
+        if self._ram is not None:
+            a &= 0xFFFFF
+            self._ram[a] = v & 0xFF
+            self._ram[(a + 1) & 0xFFFFF] = (v >> 8) & 0xFF
+        else:
+            self.mem.write_word(a, v)
 
     def _fetchb(self):
-        v = self._readb(self._phys(self.cs, self.ip))
+        if self._ram is not None:
+            v = self._ram[((self.cs << 4) + self.ip) & 0xFFFFF]
+        else:
+            v = self._readb(self._phys(self.cs, self.ip))
         self.ip = (self.ip + 1) & 0xFFFF
         return v
 
     def _fetchw(self):
-        v = self._readw(self._phys(self.cs, self.ip))
+        if self._ram is not None:
+            a = ((self.cs << 4) + self.ip) & 0xFFFFF
+            v = self._ram[a] | (self._ram[(a + 1) & 0xFFFFF] << 8)
+        else:
+            v = self._readw(self._phys(self.cs, self.ip))
         self.ip = (self.ip + 2) & 0xFFFF
         return v
 
@@ -232,16 +259,26 @@ class CPU:
                 seg = self.ss
             else:
                 seg = self.ds
-        base_map = {
-            0: self.bx + self.si, 1: self.bx + self.di,
-            2: self.bp + self.si, 3: self.bp + self.di,
-            4: self.si, 5: self.di, 6: self.bp, 7: self.bx,
-        }
         if mod == 0 and rm == 6:
             # In 16-bit addressing, mod=00 rm=110 encodes a direct disp16.
             disp = self._fetchw()
             return self._phys(seg, disp)
-        base = base_map.get(rm, self.bp)
+        if rm == 0:
+            base = self.bx + self.si
+        elif rm == 1:
+            base = self.bx + self.di
+        elif rm == 2:
+            base = self.bp + self.si
+        elif rm == 3:
+            base = self.bp + self.di
+        elif rm == 4:
+            base = self.si
+        elif rm == 5:
+            base = self.di
+        elif rm == 6:
+            base = self.bp
+        else:
+            base = self.bx
         disp = self._read_disp(mod, rm)
         return self._phys(seg, base + disp)
 

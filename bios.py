@@ -636,6 +636,10 @@ class BIOS:
                 cpu.ah = 0x01
                 cpu.flags |= 0x01
                 return
+            if getattr(disk, 'read_only', False):
+                cpu.ah = 0x03  # write-protected media
+                cpu.flags |= 0x01
+                return
             res = self._chs_to_lba(cpu, disk)
             if res is None:
                 cpu.ax = 0x0400

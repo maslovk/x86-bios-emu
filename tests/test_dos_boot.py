@@ -79,6 +79,9 @@ class TestDOSBoot:
     def test_host_folder_bridge_is_visible_as_drive_b(self, tmp_path):
         """A real DOS session can list and read a host-folder file on B:."""
         (tmp_path / 'HOST.TXT').write_bytes(b'Hello from host bridge')
+        nested = tmp_path / 'SUBDIR'
+        nested.mkdir()
+        (nested / 'INNER.TXT').write_bytes(b'Inner host file')
         h = DOSHarness(host_dir=str(tmp_path))
         h.boot_to_prompt()
 
@@ -88,3 +91,34 @@ class TestDOSBoot:
 
         content = h.run_command('TYPE B:HOST.TXT', max_steps=10_000_000)
         assert 'Hello from host bridge' in content.output
+
+        nested_listing = h.run_command('DIR B:\\SUBDIR', max_steps=10_000_000)
+        assert 'INNER' in nested_listing.output
+        nested_content = h.run_command('TYPE B:\\SUBDIR\\INNER.TXT',
+                                       max_steps=10_000_000)
+        assert 'Inner host file' in nested_content.output
+
+    def test_host_folder_bridge_executes_com_program(self, tmp_path):
+        """A .COM copied from the host folder executes from drive B:."""
+        # COM program at offset 0100h: print the string at 0109h, then exit.
+        program = bytes.fromhex('BA0901B409CD21CD20') + b'HOST COM OK$'
+        (tmp_path / 'HELLO.COM').write_bytes(program)
+        h = DOSHarness(host_dir=str(tmp_path))
+        h.boot_to_prompt()
+
+        result = h.run_command('B:HELLO.COM', max_steps=10_000_000)
+        assert 'HOST COM OK' in result.output
+
+    def test_host_folder_bridge_rejects_guest_writes(self, tmp_path):
+        """DOS writes to the host bridge fail and never create host files."""
+        (tmp_path / 'ORIGINAL.TXT').write_bytes(b'original')
+        h = DOSHarness(host_dir=str(tmp_path))
+        h.boot_to_prompt()
+
+        result = h.run_command('COPY COMMAND.COM B:', max_steps=2_000_000,
+                               probe_errorlevel=False)
+        assert ('Write protect' in result.output or
+                'Access denied' in result.output or
+                'Error' in result.output)
+        assert not (tmp_path / 'COMMAND.COM').exists()
+        assert (tmp_path / 'ORIGINAL.TXT').read_bytes() == b'original'

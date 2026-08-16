@@ -334,6 +334,8 @@ class Emulator:
                     self.kbd.buffer.append(byte)
             self.gtk_display = GtkDisplay(
                 self.video, on_key=_on_key, on_reset=self.reset_guest,
+                on_refresh=self.refresh_host_dir,
+                on_eject=self.eject_host_dir,
                 close_warning=self._close_warning,
                 font_size=gtk_font_size)
 
@@ -403,6 +405,8 @@ class Emulator:
     def _media_status(self):
         """Return compact GUI media labels, marking guest-dirty devices."""
         def label(letter, path, disk):
+            if path and disk is None:
+                return f'{letter}: ejected'
             name = os.path.basename(path) if path else 'none'
             return f'{letter}: {name}' + (' *' if disk and disk.dirty else '')
         return '  '.join((
@@ -548,6 +552,37 @@ class Emulator:
         self.floppy_b_image = f"host:{os.path.abspath(path)}"
         print(f"  Host folder B: {os.path.abspath(path)} (read-only FAT12)",
               file=sys.stderr)
+
+    def refresh_host_dir(self):
+        """Rebuild the read-only host-folder disk currently attached as B:."""
+        if not self.host_dir:
+            return False
+        try:
+            self.disk_b = build_host_directory_disk(self.host_dir)
+        except (OSError, ValueError) as exc:
+            print(f"[host bridge] refresh failed: {exc}", file=sys.stderr)
+            if self.gtk_display is not None:
+                self.gtk_display.set_session_status('Refresh failed')
+            return False
+        self.bios.disk_b = self.disk_b
+        if self.gtk_display is not None:
+            self.gtk_display.set_media_status(self._media_status())
+            self.gtk_display.set_session_status(
+                'Running • writes ' + ('enabled' if self.persist else 'discarded'))
+        print(f"[host bridge] refreshed B: from {self.host_dir}", file=sys.stderr)
+        return True
+
+    def eject_host_dir(self):
+        """Detach the host-folder disk from BIOS drive B:."""
+        if not self.host_dir or self.disk_b is None:
+            return False
+        self.disk_b = None
+        self.bios.disk_b = None
+        if self.gtk_display is not None:
+            self.gtk_display.set_media_status(self._media_status())
+            self.gtk_display.set_session_status('B: ejected')
+        print('[host bridge] ejected B:', file=sys.stderr)
+        return True
 
     def _load_hard_disk(self, path: str):
         """Load a raw legacy-CHS hard-disk image as BIOS drive 80h."""

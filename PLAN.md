@@ -542,16 +542,17 @@ filesystem syscall path from guest code.
    `Disk`/`FAT12` abstractions: BPB, mirrored FATs, root entries, and data.
 3. Expose it through normal INT 13h so DOS can use `DIR`, `TYPE`, and execute
    `.COM`/`.EXE` files without special DOS hooks.
-4. Support regular files only at first, with deterministic 8.3 names; reject
-   collisions, symlinks, directories, and files that exceed the image.
+4. Support regular files and recursive directories with deterministic 8.3
+   names; reject collisions, symlinks, and files that exceed the image.
 5. Keep it read-only: guest writes return a protected-media error and never
    modify the host directory. `--persist` is incompatible with this bridge.
 
 ### Milestone 2 — Usable workflow
 
 - Show the mapped host path in the GTK/terminal media status.
-- Add refresh/eject controls that rebuild the virtual image between commands.
-- Add recursive directories only after root-file semantics are tested.
+- ✅ Add a GTK Refresh B: control that rebuilds the virtual image between
+- commands, plus Eject B:; Refresh B: reinserts the mapped host folder.
+- ✅ Add recursive read-only directories after root-file semantics are tested.
 - Document `python3 main.py --dos --host-dir ./dos-files --gtk`.
 
 ### Milestone 3 — Optional write-back
@@ -569,8 +570,11 @@ out of scope for the initial bridge.
 - Guest write attempts fail without changing host files.
 - Existing floppy/hard-disk tests and the shipped-image hash guard stay green.
 
-The first two read/list criteria are covered by the slow
-`test_host_folder_bridge_is_visible_as_drive_b` integration test.
+The read/list criteria are covered by the slow
+`test_host_folder_bridge_is_visible_as_drive_b` integration test, and the
+`.COM` execution criterion by `test_host_folder_bridge_executes_com_program`.
+The read-only criterion is covered by
+`test_host_folder_bridge_rejects_guest_writes`.
 
 ---
 

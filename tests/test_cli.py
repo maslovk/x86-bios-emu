@@ -180,16 +180,47 @@ def test_host_directory_bridge_is_read_only_fat12(tmp_path):
     assert not disk.write_sector(20, bytearray(512))
 
 
-def test_host_directory_bridge_rejects_subdirectories_and_bad_names(tmp_path):
-    (tmp_path / 'nested').mkdir()
-    with pytest.raises(ValueError, match='subdirectory'):
-        build_host_directory_disk(tmp_path)
+def test_host_directory_bridge_supports_subdirectories_and_rejects_bad_names(tmp_path):
+    nested = tmp_path / 'nested'
+    nested.mkdir()
+    (nested / 'INNER.TXT').write_bytes(b'inner')
+    disk = build_host_directory_disk(tmp_path)
+    fat = FAT12(disk)
+    fat.mount()
+    entry = fat.find_file('NESTED')
+    assert entry is not None and entry.is_dir
+    assert any(item.full_name == 'INNER.TXT'
+               for item in fat.read_dir(entry.first_cluster))
+    assert fat.read_file_by_name('INNER.TXT') is None
 
-    bad = tmp_path / 'nested'
-    bad.rmdir()
     (tmp_path / 'this-name-is-too-long.txt').write_bytes(b'x')
     with pytest.raises(ValueError, match='8.3'):
         build_host_directory_disk(tmp_path)
+
+
+def test_host_directory_refresh_rebuilds_drive_b(tmp_path):
+    (tmp_path / 'OLD.TXT').write_bytes(b'old')
+    emulator = Emulator(enable_hardware=False, host_dir=str(tmp_path))
+    initial_fat = FAT12(emulator.disk_b)
+    initial_fat.mount()
+    (tmp_path / 'NEW.TXT').write_bytes(b'new')
+    (tmp_path / 'OLD.TXT').unlink()
+
+    assert emulator.refresh_host_dir()
+    fat = FAT12(emulator.disk_b)
+    fat.mount()
+    assert fat.read_file_by_name('NEW.TXT') == b'new'
+    assert fat.read_file_by_name('OLD.TXT') is None
+
+
+def test_host_directory_eject_detaches_drive_b(tmp_path):
+    emulator = Emulator(enable_hardware=False, host_dir=str(tmp_path))
+    assert emulator.disk_b is not None
+    assert emulator.eject_host_dir()
+    assert emulator.disk_b is None
+    assert emulator.bios.disk_b is None
+    assert emulator.refresh_host_dir()
+    assert emulator.disk_b is not None
 
 
 def test_host_dir_cli_rejects_writes_and_second_floppy(capsys, tmp_path):

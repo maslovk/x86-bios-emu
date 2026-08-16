@@ -78,6 +78,10 @@ class GtkDisplay:
     on_reset : callable() | None
         Called by the Reset button or Ctrl+R.  The emulator owns the reset
         operation so the display remains independent of CPU/device details.
+    on_refresh : callable() | None
+        Called by the Refresh B: button to rebuild host-folder media.
+    on_eject : callable() | None
+        Called by the Eject B: button to detach host-folder media.
     media_status : str
         Short media summary shown below the VGA grid.
     font_size : int
@@ -88,6 +92,7 @@ class GtkDisplay:
     """
 
     def __init__(self, video, on_key=None, on_close=None, on_reset=None,
+                 on_refresh=None, on_eject=None,
                  close_warning=None,
                  media_status="A: none  B: none  C: none",
                  font_size=18, title="Simple BIOS Emulator — VGA Text"):
@@ -115,6 +120,8 @@ class GtkDisplay:
         self.on_key = on_key
         self.on_close = on_close
         self.on_reset = on_reset
+        self.on_refresh = on_refresh
+        self.on_eject = on_eject
         self.close_warning = close_warning
         self.stop = False        # set when window closed -> loop should exit
         self.font_size = font_size
@@ -135,6 +142,10 @@ class GtkDisplay:
         controls.set_border_width(4)
         reset = Gtk.Button.new_with_label('Reset')
         reset.connect('clicked', self._on_reset_clicked)
+        refresh = Gtk.Button.new_with_label('Refresh B:')
+        refresh.connect('clicked', self._on_refresh_clicked)
+        eject = Gtk.Button.new_with_label('Eject B:')
+        eject.connect('clicked', self._on_eject_clicked)
         paste = Gtk.Button.new_with_label('Paste')
         paste.connect('clicked', self._on_paste_clicked)
         self.media_label = Gtk.Label(label=media_status)
@@ -142,6 +153,8 @@ class GtkDisplay:
         self.session_label = Gtk.Label(label='Starting')
         self.session_label.set_xalign(1.0)
         controls.pack_start(reset, False, False, 0)
+        controls.pack_start(refresh, False, False, 0)
+        controls.pack_start(eject, False, False, 0)
         controls.pack_start(paste, False, False, 0)
         controls.pack_start(self.media_label, True, True, 0)
         controls.pack_start(self.session_label, False, False, 0)
@@ -254,6 +267,14 @@ class GtkDisplay:
     def _on_reset_clicked(self, _button):
         if self.on_reset:
             self.on_reset()
+
+    def _on_refresh_clicked(self, _button):
+        if self.on_refresh:
+            self.on_refresh()
+
+    def _on_eject_clicked(self, _button):
+        if self.on_eject:
+            self.on_eject()
 
     def _on_paste_clicked(self, _button):
         clipboard = self._Gtk.Clipboard.get(self._Gdk.SELECTION_CLIPBOARD)

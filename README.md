@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1352 fast + 78 slow: CPU/BIOS/disk/FAT12, DOS tools)
+└── tests/             # pytest suite (1353 fast + 79 slow: CPU/BIOS/disk/FAT12, DOS tools)
 ```
 
 ## Components
@@ -174,7 +174,8 @@ python3 main.py --gtk                    # GTK window display + real keyboard ca
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 truncate -s 10653696 harddisk.img        # Blank 306/4/17 CHS disk (~10 MB)
 python3 main.py --floppy disk.img --hard-disk harddisk.img --persist --gtk
-# In DOS: run FDISK, exit/relaunch the same command, then run FORMAT C:
+# In DOS: run FDISK, exit/relaunch, then run FORMAT C: /S
+python3 main.py --floppy disk.img --hard-disk harddisk.img --boot-hard-disk --gtk
 python3 main.py --boot file.bin --step   # Combine flags
 python3 main.py --floppy disk.img         # Load FAT12 floppy image (auto-detect size)
 python3 main.py --boot dos3.3.img         # Load DOS 3.3 boot sector
@@ -193,6 +194,7 @@ python3 main.py --boot dos3.3.img --step  # Step through DOS 3.3 boot
 | `--floppy IMG` / `-f` | Load floppy image (FAT12, auto-detects 360KB–1.44MB) and mount filesystem |
 | `--floppy-b IMG` | Load a second floppy image as drive B: (enables `DIR B:`, `COPY B:..`, DISKCOPY/DISKCOMP) |
 | `--hard-disk IMG` | Attach an exact C/4/17 raw hard-disk image as BIOS drive 80h (the tested 306-cylinder size is 10,653,696 bytes) |
+| `--boot-hard-disk` | Load the attached hard-disk MBR at 0000:7C00 and boot with DL=80h instead of booting floppy A: |
 | `--persist` | Write guest-modified sectors back to attached floppy/hard-disk images on exit (default off; never use on the shipped repo images) |
 
 The emulator runs for ~1 second, displays the VGA screen, then exits with final CPU state.
@@ -322,9 +324,9 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1352 tests, ~13s)
-python3 -m pytest -q -m slow            # DOS boot/tool integration tests (78 tests)
-python3 -m pytest -q                    # all 1430 tests
+python3 -m pytest -q -m "not slow"      # fast tests (1353 tests, ~13s)
+python3 -m pytest -q -m slow            # DOS boot/tool integration tests (79 tests)
+python3 -m pytest -q                    # all 1432 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```
@@ -386,10 +388,10 @@ instruction-emulation divergence against a trusted reference.
 - Two floppy drives max (A: and B: via `--floppy` / `--floppy-b`) plus one
   legacy C/4/17 hard disk at BIOS drive 80h. FDISK can create a maximum-size
   active primary partition; after relaunch, DOS discovers it as C: and
-  `FORMAT C:` plus normal file I/O work. The MBR and partition filesystem are
-  host-verified. FDISK's requested warm restart is not emulated, so relaunch
-  the emulator after partitioning. Larger FAT16 geometries and booting from
-  the hard disk are not yet implemented.
+  `FORMAT C: /S` installs a bootable system plus normal file I/O. The MBR,
+  partition filesystem, and fresh hard-disk boot to `C>` are verified.
+  FDISK's requested warm restart is not emulated, so relaunch the emulator
+  after partitioning. Larger FAT16 geometries are not yet implemented.
 - FAT12 **write** is supported (guest `COPY`/`DEL`/`REN`/`MKDIR`/`FORMAT`/`SYS`/
   `XCOPY` persist via INT 13h AH=03, and host-side `fat12.FAT12.write_file` can
   inject fixtures, including `CONFIG.SYS` for driver boot-smoke tests).

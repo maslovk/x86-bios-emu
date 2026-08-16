@@ -221,7 +221,8 @@ class Emulator:
 
     def __init__(self, boot_file=None, step_mode=False, interactive=False,
                  enable_hardware=True, floppy_image=None, floppy_b=None,
-                 hard_disk=None, gtk=False, gtk_font_size=18, persist=False):
+                 hard_disk=None, boot_drive=0x00, gtk=False, gtk_font_size=18,
+                 persist=False):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -253,6 +254,7 @@ class Emulator:
         # Second floppy drive (B:); populated by _load_floppy_b() below.
         self.disk_b = None
         self.hard_disk = None
+        self.boot_drive = boot_drive
 
         # GTK display (optional).  When enabled, it takes over rendering and
         # keyboard input: the emulator loop pumps Gtk events between
@@ -286,6 +288,7 @@ class Emulator:
         self._hard_disk_sectors = None
         if hard_disk:
             self._load_hard_disk(hard_disk)
+        self.bios.boot_drive = self.boot_drive
 
         # Write BIOS ROM string
         bios_str = b"SIMPLE BIOS"
@@ -524,11 +527,17 @@ class Emulator:
             if sig != 0xAA55:
                 print(f"[WARNING: No boot signature (0x{sig:04X}), expected 0xAA55]", file=sys.stderr)
             self.disk.write_boot_sector(bytes(boot_code))
-        elif self.floppy_image is None:
+        elif self.floppy_image is None and self.boot_drive == 0x00:
             boot_code = build_boot_sector()
             self.disk.write_boot_sector(boot_code)
-        else:
+        elif self.boot_drive == 0x00:
             print("[Booting from floppy image boot sector...]", file=sys.stderr)
+        elif self.boot_drive == 0x80:
+            if self.hard_disk is None:
+                raise ValueError("hard-disk boot requested without --hard-disk")
+            print("[Booting from hard-disk MBR...]", file=sys.stderr)
+        else:
+            raise ValueError(f"unsupported BIOS boot drive 0x{self.boot_drive:02X}")
 
         # Initialize BIOS
         self.bios.initialize()
@@ -551,13 +560,15 @@ class Emulator:
 
         # Load boot sector directly (skip INT 19h stack push)
         buf = bytearray(512)
-        self.disk.read_sector(0, buf)
+        boot_disk = (self.hard_disk if self.boot_drive == 0x80 else self.disk)
+        boot_disk.read_sector(0, buf)
         for i in range(512):
             self.mem.write_byte(0x7C00 + i, buf[i])
         self.cpu.cs = 0x0000
         self.cpu.ip = 0x7C00
         self.cpu.ds = 0x0000
         self.cpu.es = 0x0000
+        self.cpu.dl = self.boot_drive
         self.video.print_str(" OK", video_mod.Video.ATTR_GREEN, 36, 13)
 
         # Replace CPU interrupt handling entirely
@@ -781,6 +792,8 @@ def main():
                         help='Load a second floppy image as drive B:')
     parser.add_argument('--hard-disk', metavar='IMG',
                         help='Load a raw C/4/17 hard-disk image as BIOS drive 80h')
+    parser.add_argument('--boot-hard-disk', action='store_true',
+                        help='Boot from the attached hard-disk MBR instead of A:')
     parser.add_argument('--gtk', '-g', action='store_true',
                         help='Use a GTK window for display + keyboard input '
                              '(replaces the terminal box; sidesteps cbreak/')
@@ -810,6 +823,7 @@ def main():
     emu = Emulator(boot_file=args.boot, step_mode=args.step,
                    interactive=args.interactive, floppy_image=args.floppy,
                    floppy_b=args.floppy_b, hard_disk=args.hard_disk,
+                   boot_drive=0x80 if args.boot_hard_disk else 0x00,
                    gtk=args.gtk, gtk_font_size=args.gtk_font_size,
                    persist=args.persist)
     emu.run()

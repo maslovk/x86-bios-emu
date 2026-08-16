@@ -116,3 +116,21 @@ def test_disk_view_offsets_io_and_preserves_bounds():
     assert result == marker
     assert not view.read_sector(40, result)
     assert not view.write_sector(40, marker)
+
+
+def test_int19_boots_drive_80h_and_preserves_dl(memory, video, kbd, disk):
+    hard_disk = _hard_disk()
+    hard_disk.sectors[0][0:4] = b'MBR!'
+    hard_disk.sectors[0][510:512] = b'\x55\xaa'
+    bios = BIOS(
+        memory, video, kbd, disk, hard_disk=hard_disk, boot_drive=0x80)
+    bios.initialize()
+    cpu = FakeCPU()
+
+    bios.handlers[0x19](cpu)
+
+    assert bytes(memory.ram[0x7C00:0x7C04]) == b'MBR!'
+    assert memory.read_byte(0x474) == 0x80
+    assert cpu.dl == 0x80
+    assert cpu.cs == 0 and cpu.ip == 0x7C00
+    assert cpu.int_no_return

@@ -10,11 +10,12 @@ green (including `-m slow`), and nothing in `DOS3_3_525/` may be modified
 
 ## 0. Current state (verified 2026-08-16)
 
-Phases A–H are complete. MS-DOS 3.3 boots from the shipped floppy images,
+Phases A–I are complete. MS-DOS 3.3 boots from the shipped floppy images or
+from a prepared hard-disk image,
 the full internal/external tool matrix is covered, writable workflows operate
 on temporary images, and the shipped images are protected by a session-level
 hash guard. The complete acceptance command, `python3 -m pytest -q`, passes
-all 1,430 tests (1,352 fast and 78 slow) with no xfails.
+all 1,432 tests (1,353 fast and 79 slow) with no xfails.
 
 The original blocking gaps are resolved: writable and multi-drive INT 13h,
 FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
@@ -408,8 +409,35 @@ floppy hashes remain unchanged.
 ### Acceptance
 
 `DIR C:`, `FORMAT C:`, guest file write/read, and host-side FAT12 verification
-all agree on a private 10MB image. Larger FAT16 partitions and booting from
-the hard disk remain follow-on work.
+all agree on a private 10MB image.
+
+---
+
+## Phase I — Boot MS-DOS from the hard disk
+
+### Features
+
+1. BIOS INT 19h, `main.py::Emulator`, and `DOSHarness` accept an explicit
+   boot drive. Drive `80h` loads the hard-disk MBR at `0000:7C00`, publishes
+   `80h` in the BIOS Data Area, and preserves DL=`80h` for MBR/partition boot
+   code. Floppy A: remains the default.
+2. CLI `--boot-hard-disk` selects the attached `--hard-disk` image. DOS 3.3
+   `FORMAT C: /S` installs IO.SYS, MSDOS.SYS, and COMMAND.COM, producing a
+   directly bootable system partition.
+
+### Tests
+
+- `tests/test_hard_disk.py` (fast): INT 19h loads drive 80h, sets BDA boot
+  drive and DL, validates the signature, and transfers to `0000:7C00`.
+- `tests/tools/test_hard_disk_boot.py` (slow): create an MBR with FDISK,
+  relaunch from floppy, run `FORMAT C: /S`, write a marker file, then start a
+  fresh emulator at drive 80h and verify the `C>` prompt and marker contents.
+
+### Acceptance
+
+The complete FDISK → FORMAT /S → MBR → partition boot chain reaches a
+working MS-DOS `C>` prompt on an isolated image. Larger FAT16 geometries remain
+follow-on work.
 
 ---
 
@@ -447,4 +475,5 @@ the hard disk remain follow-on work.
 | CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E/F (boot-smoke; RAMDRIVE C: read/write; ANSI clear/cursor/colour rendering in VRAM) |
 | FDISK | 2 | test_fdisk.py | ✅ Phase G (active primary FAT12 partition; MBR host-verified on private HDD image) |
 | FORMAT C:/fixed-disk files | 2 | test_hard_disk_filesystem.py | ✅ Phase H (fresh-boot C: discovery; FORMAT and file round-trip host-verified) |
+| Hard-disk boot | 2 | test_hard_disk_boot.py | ✅ Phase I (FDISK → FORMAT /S → fresh MBR boot to C>; file readback) |
 | KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |

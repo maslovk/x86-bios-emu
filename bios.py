@@ -14,13 +14,14 @@ class BIOS:
 
     def __init__(self, memory, video, keyboard, disk, pit=None, pic=None,
                  cmos=None, kbd_ctrl=None, disk_b=None, serial=None,
-                 hard_disk=None):
+                 hard_disk=None, boot_drive=0x00):
         self.mem = memory
         self.video = video
         self.kbd = keyboard
         self.disk = disk          # drive 0 (A:)
         self.disk_b = disk_b      # drive 1 (B:), or None
         self.hard_disk = hard_disk  # BIOS drive 80h, or None
+        self.boot_drive = boot_drive
         self.pit = pit
         self.pic = pic
         self.cmos = cmos
@@ -161,7 +162,7 @@ class BIOS:
         # Warm boot flag
         self.mem.write_word(bda + 0x72, 0)       # Warm boot flag (0=cold)
         # Boot drive and fixed-disk count
-        self.mem.write_byte(bda + 0x74, 0)       # Boot drive
+        self.mem.write_byte(bda + 0x74, self.boot_drive)
         self.mem.write_byte(bda + 0x75,
                             1 if self.hard_disk is not None else 0)
         # Sector size
@@ -905,15 +906,14 @@ class BIOS:
     # ── INT 19h: Boot Loader ───────────────────────────────────
 
     def _int19h(self, cpu):
+        disk = self._disk_for(self.boot_drive)
         buf = bytearray(512)
-        if not self.disk.read_sector(0, buf):
+        if disk is None or not disk.read_sector(0, buf):
             self.video.print_str(" Boot failure!", Video.ATTR_RED, 20, 13)
             cpu.halted = True
             return
         for i in range(512):
             self.mem.write_byte(0x7C00 + i, buf[i])
-        for i in range(16):
-            print(f"BootSector[{i}] = {self.mem.read_byte(0x7C00 + i):02X}")
         sig = self.mem.read_word(0x7DFE)
         if sig != 0xAA55:
             self.video.print_str(" No bootable OS!", Video.ATTR_RED, 20, 13)
@@ -925,6 +925,7 @@ class BIOS:
         cpu.sp = 0x7C00
         cpu.ds = 0x0000
         cpu.es = 0x0000
+        cpu.dl = self.boot_drive
         cpu.int_no_return = True  # Don't pop return address — boot takes over
         self.video.print_str(" OK", Video.ATTR_GREEN, 36, 13)
 

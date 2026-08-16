@@ -83,6 +83,7 @@ class DOSHarness:
         image_b: optional second-drive image (drive B).  Stored for later
             wiring; full two-drive support lands with the disk-tool phase.
         hard_disk: optional raw C/4/17 image exposed as BIOS drive 80h.
+        boot_drive: BIOS drive to boot (00h for floppy A:, 80h for HDD).
         writable: when True, the image(s) are copied to a private temp dir
             before booting, so any future writeback (host-side FAT12 writes,
             ``--persist``) can never mutate the repo images.  When False (the
@@ -94,10 +95,11 @@ class DOSHarness:
     """
 
     def __init__(self, image_path=DISK01, image_b=None, hard_disk=None,
-                 writable=False, settle_extra=2000):
+                 boot_drive=0x00, writable=False, settle_extra=2000):
         self.image_path = image_path
         self.image_b_path = image_b
         self.hard_disk_path = hard_disk
+        self.boot_drive = boot_drive
         self.writable = writable
         self.settle_extra = settle_extra
 
@@ -118,7 +120,7 @@ class DOSHarness:
 
         self.emu = Emulator(boot_file=None, step_mode=False,
                              floppy_image=load_path, floppy_b=load_path_b,
-                             hard_disk=load_path_hd)
+                             hard_disk=load_path_hd, boot_drive=boot_drive)
         self.emu.bios.initialize()
         if self.emu.pic:
             self.emu.pic.initialize()
@@ -127,7 +129,11 @@ class DOSHarness:
         self.emu.video.on_scroll_line = self._on_scroll_line
 
         buf = bytearray(512)
-        self.emu.disk.read_sector(0, buf)
+        boot_disk = (self.emu.hard_disk if boot_drive == 0x80
+                     else self.emu.disk)
+        if boot_disk is None:
+            raise ValueError("hard-disk boot requested without a hard disk")
+        boot_disk.read_sector(0, buf)
         for i in range(512):
             self.emu.mem.write_byte(0x7C00 + i, buf[i])
         cpu = self.emu.cpu
@@ -137,6 +143,7 @@ class DOSHarness:
         cpu.es = 0
         cpu.ss = 0
         cpu.sp = 0x7C00
+        cpu.dl = boot_drive
         self.emu._install_bios_interrupt_hook()
 
         # Keep the drive-B path for reference; the Emulator loaded it above
@@ -289,12 +296,12 @@ class DOSHarness:
             self.run_steps(delay)
 
     def boot_to_prompt(self):
-        """Boot through DATE/TIME prompts to the A> prompt."""
+        """Boot through DATE/TIME prompts to the boot drive's DOS prompt."""
         self.wait_for('Enter new date')
         self.inject_string('\r')
         self.wait_for('Enter new time')
         self.inject_string('\r')
-        self.wait_for('A>')
+        self.wait_for('C>' if self.boot_drive == 0x80 else 'A>')
 
     # ── Prompt-return detection ────────────────────────────────────────
 

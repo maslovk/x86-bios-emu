@@ -404,6 +404,7 @@ class Disk:
         self.sectors_per_track = sectors_per_track
         self.hard_disk = hard_disk
         self.dirty = False          # set by write_sector; cleared by writeback
+        self.read_only = False      # host-folder bridge sets this flag
         self.media_changed = False  # set by swap_disk for AH=16h reporting
 
     def read_sector(self, lba, buf):
@@ -414,6 +415,8 @@ class Disk:
         return True
 
     def write_sector(self, lba, buf):
+        if self.read_only:
+            return False
         if not 0 <= lba < len(self.sectors):
             return False
         for i in range(512):

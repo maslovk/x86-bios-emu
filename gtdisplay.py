@@ -163,6 +163,7 @@ class GtkDisplay:
 
         self.width_px = self.cell_w * video.width
         self.height_px = self.cell_h * video.height
+        self.drawing_area.set_size_request(self.width_px, self.height_px)
         self.window.set_default_size(self.width_px, self.height_px + 34)
         self.window.set_resizable(False)
 
@@ -269,6 +270,11 @@ class GtkDisplay:
     def set_session_status(self, text):
         self.session_label.set_text(text)
 
+    def show_cursor(self):
+        """Restore the cursor's visible phase and request a redraw."""
+        self.cursor_visible = True
+        self.drawing_area.queue_draw()
+
     def _emit(self, byte):
         if self.on_key:
             self.on_key(byte & 0xFF)
@@ -312,7 +318,9 @@ class GtkDisplay:
                     # A bright underline remains legible over blank cells and
                     # colored DOS text while blinking clearly.
                     cr.set_source_rgb(1.0, 1.0, 1.0)
-                    cr.rectangle(x * cw, (y + 1) * ch - 2, cw, 2)
+                    # Keep the underline inside the final row; drawing it at
+                    # the exact widget boundary can be clipped on row 24.
+                    cr.rectangle(x * cw, y * ch + ch - 4, cw, 3)
                     cr.fill()
 
     # ── public API ─────────────────────────────────────────────────

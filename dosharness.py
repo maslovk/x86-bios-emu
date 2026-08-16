@@ -83,6 +83,7 @@ class DOSHarness:
         image_b: optional second-drive image (drive B).  Stored for later
             wiring; full two-drive support lands with the disk-tool phase.
         hard_disk: optional raw C/4/17 image exposed as BIOS drive 80h.
+        host_dir: optional host directory exposed read-only as drive B.
         boot_drive: BIOS drive to boot (00h for floppy A:, 80h for HDD).
         writable: when True, the image(s) are copied to a private temp dir
             before booting, so any future writeback (host-side FAT12 writes,
@@ -95,10 +96,12 @@ class DOSHarness:
     """
 
     def __init__(self, image_path=DISK01, image_b=None, hard_disk=None,
-                 boot_drive=0x00, writable=False, settle_extra=2000):
+                 host_dir=None, boot_drive=0x00, writable=False,
+                 settle_extra=2000):
         self.image_path = image_path
         self.image_b_path = image_b
         self.hard_disk_path = hard_disk
+        self.host_dir = host_dir
         self.boot_drive = boot_drive
         self.writable = writable
         self.settle_extra = settle_extra
@@ -120,7 +123,8 @@ class DOSHarness:
 
         self.emu = Emulator(boot_file=None, step_mode=False,
                              floppy_image=load_path, floppy_b=load_path_b,
-                             hard_disk=load_path_hd, boot_drive=boot_drive)
+                             hard_disk=load_path_hd, boot_drive=boot_drive,
+                             host_dir=host_dir)
         self.emu.bios.initialize()
         if self.emu.pic:
             self.emu.pic.initialize()

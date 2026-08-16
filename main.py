@@ -15,6 +15,7 @@ from video import Video, IO, Keyboard, Disk, Serial
 from bios import BIOS
 from hardware import PIT, PIC, CMOS, KeyboardController
 from fat12 import FAT12, FAT12Error
+from hostbridge import build_host_directory_disk
 import video as video_mod
 
 
@@ -279,7 +280,7 @@ class Emulator:
     def __init__(self, boot_file=None, step_mode=False, interactive=False,
                  enable_hardware=True, floppy_image=None, floppy_b=None,
                  hard_disk=None, boot_drive=0x00, gtk=False, gtk_font_size=18,
-                 persist=False, serial_output=True):
+                 persist=False, serial_output=True, host_dir=None):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -339,6 +340,7 @@ class Emulator:
         # FAT12 filesystem
         self.floppy_image = floppy_image
         self.floppy_b_image = floppy_b
+        self.host_dir = host_dir
         self.fat = None
         # Original (pre-padding) sector count of the loaded image, so --persist
         # writes back exactly the image's on-disk size instead of the 1.44MB
@@ -350,6 +352,8 @@ class Emulator:
             self._load_floppy(floppy_image)
         if floppy_b:
             self._load_floppy_b(floppy_b)
+        elif host_dir:
+            self._load_host_dir(host_dir)
         self.hard_disk_image = hard_disk
         self._hard_disk_sectors = None
         if hard_disk:
@@ -393,6 +397,8 @@ class Emulator:
         if self.gtk_display is not None:
             self.gtk_display.set_session_status(
                 'Running • writes ' + ('enabled' if self.persist else 'discarded'))
+        if self.gtk_display is not None:
+            self.gtk_display.show_cursor()
 
     def _media_status(self):
         """Return compact GUI media labels, marking guest-dirty devices."""
@@ -531,6 +537,17 @@ class Emulator:
         self.disk_b.media_type = media_byte
         print(f"  Floppy B: {len(data)//1024}KB, {actual_sectors} sectors, "
               f"media=0x{media_byte:02X}", file=sys.stderr)
+
+    def _load_host_dir(self, path: str):
+        """Attach a read-only host directory as DOS drive B:."""
+        try:
+            self.disk_b = build_host_directory_disk(path)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"--host-dir: {exc}") from exc
+        self.bios.disk_b = self.disk_b
+        self.floppy_b_image = f"host:{os.path.abspath(path)}"
+        print(f"  Host folder B: {os.path.abspath(path)} (read-only FAT12)",
+              file=sys.stderr)
 
     def _load_hard_disk(self, path: str):
         """Load a raw legacy-CHS hard-disk image as BIOS drive 80h."""
@@ -955,6 +972,7 @@ def build_argument_parser():
   python3 main.py -f disk.img -i        boot a floppy with terminal input
   python3 main.py --hard-disk hd.img --boot-hard-disk --gtk
   python3 main.py --create-hard-disk hd.img --hard-disk-cylinders 306
+  python3 main.py --dos --host-dir ./dos-files --gtk
 
 Disk writes are discarded unless --persist is supplied.  The --dos shortcut
 always protects the bundled image and therefore cannot be used with --persist.''')
@@ -981,6 +999,8 @@ always protects the bundled image and therefore cannot be used with --persist.''
                          metavar='N',
                          help='cylinders for --create-hard-disk, 1..1024 '
                               '(default: 306, about 10 MB)')
+    storage.add_argument('--host-dir', metavar='DIR',
+                         help='expose a host folder read-only as DOS drive B:')
 
     display = parser.add_argument_group('display and input')
     display.add_argument('--interactive', '-i', action='store_true',
@@ -1018,7 +1038,7 @@ def parse_args(argv=None):
                      'if you want --persist')
     if args.create_hard_disk:
         conflicting = []
-        if args.boot or args.dos or args.floppy or args.floppy_b:
+        if args.boot or args.dos or args.floppy or args.floppy_b or args.host_dir:
             conflicting.append('boot media')
         if args.hard_disk or args.boot_hard_disk:
             conflicting.append('--hard-disk/--boot-hard-disk')
@@ -1032,6 +1052,14 @@ def parse_args(argv=None):
         if os.path.exists(args.create_hard_disk):
             parser.error(f'--create-hard-disk: refusing to overwrite existing '
                          f'file: {args.create_hard_disk}')
+
+    if args.host_dir:
+        if args.floppy_b:
+            parser.error('--host-dir cannot be combined with --floppy-b')
+        if args.persist:
+            parser.error('--host-dir is read-only and cannot be used with --persist')
+        if not os.path.isdir(args.host_dir):
+            parser.error(f'--host-dir: directory not found: {args.host_dir}')
 
     if args.dos:
         args.floppy = BUNDLED_DOS_IMAGE
@@ -1084,7 +1112,8 @@ def main(argv=None):
                        floppy_b=args.floppy_b, hard_disk=args.hard_disk,
                        boot_drive=0x80 if args.boot_hard_disk else 0x00,
                        gtk=args.gtk, gtk_font_size=args.gtk_font_size,
-                       persist=args.persist, serial_output=args.serial_output)
+                       persist=args.persist, serial_output=args.serial_output,
+                       host_dir=args.host_dir)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))

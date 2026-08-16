@@ -8,6 +8,8 @@ from main import (BUNDLED_DOS_IMAGE, Emulator, build_argument_parser,
                   create_hard_disk_image, parse_args,
                   sanitize_snap_gtk_environment)
 from gtdisplay import CURSOR_BLINK_INTERVAL_MS, _GWBASIC_FUNCTION_KEYS
+from hostbridge import build_host_directory_disk
+from fat12 import FAT12
 
 
 def test_dos_shortcut_selects_bundled_image_and_terminal_input():
@@ -136,6 +138,8 @@ def test_dirty_media_warning_only_applies_to_nonpersistent_sessions():
     assert persistent._close_warning() is None
 
 
+
+
 def test_create_hard_disk_image_uses_exact_legacy_geometry(tmp_path):
     image = tmp_path / 'blank-hd.img'
 
@@ -162,3 +166,39 @@ def test_create_hard_disk_cli_is_create_only(capsys):
 
     assert error.value.code == 2
     assert 'create-only command' in capsys.readouterr().err
+
+
+def test_host_directory_bridge_is_read_only_fat12(tmp_path):
+    (tmp_path / 'HELLO.TXT').write_bytes(b'hello from host')
+
+    disk = build_host_directory_disk(tmp_path)
+    fat = FAT12(disk)
+    fat.mount()
+
+    assert fat.read_file_by_name('HELLO.TXT') == b'hello from host'
+    assert disk.read_only
+    assert not disk.write_sector(20, bytearray(512))
+
+
+def test_host_directory_bridge_rejects_subdirectories_and_bad_names(tmp_path):
+    (tmp_path / 'nested').mkdir()
+    with pytest.raises(ValueError, match='subdirectory'):
+        build_host_directory_disk(tmp_path)
+
+    bad = tmp_path / 'nested'
+    bad.rmdir()
+    (tmp_path / 'this-name-is-too-long.txt').write_bytes(b'x')
+    with pytest.raises(ValueError, match='8.3'):
+        build_host_directory_disk(tmp_path)
+
+
+def test_host_dir_cli_rejects_writes_and_second_floppy(capsys, tmp_path):
+    with pytest.raises(SystemExit) as error:
+        parse_args(['--host-dir', str(tmp_path), '--persist'])
+    assert error.value.code == 2
+    assert 'read-only' in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as error:
+        parse_args(['--host-dir', str(tmp_path), '--floppy-b', 'other.img'])
+    assert error.value.code == 2
+    assert 'cannot be combined' in capsys.readouterr().err

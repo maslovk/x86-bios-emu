@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1376 fast + 80 slow: CPU/BIOS/disk/FAT, DOS tools)
+└── tests/             # pytest suite (1380 fast + 81 slow: CPU/BIOS/disk/FAT, DOS tools)
 ```
 
 ## Components
@@ -173,6 +173,7 @@ python3 main.py --interactive            # Interactive: read keys from stdin
 python3 main.py --gtk                    # GTK window display + real keyboard capture
 python3 main.py --dos                    # Bundled DOS 3.3 + terminal keyboard
 python3 main.py --dos --gtk              # Bundled DOS 3.3 in one GTK command
+python3 main.py --dos --host-dir ./dos-files --gtk  # Read-only host folder as B:
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 python3 main.py --create-hard-disk harddisk.img --hard-disk-cylinders 306
 # For a larger FAT16-sized image, use: --hard-disk-cylinders 615
@@ -215,7 +216,7 @@ The emulator supports two VGA output paths:
 - **GTK** (`--gtk` / `-g`) — opens a real `Gtk.DrawingArea` window, paints
   each cell's CGA background + foreground colour, and captures key presses
   directly (injecting ASCII bytes into the keyboard controller).  This is
-  paired with Reset (soft reboot), Paste (host clipboard text), and a live
+  paired with Reset (full guest reboot), Paste (host clipboard text), and a live
   A:/B:/C: media-status bar; Ctrl+R and Ctrl+V provide keyboard shortcuts.
   The session indicator shows booting/running/stopped state and whether guest
   disk writes will be persisted or discarded. Dirty media is marked with `*`,
@@ -394,9 +395,9 @@ Run `FDISK`, exit, relaunch the emulator, and then run `FORMAT C: /S`.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1376 tests, ~13s)
-python3 -m pytest -q -m slow            # DOS boot/tool integration tests (80 tests)
-python3 -m pytest -q                    # all 1456 tests
+python3 -m pytest -q -m "not slow"      # fast tests (1380 tests, ~13s)
+python3 -m pytest -q -m slow            # DOS boot/tool integration tests (81 tests)
+python3 -m pytest -q                    # all 1461 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```

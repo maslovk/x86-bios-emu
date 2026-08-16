@@ -529,6 +529,49 @@ the emulator without changing guest compatibility.
   marked in GTK, non-persistent shutdowns warn before discarding writes, and
   Reset reinitializes memory, CPU, BIOS, IRQ state, and boot execution.
 
+## Phase L — Host-folder FAT bridge (Milestone 1 in progress)
+
+Goal: make a host directory visible to DOS without manually editing floppy
+images. The bridge will be a virtual read-only FAT drive, not a direct host
+filesystem syscall path from guest code.
+
+### Milestone 1 — Read-only root directory
+
+1. Add `--host-dir PATH` and `--host-drive B|C` (default `B`) to the CLI.
+2. Build an in-memory FAT12 image from the directory using the existing
+   `Disk`/`FAT12` abstractions: BPB, mirrored FATs, root entries, and data.
+3. Expose it through normal INT 13h so DOS can use `DIR`, `TYPE`, and execute
+   `.COM`/`.EXE` files without special DOS hooks.
+4. Support regular files only at first, with deterministic 8.3 names; reject
+   collisions, symlinks, directories, and files that exceed the image.
+5. Keep it read-only: guest writes return a protected-media error and never
+   modify the host directory. `--persist` is incompatible with this bridge.
+
+### Milestone 2 — Usable workflow
+
+- Show the mapped host path in the GTK/terminal media status.
+- Add refresh/eject controls that rebuild the virtual image between commands.
+- Add recursive directories only after root-file semantics are tested.
+- Document `python3 main.py --dos --host-dir ./dos-files --gtk`.
+
+### Milestone 3 — Optional write-back
+
+Host writes require explicit opt-in, temporary-file staging, 8.3 collision
+handling, and close-time review of every changed file. They are deliberately
+out of scope for the initial bridge.
+
+### Acceptance tests
+
+- Fixture files appear through `DIR B:` and `TYPE B:FILE.TXT`.
+- A host `.COM` fixture executes from the mapped drive.
+- Long names, symlinks, collisions, oversize files, and traversal attempts are
+  rejected before boot with concise CLI errors.
+- Guest write attempts fail without changing host files.
+- Existing floppy/hard-disk tests and the shipped-image hash guard stay green.
+
+The first two read/list criteria are covered by the slow
+`test_host_folder_bridge_is_visible_as_drive_b` integration test.
+
 ---
 
 ## Ground rules for the executing agent

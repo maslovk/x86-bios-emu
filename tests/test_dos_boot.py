@@ -75,3 +75,16 @@ class TestDOSBoot:
         h.boot_to_prompt()
         screen = h.run_command('ZZZXYZ')
         assert 'Bad command' in screen or 'File not found' in screen
+
+    def test_host_folder_bridge_is_visible_as_drive_b(self, tmp_path):
+        """A real DOS session can list and read a host-folder file on B:."""
+        (tmp_path / 'HOST.TXT').write_bytes(b'Hello from host bridge')
+        h = DOSHarness(host_dir=str(tmp_path))
+        h.boot_to_prompt()
+
+        listing = h.run_command('DIR B:', max_steps=10_000_000)
+        assert 'HOST' in listing.output
+        assert 'File not found' not in listing.output
+
+        content = h.run_command('TYPE B:HOST.TXT', max_steps=10_000_000)
+        assert 'Hello from host bridge' in content.output

@@ -186,10 +186,21 @@ but are not bundled or redistributed by this repository.
   160 KB/320 KB media even when their boot sectors have no conventional BPB.
 - A standard 360 KB image uses 40 cylinders, two heads, and nine sectors per
   track.  This geometry is retained after the emulator pads an image in memory.
-- The Eagle Computer MS-DOS 2.0 reference image reaches its OEM DOS banner.
-  Its kernel then returns DOS error 3 (`path not found`) when opening
-  `\COMMAND.COM`, despite the file being present.  Resolving this requires an
-  Eagle OEM startup/device-path compatibility layer.
+- The Eagle Computer MS-DOS 2.0 image (`DOS2/Eagle_Computer_DOS20.IMD`, decode
+  with `imd_decode.py`) boots to its OEM banner ("Eagle Computer MS-DOS
+  version 2.00") and then fails at `Bad or missing Command Interpreter`.
+  This is **not** the DOS 4.00 CDS/equipment-word issue: DOS 2.0's SYSINIT
+  predates the `Fake_Floppy_Drv` logic, `\DEV\CON` opens normally, and the
+  `\CONFIG.SYS` search executes (returning plain file-not-found).  The real
+  failure is inside SYSINIT's `EXEC` of `\COMMAND.COM`: the Eagle OEM block
+  driver reports an Eagle-native BPB (1 KiB sectors, media byte `0xFA`,
+  patched over the FAT id `0xFD` at 0070:06B5), so DOS computes the root
+  directory at logical sector 5 of 1 KiB, which the driver maps to 512-byte
+  LBA 9/10 instead of the image's actual root at LBA 5.  The directory
+  search then never sees `COMMAND.COM` and `EXEC` returns error 2.  Resolving
+  this requires an Eagle OEM device/BPB compatibility layer (the IMD header
+  identifies a "spirit/pc-plus" IBM-compatible diskette, while the driver
+  defaults to its native 1 KiB-sector geometry).
 - **MS-DOS 4.00 boots** (`DOS4/OPERATI3.IMG`, the bootable system disk): IO.SYS,
   MSDOS.SYS, CONFIG.SYS handling, and COMMAND.COM all run to an interactive
   `A>` prompt where `DIR`/`ECHO` and external programs like `GRAFTABL` work
@@ -508,6 +519,8 @@ Diagnostic probes (one-shot, kept for future investigations):
   tracers
 - `probe_dos4_open.py` — DOS 4 boot diagnostic: traces the first failing path
   open into the kernel canonicalizer and dumps the CDS/DPB state
+- `imd_decode.py` — ImageDisk (.IMD) floppy image decoder (raw output suitable
+  for `--floppy`), used to unpack the Eagle DOS 2.0 reference disk
 
 Smoke tests (require an X display):
 - `check_gtk_smoke.py` — boots the sample boot sector under `--gtk`, grabs pixels

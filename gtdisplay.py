@@ -54,6 +54,11 @@ _GWBASIC_FUNCTION_KEYS = {
     6: 'LPRINT', 7: 'TRON', 8: 'TROFF', 9: 'KEY', 10: 'SCREEN',
 }
 
+# IBM CGA cursor blink toggles every 16 display fields.  The standard CGA
+# refresh is 59.92 Hz, so each on/off transition is 16 / 59.92 = 267 ms.
+# GTK timers are wall-clock based, but this preserves the real-machine rate.
+CURSOR_BLINK_INTERVAL_MS = 267
+
 
 class GtkDisplay:
     """A GTK window that renders the emulator's VGA text buffer.
@@ -104,6 +109,8 @@ class GtkDisplay:
         self.on_close = on_close
         self.stop = False        # set when window closed -> loop should exit
         self.font_size = font_size
+        self.cursor_visible = True
+        self._cursor_timer = None
 
         # --- window + drawing area ---
         self.window = Gtk.Window()
@@ -135,6 +142,9 @@ class GtkDisplay:
         self._layout.set_font_description(self.font_desc)
 
         self.window.show_all()
+        # Keep the cursor blink in GTK's event loop, independent of guest speed.
+        self._cursor_timer = GLib.timeout_add(
+            CURSOR_BLINK_INTERVAL_MS, self._blink_cursor)
 
     # ── Gtk signal handlers ────────────────────────────────────────
 
@@ -190,6 +200,15 @@ class GtkDisplay:
         if self.on_key:
             self.on_key(byte & 0xFF)
 
+    def _blink_cursor(self):
+        """Toggle the cursor and request a redraw; stop after window close."""
+        if self.stop:
+            self._cursor_timer = None
+            return False
+        self.cursor_visible = not self.cursor_visible
+        self.drawing_area.queue_draw()
+        return True
+
     def _on_draw(self, _area, cr):
         """Render the full 80x25 grid: bg colour rect + fg glyph per cell."""
         PangoCairo = self._PangoCairo
@@ -215,6 +234,13 @@ class GtkDisplay:
                     cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)
                     cr.move_to(x * cw + 1, y * ch)
                     PangoCairo.show_layout(cr, layout)
+                if (self.cursor_visible and x == video.cur_x
+                        and y == video.cur_y):
+                    # A bright underline remains legible over blank cells and
+                    # colored DOS text while blinking clearly.
+                    cr.set_source_rgb(1.0, 1.0, 1.0)
+                    cr.rectangle(x * cw, (y + 1) * ch - 2, cw, 2)
+                    cr.fill()
 
     # ── public API ─────────────────────────────────────────────────
 
@@ -229,6 +255,7 @@ class GtkDisplay:
 
     def close(self):
         """Destroy the window after the loop exits."""
+        self.stop = True
         try:
             self.window.destroy()
         except Exception:

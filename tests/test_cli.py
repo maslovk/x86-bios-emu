@@ -76,6 +76,14 @@ def test_no_serial_disables_host_echo_but_keeps_com1_device(capsys):
     assert capsys.readouterr().err == ''
 
 
+def test_max_instructions_is_configurable_and_validated(capsys):
+    _parser, args = parse_args(['--dos', '--max-instructions', '50000000'])
+    assert args.max_instructions == 50_000_000
+    with pytest.raises(SystemExit):
+        parse_args(['--dos', '--max-instructions', '0'])
+    assert 'max-instructions must be positive' in capsys.readouterr().err
+
+
 def test_native_python_removes_inherited_snap_gtk_environment():
     environment = {
         'SNAP': '/snap/code/254',

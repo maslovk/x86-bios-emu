@@ -292,7 +292,7 @@ class Emulator:
                  hard_disk=None, boot_drive=0x00, gtk=False, gtk_font_size=18,
                  persist=False, serial_output=True, host_dir=None,
                  host_dir_write=False, host_dir_delete=False,
-                 host_dir_dos_text=False):
+                 host_dir_dos_text=False, max_instructions=10_000_000):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -316,6 +316,9 @@ class Emulator:
         self.cpu = _CPU(self.mem, self.io)
         self.cpu.step_mode = step_mode
         self.step_mode = step_mode
+        if max_instructions < 1:
+            raise ValueError('max-instructions must be positive')
+        self.max_instructions = max_instructions
         self.bios = BIOS(self.mem, self.video, self.kbd, self.disk,
                          pit=self.pit, pic=self.pic, cmos=self.cmos,
                          kbd_ctrl=self.kbd_ctrl, serial=self.serial)
@@ -873,9 +876,10 @@ class Emulator:
                         break
                     step += 1
 
-                if step > 10000000 and not self.interactive:
+                if step > self.max_instructions and not self.interactive:
                     self.stop_reason = 'instruction limit reached'
-                    print(f"[Reached step limit of 10,000,000]", file=sys.stderr)
+                    print(f"[Reached step limit of {self.max_instructions:,}]",
+                          file=sys.stderr)
                     break
 
                 # PIT tick: advance timer against wall-clock time
@@ -1113,6 +1117,9 @@ always protects the bundled image and therefore cannot be used with --persist.''
     runtime = parser.add_argument_group('runtime')
     runtime.add_argument('--step', '-s', action='store_true',
                          help='print each instruction and register state')
+    runtime.add_argument('--max-instructions', type=int, default=10_000_000,
+                         metavar='N',
+                         help='noninteractive instruction limit (default: 10000000)')
     serial = runtime.add_mutually_exclusive_group()
     serial.add_argument('--serial', dest='serial_output', action='store_true',
                         default=True,
@@ -1170,6 +1177,8 @@ def parse_args(argv=None):
     if args.host_dir_delete:
         if not args.host_dir_write:
             parser.error('--host-dir-delete requires --host-dir-write')
+    if args.max_instructions < 1:
+        parser.error('--max-instructions must be positive')
 
     if args.dos:
         args.floppy = BUNDLED_DOS_IMAGE
@@ -1226,7 +1235,8 @@ def main(argv=None):
                        host_dir=args.host_dir,
                        host_dir_write=args.host_dir_write,
                        host_dir_delete=args.host_dir_delete,
-                       host_dir_dos_text=args.host_dir_dos_text)
+                       host_dir_dos_text=args.host_dir_dos_text,
+                       max_instructions=args.max_instructions)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))

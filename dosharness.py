@@ -255,14 +255,22 @@ class DOSHarness:
     # ── CPU stepping ───────────────────────────────────────────────────
 
     def run_steps(self, n):
+        # Keep interrupt/timer servicing bounded while amortizing Python loop
+        # overhead for long-running guest programs (MASM is a notable case).
+        # Device handlers remain synchronous; only the periodic pump is
+        # batched, so keyboard and PIT latency stays well below one batch.
         pit = 0
-        for _ in range(n):
-            if not self.cpu.halted:
+        remaining = n
+        while remaining and not self.cpu.halted:
+            batch = min(256, remaining)
+            for _ in range(batch):
                 if not self.cpu.execute():
+                    remaining = 0
                     break
-            pit += 1
+            remaining -= batch
+            pit += batch
             if pit >= 500 and self.emu.pit:
-                pit = 0
+                pit %= 500
                 self.emu.io.tick(1.0 / 18.2)
             self._pump()
         return not self.cpu.halted
@@ -348,15 +356,25 @@ class DOSHarness:
         step = 0
         last_ip = None
         stuck = 0
+        next_prompt_check = 5000
+        next_pit_tick = 500
         while step < limit:
-            if not self.cpu.halted:
+            batch = min(256, limit - step)
+            executed = 0
+            while executed < batch and not self.cpu.halted:
                 if not self.cpu.execute():
                     break
-                step += 1
-            if step % 5000 == 0 and self._at_prompt(prev_screen):
+                executed += 1
+            if not executed:
+                break
+            step += executed
+            if step >= next_prompt_check and self._at_prompt(prev_screen):
                 return step, False
-            if step % 500 == 0 and self.emu.pit:
+            if step >= next_prompt_check:
+                next_prompt_check += 5000
+            if step >= next_pit_tick and self.emu.pit:
                 self.emu.io.tick(1.0 / 18.2)
+                next_pit_tick += 500
             self._pump()
             cur = (self.cpu.cs << 4) + self.cpu.ip
             if cur == last_ip:
@@ -382,6 +400,12 @@ class DOSHarness:
         the full per-command transcript (scrollback + visible), and
         ``.errorlevel`` is the probed exit code (None on timeout).
         """
+        # Keep the CPU's global safety ceiling above this command's explicit
+        # budget.  Long MASM/DOS builds legitimately exceed the historical
+        # 50M default; the harness watchdog still bounds this invocation.
+        requested = timeout_steps if timeout_steps is not None else max_steps
+        self.cpu.max_insns = max(self.cpu.max_insns,
+                                 self.cpu.insn_count + requested + 1)
         self.run_steps(20000)  # settle
         self._cmd_scroll_start = len(self._scrollback)
         prev_screen = self.vga_str()
@@ -422,6 +446,9 @@ class DOSHarness:
         the interactive prompt starved (the tool then spins on INT 16h AH=00's
         'no key' return with IF=0).  Sequential wait-then-type avoids that.
         """
+        requested = timeout_steps if timeout_steps is not None else max_steps
+        self.cpu.max_insns = max(self.cpu.max_insns,
+                                 self.cpu.insn_count + requested + 1)
         self.run_steps(20000)  # settle
         self._cmd_scroll_start = len(self._scrollback)
         prev = self.vga_str()
@@ -553,3 +580,16 @@ class DOSHarness:
         # Invalidate any FAT cache consumers; the harness keeps a fresh FAT12
         # view on demand via mount_candidate().
         self.emu.fat = None
+
+    def persist_host_dir(self):
+        """Flush guest writes on bridged drive B back to the host directory.
+
+        This is useful for long-running DOS tools (assemblers and linkers)
+        that create output files before the harness itself is torn down.
+        It is a public wrapper around the emulator's normal write-back path.
+        Returns ``True`` when a bridge is configured, otherwise ``False``.
+        """
+        if not self.host_dir or not self.host_dir_write:
+            return False
+        self.emu._persist_host_dir()
+        return True

@@ -15,7 +15,9 @@ from video import Video, IO, Keyboard, Disk, Serial
 from bios import BIOS
 from hardware import PIT, PIC, CMOS, KeyboardController
 from fat12 import FAT12, FAT12Error
-from hostbridge import build_host_directory_disk
+from hostbridge import (audit_host_directory_deletions,
+                        build_host_directory_disk, delete_missing_host_files,
+                        snapshot_host_directory, sync_host_directory_disk)
 import video as video_mod
 
 
@@ -280,7 +282,8 @@ class Emulator:
     def __init__(self, boot_file=None, step_mode=False, interactive=False,
                  enable_hardware=True, floppy_image=None, floppy_b=None,
                  hard_disk=None, boot_drive=0x00, gtk=False, gtk_font_size=18,
-                 persist=False, serial_output=True, host_dir=None):
+                 persist=False, serial_output=True, host_dir=None,
+                 host_dir_write=False, host_dir_delete=False):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -343,6 +346,9 @@ class Emulator:
         self.floppy_image = floppy_image
         self.floppy_b_image = floppy_b
         self.host_dir = host_dir
+        self.host_dir_write = host_dir_write
+        self.host_dir_snapshot = {}
+        self.host_dir_delete = host_dir_delete
         self.fat = None
         # Original (pre-padding) sector count of the loaded image, so --persist
         # writes back exactly the image's on-disk size instead of the 1.44MB
@@ -356,6 +362,8 @@ class Emulator:
             self._load_floppy_b(floppy_b)
         elif host_dir:
             self._load_host_dir(host_dir)
+        if host_dir:
+            self.host_dir_snapshot = snapshot_host_directory(host_dir)
         self.hard_disk_image = hard_disk
         self._hard_disk_sectors = None
         if hard_disk:
@@ -416,11 +424,15 @@ class Emulator:
 
     def _close_warning(self):
         """Return a GTK close warning only when non-persistent writes exist."""
-        if self.persist:
+        if self.persist and not self.host_dir_delete:
             return None
         dirty = self._dirty_media()
         if not dirty:
             return None
+        if self.host_dir_delete and self.host_dir_write:
+            return ('Guest writes to ' + ', '.join(dirty) +
+                    ' will be persisted, and files removed by DOS may be '
+                    'deleted from the host folder. Close anyway?')
         return ('Guest writes to ' + ', '.join(dirty) +
                 ' will be discarded. Close anyway?')
 
@@ -549,6 +561,7 @@ class Emulator:
         except (OSError, ValueError) as exc:
             raise ValueError(f"--host-dir: {exc}") from exc
         self.bios.disk_b = self.disk_b
+        self.disk_b.read_only = not self.host_dir_write
         self.floppy_b_image = f"host:{os.path.abspath(path)}"
         print(f"  Host folder B: {os.path.abspath(path)} (read-only FAT12)",
               file=sys.stderr)
@@ -565,6 +578,8 @@ class Emulator:
                 self.gtk_display.set_session_status('Refresh failed')
             return False
         self.bios.disk_b = self.disk_b
+        self.disk_b.read_only = not self.host_dir_write
+        self.host_dir_snapshot = snapshot_host_directory(self.host_dir)
         if self.gtk_display is not None:
             self.gtk_display.set_media_status(self._media_status())
             self.gtk_display.set_session_status(
@@ -583,6 +598,38 @@ class Emulator:
             self.gtk_display.set_session_status('B: ejected')
         print('[host bridge] ejected B:', file=sys.stderr)
         return True
+
+    def _persist_host_dir(self):
+        if not self.host_dir_write or not self.host_dir or not self.disk_b:
+            return
+        if not self.disk_b.dirty:
+            return
+        try:
+            changed, conflicts = sync_host_directory_disk(
+                self.disk_b, self.host_dir, self.host_dir_snapshot)
+            preserved = audit_host_directory_deletions(self.disk_b, self.host_dir)
+            self.disk_b.dirty = False
+            print(f'[persist] host-folder B: {len(changed)} file(s) updated '
+                  f'in {self.host_dir}', file=sys.stderr)
+            for path in changed:
+                print(f'  [persist] {path}', file=sys.stderr)
+            if conflicts:
+                print(f'[persist] skipped {len(conflicts)} host conflict(s)',
+                      file=sys.stderr)
+                for path in conflicts:
+                    print(f'  [persist] conflict: {path}', file=sys.stderr)
+            if self.host_dir_delete and preserved:
+                removed = delete_missing_host_files(self.disk_b, self.host_dir)
+                print(f'[persist] deleted {len(removed)} host file(s) removed '
+                      'by the guest', file=sys.stderr)
+                preserved = []
+            if preserved:
+                print(f'[persist] preserved {len(preserved)} host file(s) absent '
+                      'from the guest image (deletion disabled)', file=sys.stderr)
+                for path in preserved:
+                    print(f'  [persist] preserved {path}', file=sys.stderr)
+        except (OSError, ValueError, FAT12Error) as exc:
+            print(f'[persist] host-folder write failed: {exc}', file=sys.stderr)
 
     def _load_hard_disk(self, path: str):
         """Load a raw legacy-CHS hard-disk image as BIOS drive 80h."""
@@ -925,6 +972,7 @@ class Emulator:
                       ' (--persist was not supplied)', file=sys.stderr)
             self._persist_floppy()
             self._persist_hard_disk()
+            self._persist_host_dir()
 
             # Final display (terminal path only; GTK window already closed).
             if not self.gtk:
@@ -1036,6 +1084,10 @@ always protects the bundled image and therefore cannot be used with --persist.''
                               '(default: 306, about 10 MB)')
     storage.add_argument('--host-dir', metavar='DIR',
                          help='expose a host folder read-only as DOS drive B:')
+    storage.add_argument('--host-dir-write', action='store_true',
+                         help='allow host-folder write-back (requires --persist)')
+    storage.add_argument('--host-dir-delete', action='store_true',
+                         help='delete host files removed by DOS (requires write-back)')
 
     display = parser.add_argument_group('display and input')
     display.add_argument('--interactive', '-i', action='store_true',
@@ -1095,6 +1147,14 @@ def parse_args(argv=None):
             parser.error('--host-dir is read-only and cannot be used with --persist')
         if not os.path.isdir(args.host_dir):
             parser.error(f'--host-dir: directory not found: {args.host_dir}')
+    if args.host_dir_write:
+        if not args.host_dir:
+            parser.error('--host-dir-write requires --host-dir DIR')
+        if not args.persist:
+            parser.error('--host-dir-write requires --persist')
+    if args.host_dir_delete:
+        if not args.host_dir_write:
+            parser.error('--host-dir-delete requires --host-dir-write')
 
     if args.dos:
         args.floppy = BUNDLED_DOS_IMAGE
@@ -1148,7 +1208,9 @@ def main(argv=None):
                        boot_drive=0x80 if args.boot_hard_disk else 0x00,
                        gtk=args.gtk, gtk_font_size=args.gtk_font_size,
                        persist=args.persist, serial_output=args.serial_output,
-                       host_dir=args.host_dir)
+                       host_dir=args.host_dir,
+                       host_dir_write=args.host_dir_write,
+                       host_dir_delete=args.host_dir_delete)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))

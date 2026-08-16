@@ -2,6 +2,7 @@
 
 import re
 import tempfile
+import hashlib
 from pathlib import Path
 
 from fat12 import FAT12, FAT12Error, make_blank_image
@@ -105,3 +106,101 @@ def build_host_directory_disk(directory):
     disk.read_only = True
     disk.host_directory = str(root)
     return disk
+
+
+def sync_host_directory_disk(disk, directory, baseline=None):
+    """Write guest-visible regular files back into an existing host folder."""
+    root = Path(directory).resolve()
+    fat = FAT12(disk)
+    fat.mount()
+    changed = []
+    conflicts = []
+
+    def sync_dir(cluster, target):
+        target.mkdir(parents=True, exist_ok=True)
+        for entry in fat.read_dir(cluster):
+            if entry.name in ('.', '..') or entry.deleted:
+                continue
+            path = target / entry.full_name
+            if entry.is_dir:
+                sync_dir(entry.first_cluster, path)
+            else:
+                data = fat.read_file(entry.first_cluster, entry.size)
+                relative = str(path.relative_to(root))
+                if (baseline is not None and relative in baseline and path.exists()
+                        and hashlib.sha256(path.read_bytes()).hexdigest() != baseline[relative]
+                        and path.read_bytes() != data):
+                    conflicts.append(relative)
+                    continue
+                if not path.exists() or path.read_bytes() != data:
+                    path.write_bytes(data)
+                    changed.append(str(path))
+
+    for entry in fat.read_root_directory():
+        if entry.deleted:
+            continue
+        path = root / entry.full_name
+        if entry.is_dir:
+            sync_dir(entry.first_cluster, path)
+        else:
+            data = fat.read_file(entry.first_cluster, entry.size)
+            relative = str(path.relative_to(root))
+            if (baseline is not None and relative in baseline and path.exists()
+                    and hashlib.sha256(path.read_bytes()).hexdigest() != baseline[relative]
+                    and path.read_bytes() != data):
+                conflicts.append(relative)
+                continue
+            if not path.exists() or path.read_bytes() != data:
+                path.write_bytes(data)
+                changed.append(str(path))
+    return (changed, conflicts) if baseline is not None else changed
+
+
+def snapshot_host_directory(directory):
+    """Return relative-file SHA-256 hashes for write-back conflict checks."""
+    root = Path(directory).resolve()
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in root.rglob('*')
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def audit_host_directory_deletions(disk, directory):
+    """Return host files that guest FAT no longer references (never delete)."""
+    root = Path(directory).resolve()
+    fat = FAT12(disk)
+    fat.mount()
+    guest_files = set()
+
+    def collect(cluster, relative):
+        for entry in fat.read_dir(cluster):
+            if entry.name in ('.', '..') or entry.deleted:
+                continue
+            child = relative / entry.full_name
+            if entry.is_dir:
+                collect(entry.first_cluster, child)
+            else:
+                guest_files.add(child)
+
+    for entry in fat.read_root_directory():
+        if entry.deleted:
+            continue
+        child = Path(entry.full_name)
+        if entry.is_dir:
+            collect(entry.first_cluster, child)
+        else:
+            guest_files.add(child)
+
+    host_files = {path.relative_to(root) for path in root.rglob('*')
+                  if path.is_file() and not path.is_symlink()}
+    return sorted(str(path) for path in host_files - guest_files)
+
+
+def delete_missing_host_files(disk, directory):
+    """Delete host files absent from guest FAT; caller must explicitly opt in."""
+    root = Path(directory).resolve()
+    removed = audit_host_directory_deletions(disk, root)
+    for relative in removed:
+        (root / relative).unlink()
+    return removed

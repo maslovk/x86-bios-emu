@@ -555,11 +555,15 @@ filesystem syscall path from guest code.
 - ✅ Add recursive read-only directories after root-file semantics are tested.
 - Document `python3 main.py --dos --host-dir ./dos-files --gtk`.
 
-### Milestone 3 — Optional write-back
+### Milestone 3 — Optional write-back (complete)
 
 Host writes require explicit opt-in, temporary-file staging, 8.3 collision
-handling, and close-time review of every changed file. They are deliberately
-out of scope for the initial bridge.
+handling, and close-time review of every changed file. The initial explicit
+`--host-dir-write --persist` path now stages regular files and directories;
+Deletion is separately opt-in with `--host-dir-delete`; persistence reports
+every created/updated/deleted path and never deletes silently. Host files
+changed independently since session start are detected and skipped as
+conflicts.
 
 ### Acceptance tests
 

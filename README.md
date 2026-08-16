@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1382 fast + 83 slow: CPU/BIOS/disk/FAT, DOS tools)
+└── tests/             # pytest suite (1387 fast + 83 slow: CPU/BIOS/disk/FAT, DOS tools)
 ```
 
 ## Components
@@ -174,6 +174,7 @@ python3 main.py --gtk                    # GTK window display + real keyboard ca
 python3 main.py --dos                    # Bundled DOS 3.3 + terminal keyboard
 python3 main.py --dos --gtk              # Bundled DOS 3.3 in one GTK command
 python3 main.py --dos --host-dir ./dos-files --gtk  # Read-only host folder as B:
+python3 main.py --dos --host-dir ./dos-files --host-dir-write --persist --gtk
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 python3 main.py --create-hard-disk harddisk.img --hard-disk-cylinders 306
 # For a larger FAT16-sized image, use: --hard-disk-cylinders 615
@@ -199,6 +200,9 @@ python3 main.py --boot dos3.3.img --step  # Step through DOS 3.3 boot
 | `--floppy IMG` / `-f` | Load floppy image (FAT12, auto-detects 360KB–1.44MB) and mount filesystem |
 | `--floppy-b IMG` | Load a second floppy image as drive B: (enables `DIR B:`, `COPY B:..`, DISKCOPY/DISKCOMP) |
 | `--hard-disk IMG` | Attach an exact 1..1024-cylinder C/4/17 raw hard-disk image as BIOS drive 80h (tested at 306 cylinders/FAT12 and 615 cylinders/FAT16) |
+| `--host-dir DIR` | Expose a host folder as read-only DOS drive B: |
+| `--host-dir-write` | Enable explicit host-folder write-back (requires `--persist`) |
+| `--host-dir-delete` | Delete host files removed by DOS (requires both write-back flags) |
 | `--create-hard-disk IMG` | Create a blank legacy C/4/17 hard-disk image and exit; refuses to overwrite an existing file |
 | `--hard-disk-cylinders N` | Cylinder count for `--create-hard-disk` (1..1024, default 306; 306 is about 10 MB) |
 | `--boot-hard-disk` | Load the attached hard-disk MBR at 0000:7C00 and boot with DL=80h instead of booting floppy A: |
@@ -395,9 +399,9 @@ Run `FDISK`, exit, relaunch the emulator, and then run `FORMAT C: /S`.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1382 tests, ~13s)
+python3 -m pytest -q -m "not slow"      # fast tests (1387 tests, ~13s)
 python3 -m pytest -q -m slow            # DOS boot/tool integration tests (83 tests)
-python3 -m pytest -q                    # all 1465 tests
+python3 -m pytest -q                    # all 1470 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```

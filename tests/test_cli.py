@@ -8,7 +8,10 @@ from main import (BUNDLED_DOS_IMAGE, Emulator, build_argument_parser,
                   create_hard_disk_image, parse_args,
                   sanitize_snap_gtk_environment)
 from gtdisplay import CURSOR_BLINK_INTERVAL_MS, _GWBASIC_FUNCTION_KEYS
-from hostbridge import build_host_directory_disk
+from hostbridge import (audit_host_directory_deletions,
+                        build_host_directory_disk, snapshot_host_directory,
+                        sync_host_directory_disk)
+from hostbridge import delete_missing_host_files
 from fat12 import FAT12
 
 
@@ -221,6 +224,63 @@ def test_host_directory_eject_detaches_drive_b(tmp_path):
     assert emulator.bios.disk_b is None
     assert emulator.refresh_host_dir()
     assert emulator.disk_b is not None
+
+
+def test_host_directory_writeback_is_explicit_and_staged(tmp_path):
+    disk = build_host_directory_disk(tmp_path)
+    disk.read_only = False
+    fat = FAT12(disk)
+    fat.mount()
+    fat.write_file('NEW.TXT', b'new host content')
+    changed = sync_host_directory_disk(disk, tmp_path)
+    assert (tmp_path / 'NEW.TXT').read_bytes() == b'new host content'
+    assert str(tmp_path / 'NEW.TXT') in changed
+    assert 'NEW.TXT' not in audit_host_directory_deletions(disk, tmp_path)
+
+    fat.delete_file('NEW.TXT')
+    assert 'NEW.TXT' in audit_host_directory_deletions(disk, tmp_path)
+    assert delete_missing_host_files(disk, tmp_path) == ['NEW.TXT']
+    assert not (tmp_path / 'NEW.TXT').exists()
+
+
+def test_host_directory_writeback_skips_host_guest_conflicts(tmp_path):
+    (tmp_path / 'SAME.TXT').write_bytes(b'original')
+    baseline = snapshot_host_directory(tmp_path)
+    disk = build_host_directory_disk(tmp_path)
+    disk.read_only = False
+    fat = FAT12(disk)
+    fat.mount()
+    fat.write_file('SAME.TXT', b'guest version')
+    (tmp_path / 'SAME.TXT').write_bytes(b'host version')
+
+    changed, conflicts = sync_host_directory_disk(disk, tmp_path, baseline)
+    assert changed == []
+    assert conflicts == ['SAME.TXT']
+    assert (tmp_path / 'SAME.TXT').read_bytes() == b'host version'
+
+
+def test_host_directory_writeback_requires_persist(capsys, tmp_path):
+    with pytest.raises(SystemExit) as error:
+        parse_args(['--host-dir', str(tmp_path), '--host-dir-write'])
+    assert error.value.code == 2
+    assert '--persist' in capsys.readouterr().err
+
+
+def test_host_directory_delete_requires_writeback(capsys, tmp_path):
+    with pytest.raises(SystemExit) as error:
+        parse_args(['--host-dir', str(tmp_path), '--host-dir-delete'])
+    assert error.value.code == 2
+    assert '--host-dir-write' in capsys.readouterr().err
+
+
+def test_host_directory_delete_warns_before_persistent_close(tmp_path):
+    emulator = Emulator(enable_hardware=False, host_dir=str(tmp_path),
+                        persist=True, host_dir_write=True,
+                        host_dir_delete=True)
+    emulator.disk_b.dirty = True
+    warning = emulator._close_warning()
+    assert warning is not None
+    assert 'deleted from the host folder' in warning
 
 
 def test_host_dir_cli_rejects_writes_and_second_floppy(capsys, tmp_path):

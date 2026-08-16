@@ -563,7 +563,8 @@ class Emulator:
         self.bios.disk_b = self.disk_b
         self.disk_b.read_only = not self.host_dir_write
         self.floppy_b_image = f"host:{os.path.abspath(path)}"
-        print(f"  Host folder B: {os.path.abspath(path)} (read-only FAT12)",
+        mode = 'write-back enabled' if self.host_dir_write else 'read-only FAT12'
+        print(f"  Host folder B: {os.path.abspath(path)} ({mode})",
               file=sys.stderr)
 
     def refresh_host_dir(self):

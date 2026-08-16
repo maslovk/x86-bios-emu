@@ -10,11 +10,11 @@ green (including `-m slow`), and nothing in `DOS3_3_525/` may be modified
 
 ## 0. Current state (verified 2026-08-16)
 
-Phases A–F are complete. MS-DOS 3.3 boots from the shipped floppy images,
+Phases A–G are complete. MS-DOS 3.3 boots from the shipped floppy images,
 the full internal/external tool matrix is covered, writable workflows operate
 on temporary images, and the shipped images are protected by a session-level
 hash guard. The complete acceptance command, `python3 -m pytest -q`, passes
-all 1,422 tests (1,346 fast and 76 slow) with no xfails.
+all 1,428 tests (1,351 fast and 77 slow) with no xfails.
 
 The original blocking gaps are resolved: writable and multi-drive INT 13h,
 FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
@@ -46,9 +46,10 @@ Classification (a tool is "passing" when its test in `tests/tools/` is green):
     DEBUG EXE2BIN XCOPY REPLACE SYS FORMAT DISKCOMP DISKCOPY.
 - **Tier 2 — should run without crashing, core function verified**:
   APPEND ASSIGN SUBST JOIN FASTOPEN PRINT MODE SHARE RECOVER BACKUP RESTORE
-  GWBASIC LINK GRAFTABL.
+  GWBASIC LINK GRAFTABL; FDISK creates an active primary partition when a
+  temporary hard disk is attached.
 - **Tier 3 — out of scope, must fail *gracefully* (clean error, no emulator
-  crash/hang)**: FDISK (no hard disk), KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS
+  crash/hang)**: KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS
   (codepage/printer hardware), ANSI.SYS/DRIVER.SYS/RAMDRIVE.SYS/PRINTER.SYS
   as CONFIG.SYS drivers get one boot-smoke test each.
 
@@ -352,6 +353,40 @@ divergences; `pytest.skip` otherwise.
 
 ---
 
+## Phase G — Legacy hard disk and FDISK
+
+### Features
+
+1. `video.py::Disk` accepts a variable sector count and optional legacy CHS
+   geometry while preserving the existing 1.44MB floppy defaults.
+2. `main.py::Emulator` and `DOSHarness` accept a raw hard-disk image, expose it
+   as BIOS drive `80h`, and only write it back when `--persist` is explicit.
+   The supported geometry is C/4/17 with an exact whole-cylinder image size;
+   the integration test uses 306 cylinders (10,653,696 bytes, about 10MB).
+3. INT 13h routes `DL=80h` without aliasing it to floppy A:, implements legacy
+   CHS read/write/verify, reports geometry through AH=08h, reports hard-disk
+   type and total sectors through AH=15h, and publishes one fixed disk at BDA
+   `0040:0075`.
+
+### Tests
+
+- `tests/test_hard_disk.py` (fast): BDA count, AH=08h geometry, AH=15h sector
+  count, CHS read/write isolation from floppy A:, exact image loading, and
+  opt-in persistence.
+- `tests/tools/test_fdisk.py` (slow): attach a private blank 306/4/17 image,
+  use FDISK to create the maximum-size active primary partition, and verify
+  the MBR signature, partition type, LBA bounds, unused entries, and source
+  image immutability host-side.
+
+### Acceptance
+
+FDISK reaches its normal restart prompt after writing a valid active FAT12
+partition spanning sectors 17–20807; the full suite stays green and shipped
+floppy hashes remain unchanged. FAT16 formatting and booting C: are follow-on
+work, not Phase G acceptance requirements.
+
+---
+
 ## Ground rules for the executing agent
 
 - Never modify `DOS3_3_525/*.IMG`; the Phase A hash-guard test enforces this.
@@ -384,4 +419,5 @@ divergences; `pytest.skip` otherwise.
 | GWBASIC | 2 | test_gwbasic.py | ✅ Phase F (reaches `Ok`; fixed null old-INT-1Ch chain and INT 10h cursor ABI) |
 | TSRs/devices (SHARE/FASTOPEN/APPEND/PRINT/MODE/CTTY/ASSIGN/SUBST/JOIN/GRAFTABL) | 2 | test_tsr_and_devices.py | ✅ Phase E/F (load-without-crash; SUBST E: functional; PRINT resident; MODE COM1 configured; CTTY COM1 round-trip) |
 | CONFIG.SYS drivers (ANSI/DRIVER/RAMDRIVE) | 2 | test_config_sys.py | ✅ Phase E/F (boot-smoke; RAMDRIVE C: read/write; ANSI clear/cursor/colour rendering in VRAM) |
-| FDISK/KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |
+| FDISK | 2 | test_fdisk.py | ✅ Phase G (active primary FAT12 partition; MBR host-verified on private HDD image) |
+| KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |

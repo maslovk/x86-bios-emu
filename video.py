@@ -393,9 +393,14 @@ class Keyboard:
 class Disk:
     """Simple disk image (array of 512-byte sectors)."""
 
-    def __init__(self):
-        self.sectors = [bytearray(512) for _ in range(2880)]  # 1.44MB floppy
+    def __init__(self, num_sectors=2880, *, cylinders=None, heads=None,
+                 sectors_per_track=None, hard_disk=False):
+        self.sectors = [bytearray(512) for _ in range(num_sectors)]
         self.media_type = 0xF9  # Default: 1.44MB 3.5" floppy
+        self.cylinders = cylinders
+        self.heads = heads
+        self.sectors_per_track = sectors_per_track
+        self.hard_disk = hard_disk
         self.dirty = False          # set by write_sector; cleared by writeback
         self.media_changed = False  # set by swap_disk for AH=16h reporting
 

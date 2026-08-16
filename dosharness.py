@@ -82,6 +82,7 @@ class DOSHarness:
             shipped DISK01.IMG.
         image_b: optional second-drive image (drive B).  Stored for later
             wiring; full two-drive support lands with the disk-tool phase.
+        hard_disk: optional raw C/4/17 image exposed as BIOS drive 80h.
         writable: when True, the image(s) are copied to a private temp dir
             before booting, so any future writeback (host-side FAT12 writes,
             ``--persist``) can never mutate the repo images.  When False (the
@@ -92,10 +93,11 @@ class DOSHarness:
             robust against dropped keystrokes during heavy compute.
     """
 
-    def __init__(self, image_path=DISK01, image_b=None, writable=False,
-                 settle_extra=2000):
+    def __init__(self, image_path=DISK01, image_b=None, hard_disk=None,
+                 writable=False, settle_extra=2000):
         self.image_path = image_path
         self.image_b_path = image_b
+        self.hard_disk_path = hard_disk
         self.writable = writable
         self.settle_extra = settle_extra
 
@@ -112,9 +114,11 @@ class DOSHarness:
         self._tempdir = None
         load_path = self._materialise(image_path)
         load_path_b = self._materialise(image_b) if image_b else None
+        load_path_hd = self._materialise(hard_disk) if hard_disk else None
 
         self.emu = Emulator(boot_file=None, step_mode=False,
-                             floppy_image=load_path, floppy_b=load_path_b)
+                             floppy_image=load_path, floppy_b=load_path_b,
+                             hard_disk=load_path_hd)
         self.emu.bios.initialize()
         if self.emu.pic:
             self.emu.pic.initialize()
@@ -138,6 +142,7 @@ class DOSHarness:
         # Keep the drive-B path for reference; the Emulator loaded it above
         # (drive B), wiring it into the BIOS for INT 13h DL=01 dispatch.
         self._load_path_b = load_path_b
+        self._load_path_hd = load_path_hd
 
         bios_ref = self.emu.bios
 

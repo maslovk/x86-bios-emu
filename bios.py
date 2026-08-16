@@ -13,12 +13,14 @@ class BIOS:
     """Minimal BIOS ROM implementation."""
 
     def __init__(self, memory, video, keyboard, disk, pit=None, pic=None,
-                 cmos=None, kbd_ctrl=None, disk_b=None, serial=None):
+                 cmos=None, kbd_ctrl=None, disk_b=None, serial=None,
+                 hard_disk=None):
         self.mem = memory
         self.video = video
         self.kbd = keyboard
         self.disk = disk          # drive 0 (A:)
         self.disk_b = disk_b      # drive 1 (B:), or None
+        self.hard_disk = hard_disk  # BIOS drive 80h, or None
         self.pit = pit
         self.pic = pic
         self.cmos = cmos
@@ -158,9 +160,10 @@ class BIOS:
         self.mem.write_byte(bda + 0x51, 0)       # Cursor col
         # Warm boot flag
         self.mem.write_word(bda + 0x72, 0)       # Warm boot flag (0=cold)
-        # Boot drive and error
+        # Boot drive and fixed-disk count
         self.mem.write_byte(bda + 0x74, 0)       # Boot drive
-        self.mem.write_byte(bda + 0x75, 0)       # Boot error
+        self.mem.write_byte(bda + 0x75,
+                            1 if self.hard_disk is not None else 0)
         # Sector size
         self.mem.write_word(bda + 0x7D, 512)     # Sector size
 
@@ -518,21 +521,30 @@ class BIOS:
     }
 
     def _disk_for(self, dl):
-        """Return the Disk for drive number ``dl`` (0=A, 1=B), or None."""
+        """Return the Disk for BIOS drive ``dl`` (00h, 01h, or 80h)."""
         if dl == 0x00:
             return self.disk
         if dl == 0x01 and self.disk_b is not None:
             return self.disk_b
+        if dl == 0x80 and self.hard_disk is not None:
+            return self.hard_disk
         return None
 
     @property
     def _num_drives(self):
         return 2 if self.disk_b is not None else 1
 
+    @property
+    def _num_hard_drives(self):
+        return 1 if self.hard_disk is not None else 0
+
     def _disk_geometry(self, disk=None):
         """Return (sectors_per_track, max_cyl, max_head) for the given disk."""
         if disk is None:
             disk = self.disk
+        if getattr(disk, 'hard_disk', False):
+            return (disk.sectors_per_track, disk.cylinders - 1,
+                    disk.heads - 1)
         media = getattr(disk, 'media_type', 0xF9)
         spt = self._SPT_BY_MEDIA.get(media, 18)
         max_cyl, max_head = self._GEO_BY_MEDIA.get(media, (79, 1))
@@ -561,8 +573,8 @@ class BIOS:
 
     def _int13h(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
-        dl = cpu.dl & 0x7F                  # floppy drive select (strip HD bit)
-        disk = self._disk_for(dl)           # None for an absent B: / hard disk
+        dl = cpu.dl
+        disk = self._disk_for(dl)
 
         if ah == 0x00:  # Reset disk
             if disk is None:
@@ -686,22 +698,13 @@ class BIOS:
             cpu.al = count
             cpu.flags &= ~0x01
         elif ah == 0x08:  # Get disk params
-            # DL=drive to query (floppy 0/1); hard disk (0x80+) unsupported.
-            if cpu.dl & 0x80 or disk is None:
+            if disk is None:
                 cpu.ah = 0x01
                 cpu.flags |= 0x01
                 return
-            media = getattr(disk, 'media_type', 0xF9)
-            if media == 0xF9:  # 1.44MB
-                max_cyl, max_head, spt = 79, 1, 18
-            elif media == 0xF8:  # 1.2MB
-                max_cyl, max_head, spt = 79, 1, 15
-            elif media == 0xFD:  # 360KB
-                max_cyl, max_head, spt = 39, 1, 9
-            elif media == 0xF1:  # 720KB
-                max_cyl, max_head, spt = 79, 1, 9
-            else:
-                max_cyl, max_head, spt = 79, 1, 18
+            spt, max_cyl, max_head = self._disk_geometry(disk)
+            is_hard = getattr(disk, 'hard_disk', False)
+            media = 0 if is_hard else getattr(disk, 'media_type', 0xF9)
 
             cpu.ah = 0x00
             cpu.al = 0x00
@@ -709,9 +712,10 @@ class BIOS:
             cpu.ch = max_cyl & 0xFF
             cpu.cl = (spt & 0x3F) | ((max_cyl >> 2) & 0xC0)
             cpu.dh = max_head
-            cpu.dl = self._num_drives
-            cpu.di = self.mem.read_word(0x1E * 4)
-            cpu.es = self.mem.read_word(0x1E * 4 + 2)
+            cpu.dl = self._num_hard_drives if is_hard else self._num_drives
+            if not is_hard:
+                cpu.di = self.mem.read_word(0x1E * 4)
+                cpu.es = self.mem.read_word(0x1E * 4 + 2)
             cpu.flags &= ~0x01
         elif ah == 0x06:  # Check drive status (Compaq)
             cpu.al = 0x00  # No error
@@ -729,8 +733,17 @@ class BIOS:
             cpu.ax = 0x0000
             cpu.flags &= ~0x01
         elif ah == 0x15:  # Get disk type
-            # AL: 1=no disk, 2=floppy w/ change-line, 3=hard disk.
-            cpu.al = 2 if disk is not None else 1
+            # AH: 1=no disk, 2=floppy w/ change-line, 3=hard disk.  For a
+            # hard disk CX:DX contains its total sector count.
+            if disk is None:
+                cpu.ah = 1
+            elif getattr(disk, 'hard_disk', False):
+                total = len(disk.sectors)
+                cpu.ah = 3
+                cpu.cx = (total >> 16) & 0xFFFF
+                cpu.dx = total & 0xFFFF
+            else:
+                cpu.ah = 2
             cpu.flags &= ~0x01
         elif ah == 0x16:  # Media change status
             if getattr(disk, 'media_changed', False) if disk else False:

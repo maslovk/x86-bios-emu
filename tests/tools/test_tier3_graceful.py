@@ -1,7 +1,8 @@
 """Phase E Tier-3 tools: must fail *gracefully* (clean error / prompt returns,
-no emulator crash or hang).  FDISK (no hard disk), KEYB / NLSFUNC / DISPLAY /
-GRAPHICS (codepage / printer hardware) either print an error or load a driver
-and return to the prompt; SELECT prompts Y/N and is declined.
+no emulator crash or hang).  KEYB / NLSFUNC / DISPLAY / GRAPHICS (codepage /
+printer hardware) either print an error or load a driver and return to the
+prompt; SELECT prompts Y/N and is declined. FDISK is covered functionally in
+``test_fdisk.py`` when a temporary hard disk is attached.
 
 All loaded in one fresh writable session (small resident footprints); the
 guard is that each returns to ``A>`` *and* a follow-up command still runs.
@@ -16,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 pytestmark = [pytest.mark.slow, pytest.mark.tools]
 
 # Tools that, with no (or harmless) arguments, return cleanly to the prompt.
-_RETURNING = ['FDISK', 'KEYB', 'NLSFUNC', 'DISPLAY', 'GRAPHICS']
+_RETURNING = ['KEYB', 'NLSFUNC', 'DISPLAY', 'GRAPHICS']
 
 
 def test_tier3_tools_return_gracefully(dos_rw):

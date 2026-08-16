@@ -136,7 +136,7 @@ def test_ah15_get_disk_type(memory, video, kbd, disk):
     b = _bios(memory, video, kbd, disk)
     cpu = FakeCPU(ax=0x1500)
     b.handlers[0x13](cpu)
-    assert cpu.al == 2                   # floppy with change-line
+    assert cpu.ah == 2                   # floppy with change-line
     assert not (cpu.flags & 0x01)
 
 

@@ -221,7 +221,7 @@ class Emulator:
 
     def __init__(self, boot_file=None, step_mode=False, interactive=False,
                  enable_hardware=True, floppy_image=None, floppy_b=None,
-                 gtk=False, gtk_font_size=18, persist=False):
+                 hard_disk=None, gtk=False, gtk_font_size=18, persist=False):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -252,6 +252,7 @@ class Emulator:
         self.enable_hardware = enable_hardware
         # Second floppy drive (B:); populated by _load_floppy_b() below.
         self.disk_b = None
+        self.hard_disk = None
 
         # GTK display (optional).  When enabled, it takes over rendering and
         # keyboard input: the emulator loop pumps Gtk events between
@@ -281,6 +282,10 @@ class Emulator:
             self._load_floppy(floppy_image)
         if floppy_b:
             self._load_floppy_b(floppy_b)
+        self.hard_disk_image = hard_disk
+        self._hard_disk_sectors = None
+        if hard_disk:
+            self._load_hard_disk(hard_disk)
 
         # Write BIOS ROM string
         bios_str = b"SIMPLE BIOS"
@@ -394,6 +399,34 @@ class Emulator:
         self.disk_b.media_type = media_byte
         print(f"  Floppy B: {len(data)//1024}KB, {actual_sectors} sectors, "
               f"media=0x{media_byte:02X}", file=sys.stderr)
+
+    def _load_hard_disk(self, path: str):
+        """Load a raw legacy-CHS hard-disk image as BIOS drive 80h."""
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+        except FileNotFoundError:
+            print(f"[ERROR] Hard disk image not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        if len(data) == 0 or len(data) % 512:
+            raise ValueError("hard-disk image size must be a non-zero multiple of 512")
+
+        sectors = len(data) // 512
+        heads, spt = 4, 17
+        cylinders = sectors // (heads * spt)
+        if not 1 <= cylinders <= 1024 or cylinders * heads * spt != sectors:
+            raise ValueError(
+                "hard-disk image must use an exact C/4/17 legacy CHS geometry")
+        self.hard_disk = Disk(
+            sectors, cylinders=cylinders, heads=heads,
+            sectors_per_track=spt, hard_disk=True)
+        self.bios.hard_disk = self.hard_disk
+        for i in range(sectors):
+            self.hard_disk.sectors[i][:] = data[i * 512:(i + 1) * 512]
+        self.hard_disk.dirty = False
+        self._hard_disk_sectors = sectors
+        print(f"  Hard disk: {len(data)//1024}KB, {cylinders}/{heads}/{spt} CHS",
+              file=sys.stderr)
 
     def _check_and_dispatch_irq(self):
         """Check for pending IRQs and dispatch highest priority one.
@@ -668,6 +701,28 @@ class Emulator:
             if self.gtk and self.gtk_display is not None:
                 self.gtk_display.close()
             self._persist_floppy()
+            self._persist_hard_disk()
+
+            # Final display (terminal path only; GTK window already closed).
+            if not self.gtk:
+                self.video.display()
+            status = self.cpu.status()
+            print(f"\n[CPU HALTED] CS:IP={status['cs']:04X}:{status['ip']:04X} "
+                  f"Instructions: {step:,}", file=sys.stderr)
+            print(f"  AX={status['ax']:04X} BX={status['bx']:04X} "
+                  f"CX={status['cx']:04X} DX={status['dx']:04X}", file=sys.stderr)
+            print(f"  SP={status['sp']:04X} BP={status['bp']:04X} "
+                  f"SI={status['si']:04X} DI={status['di']:04X}", file=sys.stderr)
+            print(f"  DS={status['ds']:04X} ES={status['es']:04X} "
+                  f"SS={status['ss']:04X} FL={status['flags']:04X}",
+                  file=sys.stderr)
+
+            linear_ip = (status['cs'] << 4) + status['ip']
+            print(f"\nMemory dump around IP {linear_ip:08X}:", file=sys.stderr)
+            for i in range(-64, 64):
+                addr = (linear_ip + i) & 0xFFFFF
+                val = self.mem.read_byte(addr)
+                print(f"{addr:08X}: {val:02X}", file=sys.stderr)
 
     def _persist_floppy(self):
         """Write dirty disk sectors back to the loaded image (only if --persist).
@@ -690,27 +745,22 @@ class Emulator:
         except OSError as e:
             print(f"[persist] failed: {e}", file=sys.stderr)
 
-        # Final display (terminal path only; GTK window already closed).
-        if not self.gtk:
-            self.video.display()
-        status = self.cpu.status()
-        print(f"\n[CPU HALTED] CS:IP={status['cs']:04X}:{status['ip']:04X} "
-              f"Instructions: {step:,}", file=sys.stderr)
-        print(f"  AX={status['ax']:04X} BX={status['bx']:04X} "
-              f"CX={status['cx']:04X} DX={status['dx']:04X}", file=sys.stderr)
-        print(f"  SP={status['sp']:04X} BP={status['bp']:04X} "
-              f"SI={status['si']:04X} DI={status['di']:04X}", file=sys.stderr)
-        print(f"  DS={status['ds']:04X} ES={status['es']:04X} "
-              f"SS={status['ss']:04X} FL={status['flags']:04X}",
-              file=sys.stderr)
-
-        # Memory dump around current IP
-        linear_ip = (status['cs'] << 4) + status['ip']
-        print(f"\nMemory dump around IP {linear_ip:08X}:", file=sys.stderr)
-        for i in range(-64, 64):
-            addr = (linear_ip + i) & 0xFFFFF
-            val = self.mem.read_byte(addr)
-            print(f"{addr:08X}: {val:02X}", file=sys.stderr)
+    def _persist_hard_disk(self):
+        """Write a dirty hard disk back when ``--persist`` is enabled."""
+        if not self.persist or not self.hard_disk_image or self.hard_disk is None:
+            return
+        if not self.hard_disk.dirty:
+            return
+        try:
+            with open(self.hard_disk_image, 'r+b') as f:
+                f.seek(0)
+                for sector in self.hard_disk.sectors:
+                    f.write(sector)
+            self.hard_disk.dirty = False
+            print(f"[persist] wrote {len(self.hard_disk.sectors)} hard-disk sectors "
+                  f"back to {self.hard_disk_image}", file=sys.stderr)
+        except OSError as e:
+            print(f"[persist] hard-disk write failed: {e}", file=sys.stderr)
 
 
 def main():
@@ -729,6 +779,8 @@ def main():
                         help='Load floppy image (FAT12, 1.44MB)')
     parser.add_argument('--floppy-b', metavar='IMG',
                         help='Load a second floppy image as drive B:')
+    parser.add_argument('--hard-disk', metavar='IMG',
+                        help='Load a raw C/4/17 hard-disk image as BIOS drive 80h')
     parser.add_argument('--gtk', '-g', action='store_true',
                         help='Use a GTK window for display + keyboard input '
                              '(replaces the terminal box; sidesteps cbreak/')
@@ -736,8 +788,8 @@ def main():
                         metavar='PT',
                         help='Pango font point size for --gtk (default: 18)')
     parser.add_argument('--persist', action='store_true',
-                        help='Write guest-modified disk sectors back to the '
-                             '--floppy image on clean exit (default: off; '
+                        help='Write guest-modified disk sectors back to attached '
+                             'floppy/hard-disk images on clean exit (default: off; '
                              'never use on the shipped repo images)')
     args = parser.parse_args()
 
@@ -757,7 +809,7 @@ def main():
 
     emu = Emulator(boot_file=args.boot, step_mode=args.step,
                    interactive=args.interactive, floppy_image=args.floppy,
-                   floppy_b=args.floppy_b,
+                   floppy_b=args.floppy_b, hard_disk=args.hard_disk,
                    gtk=args.gtk, gtk_font_size=args.gtk_font_size,
                    persist=args.persist)
     emu.run()

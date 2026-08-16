@@ -184,6 +184,12 @@ def test_host_directory_bridge_is_read_only_fat12(tmp_path):
     assert not disk.write_sector(20, bytearray(512))
 
 
+def test_host_directory_bridge_matches_bios_media_descriptor(tmp_path):
+    disk = build_host_directory_disk(tmp_path)
+    assert disk.media_type == disk.sectors[0][0x15] == 0xF0
+    assert (disk.sectors_per_track, disk.cylinders, disk.heads) == (18, 80, 2)
+
+
 def test_host_directory_dos_text_normalizes_guest_only(tmp_path):
     source = b'line one\nline two\r\n'
     (tmp_path / 'SOURCE.ASM').write_bytes(source)
@@ -256,6 +262,21 @@ def test_host_directory_writeback_is_explicit_and_staged(tmp_path):
     assert 'NEW.TXT' in audit_host_directory_deletions(disk, tmp_path)
     assert delete_missing_host_files(disk, tmp_path) == ['NEW.TXT']
     assert not (tmp_path / 'NEW.TXT').exists()
+
+
+def test_host_directory_large_listing_writeback(tmp_path):
+    payload = (b'listing line\r\n' * 26000)[:330000]
+    disk = build_host_directory_disk(tmp_path)
+    disk.read_only = False
+    fat = FAT12(disk)
+    fat.mount()
+    fat.write_file('BUILD.LST', payload)
+
+    changed = sync_host_directory_disk(disk, tmp_path)
+    output = tmp_path / 'BUILD.LST'
+    assert str(output) in changed
+    assert output.stat().st_size == len(payload)
+    assert output.read_bytes() == payload
 
 
 def test_host_directory_writeback_skips_host_guest_conflicts(tmp_path):

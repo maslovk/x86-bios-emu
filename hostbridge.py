@@ -60,9 +60,14 @@ def build_host_directory_disk(directory, dos_text=False):
         make_blank_image(blank.name, size=1440 * 1024)
         raw = Path(blank.name).read_bytes()
 
-    disk = Disk(2880)
+    disk = Disk(2880, cylinders=80, heads=2, sectors_per_track=18)
     for index in range(2880):
         disk.sectors[index][:] = raw[index * 512:(index + 1) * 512]
+    # Keep the BIOS geometry/media descriptor in sync with the BPB.  The
+    # default Disk descriptor (F9) describes a different legacy floppy even
+    # though this image is the 1.44 MB F0 format.  DOS uses the descriptor
+    # during file allocation and can otherwise loop while extending files.
+    disk.media_type = raw[0x15]
     fat = FAT12(disk)
     fat.mount()
     def write_data(data):

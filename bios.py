@@ -563,6 +563,13 @@ class BIOS:
         if getattr(disk, 'hard_disk', False):
             return (disk.sectors_per_track, disk.cylinders - 1,
                     disk.heads - 1)
+        # Bridges and explicitly-created disks can carry exact geometry;
+        # prefer it over ambiguous media descriptor bytes.
+        if (getattr(disk, 'sectors_per_track', None) is not None
+                and getattr(disk, 'cylinders', None) is not None
+                and getattr(disk, 'heads', None) is not None):
+            return (disk.sectors_per_track, disk.cylinders - 1,
+                    disk.heads - 1)
         media = getattr(disk, 'media_type', 0xF9)
         spt = self._SPT_BY_MEDIA.get(media, 18)
         max_cyl, max_head = self._GEO_BY_MEDIA.get(media, (79, 1))

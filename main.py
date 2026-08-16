@@ -302,6 +302,7 @@ class Emulator:
                      kbd_ctrl=self.kbd_ctrl)
         self.cpu = _CPU(self.mem, self.io)
         self.cpu.step_mode = step_mode
+        self.step_mode = step_mode
         self.bios = BIOS(self.mem, self.video, self.kbd, self.disk,
                          pit=self.pit, pic=self.pic, cmos=self.cmos,
                          kbd_ctrl=self.kbd_ctrl, serial=self.serial)
@@ -331,7 +332,8 @@ class Emulator:
                 else:
                     self.kbd.buffer.append(byte)
             self.gtk_display = GtkDisplay(
-                self.video, on_key=_on_key, font_size=gtk_font_size)
+                self.video, on_key=_on_key, on_reset=self.reset_guest,
+                font_size=gtk_font_size)
 
         # FAT12 filesystem
         self.floppy_image = floppy_image
@@ -350,11 +352,42 @@ class Emulator:
         if hard_disk:
             self._load_hard_disk(hard_disk)
         self.bios.boot_drive = self.boot_drive
+        if self.gtk_display is not None:
+            media = [f"A: {os.path.basename(self.floppy_image) if self.floppy_image else 'none'}"]
+            media.append(f"B: {os.path.basename(floppy_b) if floppy_b else 'none'}")
+            media.append(f"C: {os.path.basename(hard_disk) if hard_disk else 'none'}")
+            self.gtk_display.set_media_status('  '.join(media))
 
         # Write BIOS ROM string
         bios_str = b"SIMPLE BIOS"
         for i, b in enumerate(bios_str):
             self.mem.write_byte(0xF0000 + i, b)
+
+    def reset_guest(self):
+        """Perform a soft hardware reset from the GTK control bar."""
+        from cpu import CPU as _CPU
+        self.mem.ram[:0xA0000] = b'\x00' * 0xA0000
+        self.video.clear()
+        self.kbd.buffer.clear()
+        if self.kbd_ctrl:
+            self.kbd_ctrl._out_buffer.clear()
+            self.kbd_ctrl._scan_fifo.clear()
+            self.kbd_ctrl.irq_pending = False
+        self.cpu = _CPU(self.mem, self.io)
+        self.cpu.step_mode = self.step_mode
+        boot_disk = self.hard_disk if self.boot_drive == 0x80 else self.disk
+        buf = bytearray(512)
+        boot_disk.read_sector(0, buf)
+        for i, value in enumerate(buf):
+            self.mem.write_byte(0x7C00 + i, value)
+        self.cpu.cs = 0x0000
+        self.cpu.ip = 0x7C00
+        self.cpu.dl = self.boot_drive
+        self.bios.initialize()
+        if self.pic:
+            self.pic.initialize()
+        self._setup_ivt_irq_handlers()
+        self._install_bios_interrupt_hook()
 
     def _create_memory(self):
         """Create memory object compatible with CPU."""

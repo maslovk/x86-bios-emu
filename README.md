@@ -215,6 +215,8 @@ The emulator supports two VGA output paths:
 - **GTK** (`--gtk` / `-g`) — opens a real `Gtk.DrawingArea` window, paints
   each cell's CGA background + foreground colour, and captures key presses
   directly (injecting ASCII bytes into the keyboard controller).  This is
+  paired with Reset (soft reboot), Paste (host clipboard text), and a live
+  A:/B:/C: media-status bar; Ctrl+R and Ctrl+V provide keyboard shortcuts.
   the recommended path for interactive DOS use: it sidesteps the cbreak /
   scan-code-remapping pitfalls of terminal stdin, and Enter yields `0x0D`
   (CR) — what COMMAND.COM's DATE/TIME prompts expect.  Ctrl+C in the

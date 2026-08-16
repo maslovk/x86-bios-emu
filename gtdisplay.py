@@ -75,6 +75,11 @@ class GtkDisplay:
     on_close : callable() | None
         Called once when the user closes the window; the loop should then
         stop (``pump()`` also returns True after this point).
+    on_reset : callable() | None
+        Called by the Reset button or Ctrl+R.  The emulator owns the reset
+        operation so the display remains independent of CPU/device details.
+    media_status : str
+        Short media summary shown below the VGA grid.
     font_size : int
         Pango font point size.  Cell width/height are derived from this by
         measuring an 'M' via Pango, so the rendered grid is always aligned.
@@ -82,7 +87,8 @@ class GtkDisplay:
         Window title.
     """
 
-    def __init__(self, video, on_key=None, on_close=None,
+    def __init__(self, video, on_key=None, on_close=None, on_reset=None,
+                 media_status="A: none  B: none  C: none",
                  font_size=18, title="Simple BIOS Emulator — VGA Text"):
         # Lazy import so ``main.py`` can be imported without GTK installed
         # (e.g. in CI / test runs).  Only --gtk actually needs gi.
@@ -107,6 +113,7 @@ class GtkDisplay:
         self.video = video
         self.on_key = on_key
         self.on_close = on_close
+        self.on_reset = on_reset
         self.stop = False        # set when window closed -> loop should exit
         self.font_size = font_size
         self.cursor_visible = True
@@ -120,7 +127,23 @@ class GtkDisplay:
 
         self.drawing_area = Gtk.DrawingArea()
         self.drawing_area.connect('draw', self._on_draw)
-        self.window.add(self.drawing_area)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        controls.set_border_width(4)
+        reset = Gtk.Button.new_with_label('Reset')
+        reset.connect('clicked', self._on_reset_clicked)
+        paste = Gtk.Button.new_with_label('Paste')
+        paste.connect('clicked', self._on_paste_clicked)
+        self.media_label = Gtk.Label(label=media_status)
+        self.media_label.set_xalign(0.0)
+        controls.pack_start(reset, False, False, 0)
+        controls.pack_start(paste, False, False, 0)
+        controls.pack_start(self.media_label, True, True, 0)
+
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        layout.pack_start(self.drawing_area, True, True, 0)
+        layout.pack_start(controls, False, False, 0)
+        self.window.add(layout)
 
         # --- measure cell size from the font so the grid is always aligned ---
         self.font_desc = Pango.FontDescription.from_string(
@@ -134,7 +157,7 @@ class GtkDisplay:
 
         self.width_px = self.cell_w * video.width
         self.height_px = self.cell_h * video.height
-        self.window.set_default_size(self.width_px, self.height_px)
+        self.window.set_default_size(self.width_px, self.height_px + 34)
         self.window.set_resizable(False)
 
         # Reusable layout for per-cell glyph drawing (text swapped each draw).
@@ -194,7 +217,31 @@ class GtkDisplay:
                 Gdk.KEY_c, Gdk.KEY_C):
             self.stop = True
             return True
+        if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (
+                Gdk.KEY_r, Gdk.KEY_R):
+            self._on_reset_clicked(None)
+            return True
+        if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (
+                Gdk.KEY_v, Gdk.KEY_V):
+            self._on_paste_clicked(None)
+            return True
         return False
+
+    def _on_reset_clicked(self, _button):
+        if self.on_reset:
+            self.on_reset()
+
+    def _on_paste_clicked(self, _button):
+        clipboard = self._Gtk.Clipboard.get(self._Gdk.SELECTION_CLIPBOARD)
+        clipboard.request_text(self._on_clipboard_text)
+
+    def _on_clipboard_text(self, _clipboard, text):
+        if text:
+            for byte in text.replace('\n', '\r').encode('utf-8'):
+                self._emit(byte)
+
+    def set_media_status(self, text):
+        self.media_label.set_text(text)
 
     def _emit(self, byte):
         if self.on_key:

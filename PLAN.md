@@ -518,7 +518,9 @@ the emulator without changing guest compatibility.
 
 ### Next UX slices
 
-- A guided command for creating correctly sized blank hard-disk images.
+- ✅ Guided hard-disk image creation: `--create-hard-disk IMG` creates an exact
+  legacy C/4/17 image (configurable with `--hard-disk-cylinders`), refuses
+  accidental overwrite, and prints the FDISK/FORMAT next steps.
 - Clearer run-state/persistence summaries and clean-exit reporting.
 - GTK quality-of-life controls such as reset, media status, and clipboard paste.
 

@@ -64,6 +64,17 @@ def sanitize_snap_gtk_environment(environ=None, executable=None):
     return tuple(removed)
 
 
+def create_hard_disk_image(path, cylinders=306):
+    """Create a blank legacy C/4/17 hard-disk image without overwriting."""
+    if not isinstance(cylinders, int) or not 1 <= cylinders <= 1024:
+        raise ValueError('hard-disk cylinders must be an integer from 1 to 1024')
+    sectors = cylinders * 4 * 17
+    size = sectors * 512
+    with open(path, 'xb') as image:
+        image.truncate(size)
+    return sectors, size
+
+
 # ─── Sample Boot Sector (512 bytes) ────────────────────────────────────────
 #
 # This is a minimal x86 real-mode boot sector written in "assembly" as bytes.
@@ -852,6 +863,7 @@ def build_argument_parser():
   python3 main.py --dos --gtk           boot bundled DOS in a GTK window
   python3 main.py -f disk.img -i        boot a floppy with terminal input
   python3 main.py --hard-disk hd.img --boot-hard-disk --gtk
+  python3 main.py --create-hard-disk hd.img --hard-disk-cylinders 306
 
 Disk writes are discarded unless --persist is supplied.  The --dos shortcut
 always protects the bundled image and therefore cannot be used with --persist.''')
@@ -870,6 +882,14 @@ always protects the bundled image and therefore cannot be used with --persist.''
                       help='attach an exact C/4/17 raw image as BIOS drive 80h')
     boot.add_argument('--boot-hard-disk', action='store_true',
                       help='boot the attached hard-disk MBR instead of drive A:')
+
+    storage = parser.add_argument_group('disk image tools')
+    storage.add_argument('--create-hard-disk', metavar='IMG',
+                         help='create a blank legacy C/4/17 image and exit')
+    storage.add_argument('--hard-disk-cylinders', type=int, default=306,
+                         metavar='N',
+                         help='cylinders for --create-hard-disk, 1..1024 '
+                              '(default: 306, about 10 MB)')
 
     display = parser.add_argument_group('display and input')
     display.add_argument('--interactive', '-i', action='store_true',
@@ -905,6 +925,22 @@ def parse_args(argv=None):
     if args.dos and args.persist:
         parser.error('--dos protects the bundled image; use --floppy with a copy '
                      'if you want --persist')
+    if args.create_hard_disk:
+        conflicting = []
+        if args.boot or args.dos or args.floppy or args.floppy_b:
+            conflicting.append('boot media')
+        if args.hard_disk or args.boot_hard_disk:
+            conflicting.append('--hard-disk/--boot-hard-disk')
+        if args.persist or args.gtk or args.interactive or args.step:
+            conflicting.append('runtime/display options')
+        if conflicting:
+            parser.error('--create-hard-disk is a create-only command; remove '
+                         + ', '.join(conflicting))
+        if not 1 <= args.hard_disk_cylinders <= 1024:
+            parser.error('--hard-disk-cylinders must be between 1 and 1024')
+        if os.path.exists(args.create_hard_disk):
+            parser.error(f'--create-hard-disk: refusing to overwrite existing '
+                         f'file: {args.create_hard_disk}')
 
     if args.dos:
         args.floppy = BUNDLED_DOS_IMAGE
@@ -923,6 +959,19 @@ def parse_args(argv=None):
 
 def main(argv=None):
     parser, args = parse_args(argv)
+
+    if args.create_hard_disk:
+        try:
+            sectors, size = create_hard_disk_image(
+                args.create_hard_disk, args.hard_disk_cylinders)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(f'Created {args.create_hard_disk}: '
+              f'{args.hard_disk_cylinders}/4/17 CHS, '
+              f'{sectors:,} sectors, {size:,} bytes')
+        print('Next: attach it with --hard-disk, run FDISK, exit, then '
+              'relaunch and run FORMAT C: /S.')
+        return
 
     print("=" * 60, file=sys.stderr)
     print("  Simple BIOS Emulator", file=sys.stderr)

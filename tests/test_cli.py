@@ -5,7 +5,8 @@ import os
 import pytest
 
 from main import (BUNDLED_DOS_IMAGE, Emulator, build_argument_parser,
-                  parse_args, sanitize_snap_gtk_environment)
+                  create_hard_disk_image, parse_args,
+                  sanitize_snap_gtk_environment)
 from gtdisplay import CURSOR_BLINK_INTERVAL_MS, _GWBASIC_FUNCTION_KEYS
 
 
@@ -122,3 +123,31 @@ def test_gw_basic_function_key_macros_match_status_line():
 
 def test_cursor_blink_interval_matches_cga_16_field_rate():
     assert CURSOR_BLINK_INTERVAL_MS == 267
+
+
+def test_create_hard_disk_image_uses_exact_legacy_geometry(tmp_path):
+    image = tmp_path / 'blank-hd.img'
+
+    sectors, size = create_hard_disk_image(str(image), cylinders=615)
+
+    assert sectors == 615 * 4 * 17
+    assert size == sectors * 512
+    assert image.stat().st_size == size
+
+
+def test_create_hard_disk_image_refuses_overwrite_and_bad_geometry(tmp_path):
+    image = tmp_path / 'blank-hd.img'
+    image.write_bytes(b'existing')
+
+    with pytest.raises(FileExistsError):
+        create_hard_disk_image(str(image))
+    with pytest.raises(ValueError, match='1 to 1024'):
+        create_hard_disk_image(str(tmp_path / 'bad.img'), cylinders=1025)
+
+
+def test_create_hard_disk_cli_is_create_only(capsys):
+    with pytest.raises(SystemExit) as error:
+        parse_args(['--create-hard-disk', 'hd.img', '--gtk'])
+
+    assert error.value.code == 2
+    assert 'create-only command' in capsys.readouterr().err

@@ -6,6 +6,7 @@ import pytest
 
 from main import (BUNDLED_DOS_IMAGE, Emulator, build_argument_parser,
                   parse_args, sanitize_snap_gtk_environment)
+from gtdisplay import _GWBASIC_FUNCTION_KEYS
 
 
 def test_dos_shortcut_selects_bundled_image_and_terminal_input():
@@ -109,3 +110,11 @@ def test_non_snap_environment_is_untouched():
     assert sanitize_snap_gtk_environment(
         environment, executable='/usr/bin/python3') == ()
     assert environment == {'GTK_PATH': '/usr/lib/gtk-3.0'}
+
+
+def test_gw_basic_function_key_macros_match_status_line():
+    assert _GWBASIC_FUNCTION_KEYS[1] == 'LIST '
+    assert _GWBASIC_FUNCTION_KEYS[2] == 'RUN'
+    assert _GWBASIC_FUNCTION_KEYS[3] == 'LOAD "'
+    assert _GWBASIC_FUNCTION_KEYS[4] == 'SAVE "'
+    assert set(_GWBASIC_FUNCTION_KEYS) == set(range(1, 11))

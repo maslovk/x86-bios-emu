@@ -325,6 +325,57 @@ failing boundary (see `diff_trace.py`, `snapshot_capture.py`,
 The differential trace now runs 20,000+ instructions with zero divergence
 between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 
+## DOS 3.3 diskette catalog
+
+The shipped `DOS3_3_525/DISK01.IMG` is the bootable 360 KB system disk. Its
+37 root entries are:
+
+| Files | Role and emulator status |
+|---|---|
+| `IO.SYS`, `MSDOS.SYS`, `COMMAND.COM` | Boot files and command shell; DOS boot is tested. |
+| `4201.CPI`, `5202.CPI`, `COUNTRY.SYS`, `MS330PP0.1` | Code-page, country, and installation data. |
+| `ANSI.SYS`, `DRIVER.SYS` | Config drivers; boot smoke-tested. |
+| `APPEND.EXE`, `ASSIGN.COM`, `FASTOPEN.EXE`, `GRAFTABL.COM`, `JOIN.EXE`, `MODE.COM`, `PRINT.COM`, `SUBST.EXE` | Device/path utilities; load or functional probes are covered. |
+| `ATTRIB.EXE`, `LABEL.COM` | File attributes and volume labels; tested. |
+| `CHKDSK.COM`, `RECOVER.COM` | Disk checking/recovery; CHKDSK is fully checked and RECOVER has a no-crash usage check. |
+| `COMP.COM`, `DISKCOMP.COM`, `DISKCOPY.COM` | File/disk comparison and copying; tested. |
+| `EDLIN.COM`, `EXE2BIN.EXE` | Editing and binary conversion; tested. |
+| `FDISK.COM` | Fixed-disk partitioning; tested when `--hard-disk` is attached. Without one it says “No fixed disks present.” |
+| `FIND.EXE`, `MORE.COM`, `SORT.EXE` | Text filtering, paging, and sorting; tested, including pipelines. |
+| `FORMAT.COM`, `SYS.COM` | Formatting and system transfer; tested, including bootable fixed-disk workflows. |
+| `GRAPHICS.COM`, `SELECT.COM`, `DISPLAY.SYS`, `KEYB.COM`, `NLSFUNC.EXE` | Hardware/locale-dependent tools; graceful fallback tested. |
+
+The optional `DOS3_3_525/DISK02.IMG` contains 16 tool/data entries:
+
+| Files | Role and emulator status |
+|---|---|
+| `BACKUP.COM`, `RESTORE.COM` | Backup/restore; single-file round-trip tested. |
+| `DEBUG.COM` | Machine-code debugger/assembler; core commands tested. |
+| `EGA.CPI`, `LCD.CPI`, `KEYBOARD.SYS` | Display and keyboard data files. |
+| `GWBASIC.EXE` | BASIC interpreter; startup reaches its `Ok` prompt. |
+| `LINK.EXE` | Object linker; startup/usage behavior tested. |
+| `PRINTER.SYS`, `RAMDRIVE.SYS` | Config drivers; printer smoke and RAM-drive I/O tested. |
+| `REPLACE.EXE` | Replace matching files; directory-tree behavior tested. |
+| `SHARE.EXE` | File-sharing/locking support; load/no-crash behavior tested. |
+| `TREE.COM`, `XCOPY.EXE` | Directory-tree listing/copying; host-verified tests cover both. |
+| `FC.EXE` | File comparison; identical and differing files tested. |
+| `MS330PP0.2` | Zero-length DOS package marker/data entry. |
+
+The shell also provides internal commands that are not separate files:
+`DIR`, `TYPE`, `COPY`, `DEL`, `REN`, `MD`, `CD`, `RD`, `CLS`, `VER`, `VOL`,
+`DATE`, `TIME`, `SET`, `PATH`, `PROMPT`, `ECHO`, `PAUSE`, `REM`, `IF`, `FOR`,
+`GOTO`, `SHIFT`, `CALL`, `ERRORLEVEL`, batch files, redirection, and pipes.
+
+Attach Disk 2 as drive B: with:
+
+```bash
+python3 main.py --floppy DOS3_3_525/DISK01.IMG \
+  --floppy-b DOS3_3_525/DISK02.IMG --gtk
+```
+
+Then use `DIR B:` or copy tools from `B:` to `A:`. FDISK additionally needs
+an attached raw hard-disk image, such as `--hard-disk hd.img`.
+
 ## Testing
 
 ```bash

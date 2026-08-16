@@ -46,6 +46,14 @@ _CGA_RGB = [
     (0xFF, 0xFF, 0xFF),   # 15 bright white
 ]
 
+# GW-BASIC displays these command macros on its bottom status line.  They are
+# inserted without Enter, matching the original interface: the user can edit
+# the command (for example, add a filename after LOAD ") and then press Enter.
+_GWBASIC_FUNCTION_KEYS = {
+    1: 'LIST ', 2: 'RUN', 3: 'LOAD "', 4: 'SAVE "', 5: 'CONT',
+    6: 'LPRINT', 7: 'TRON', 8: 'TROFF', 9: 'KEY', 10: 'SCREEN',
+}
+
 
 class GtkDisplay:
     """A GTK window that renders the emulator's VGA text buffer.
@@ -159,6 +167,17 @@ class GtkDisplay:
         }
         if keyval in specials:
             self._emit(specials[keyval])
+            return True
+        function_keys = {
+            Gdk.KEY_F1: 1, Gdk.KEY_F2: 2, Gdk.KEY_F3: 3,
+            Gdk.KEY_F4: 4, Gdk.KEY_F5: 5, Gdk.KEY_F6: 6,
+            Gdk.KEY_F7: 7, Gdk.KEY_F8: 8, Gdk.KEY_F9: 9,
+            Gdk.KEY_F10: 10,
+        }
+        function_number = function_keys.get(keyval)
+        if function_number is not None:
+            for byte in _GWBASIC_FUNCTION_KEYS[function_number].encode('ascii'):
+                self._emit(byte)
             return True
         # Ctrl+C as a graceful "stop the emulator" shortcut.
         if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (

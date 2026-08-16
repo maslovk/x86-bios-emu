@@ -1,9 +1,8 @@
-"""Phase E text tools: FIND, SORT, MORE, COMP, FC.
+"""Phase E text tools: FIND, SORT, MORE, COMP, FC, and pipelines.
 
-Redirection (``<`` and ``>``) is supported by this COMMAND.COM build; pipes
-(``|``) are not ("Invalid parameter"), so every pipeline is expressed with
-explicit redirection.  FC.EXE ships on DISK02, hence the ``dos_b`` fixture and
-the ``B:FC`` invocation; FIND/SORT/MORE/COM run from A: (DISK01).
+Redirection (``<`` and ``>``) and pipes (``|``) are supported by COMMAND.COM.
+FC.EXE ships on DISK02, hence the ``dos_b`` fixture and the ``B:FC``
+invocation; FIND/SORT/MORE/COMP run from A: (DISK01).
 """
 import os
 import sys
@@ -13,6 +12,52 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 pytestmark = [pytest.mark.slow, pytest.mark.tools]
+
+
+def test_pipelines_filter_sort_redirect_and_cleanup(dos_rw):
+    """COMMAND.COM pipelines chain tools and clean up their temporary files."""
+    from fat12 import FAT12
+
+    dos_rw.create_file(
+        'PIPE.TXT', 'gamma\r\nalpha two\r\nbeta\r\nalpha\r\n')
+    fat = FAT12(dos_rw.emu.disk)
+    fat.mount()
+    before = {entry.full_name for entry in fat.list_root()}
+
+    filtered = dos_rw.run_command(
+        'TYPE PIPE.TXT | FIND "alpha"', max_steps=6_000_000)
+    assert not filtered.timed_out
+    assert filtered.errorlevel == 0
+    filtered_out = filtered.output.split('A>TYPE PIPE.TXT')[-1]
+    assert 'alpha two' in filtered_out and 'alpha' in filtered_out
+    assert 'gamma' not in filtered_out and 'beta' not in filtered_out
+
+    sorted_result = dos_rw.run_command(
+        'TYPE PIPE.TXT | SORT', max_steps=6_000_000)
+    assert not sorted_result.timed_out
+    sorted_out = sorted_result.output.split('A>TYPE PIPE.TXT')[-1]
+    assert (sorted_out.index('alpha\n') < sorted_out.index('alpha two')
+            < sorted_out.index('beta') < sorted_out.index('gamma'))
+
+    chained = dos_rw.run_command(
+        'TYPE PIPE.TXT | FIND "alpha" | SORT', max_steps=6_000_000)
+    assert not chained.timed_out
+    chained_out = chained.output.split('A>TYPE PIPE.TXT')[-1]
+    assert chained_out.index('alpha\n') < chained_out.index('alpha two')
+    assert 'gamma' not in chained_out and 'beta' not in chained_out
+
+    # DOS 3.3's parser expects the output redirection to remain attached to
+    # the final pipeline command.
+    redirected = dos_rw.run_command(
+        'TYPE PIPE.TXT|FIND "alpha">MATCH.TXT', max_steps=6_000_000)
+    assert not redirected.timed_out
+    assert redirected.errorlevel == 0
+
+    fat = FAT12(dos_rw.emu.disk)
+    fat.mount()
+    assert fat.read_file_by_name('MATCH.TXT') == b'alpha two\r\nalpha\r\n'
+    after = {entry.full_name for entry in fat.list_root()}
+    assert after - before == {'MATCH.TXT'}
 
 
 def test_sort_ascending(dos_rw):

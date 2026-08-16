@@ -14,7 +14,7 @@ Phases A–F are complete. MS-DOS 3.3 boots from the shipped floppy images,
 the full internal/external tool matrix is covered, writable workflows operate
 on temporary images, and the shipped images are protected by a session-level
 hash guard. The complete acceptance command, `python3 -m pytest -q`, passes
-all 1,421 tests (1,346 fast and 75 slow) with no xfails.
+all 1,422 tests (1,346 fast and 76 slow) with no xfails.
 
 The original blocking gaps are resolved: writable and multi-drive INT 13h,
 FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
@@ -311,7 +311,7 @@ fixing whatever falls out. Known small features:
 | `test_batch.py` | batch: ECHO OFF, REM, PAUSE, IF, FOR, GOTO, SHIFT, CALL args, ERRORLEVEL | write .BAT via `create_file`, run, assert flow (e.g. FOR %%F IN loop output) |
 | `test_attrib_label.py` | ATTRIB +R/-R, LABEL, VOL | +R makes DEL fail; label round-trips and shows in DIR header |
 | `test_chkdsk.py` | CHKDSK, CHKDSK /F on clean disk | reported total/free bytes match host-side FAT12 math exactly |
-| `test_text_tools.py` | FIND SORT MORE COMP FC | FIND "x" counts lines; SORT reorders; SORT </R; MORE paginates (send space); COMP/FC identical vs differing files, errorlevel |
+| `test_text_tools.py` | FIND SORT MORE COMP FC, pipelines | FIND "x" counts lines; SORT reorders; multi-stage pipes filter/sort and clean up temp files; MORE paginates (send space); COMP/FC identical vs differing files, errorlevel |
 | `test_tree_xcopy_replace.py` | TREE XCOPY REPLACE | build subdir tree in DOS, TREE output matches; XCOPY /S copies tree (host-verified); REPLACE updates only existing |
 | `test_edlin.py` | EDLIN insert/list/edit/delete lines | file content host-verified (needs Ctrl-C from Phase D) |
 | `test_exe2bin_link.py` | EXE2BIN, LINK (Tier 2) | DEBUG-assembled trivial .EXE? Simpler: EXE2BIN on a fixture .EXE injected host-side; LINK with no input exits with usage, errorlevel ≠ crash |
@@ -373,7 +373,7 @@ divergences; `pytest.skip` otherwise.
 | Batch files | 1 | test_batch.py | ✅ Phase E (IF EXIST/GOTO/@ECHO OFF, FOR, %1 args, REM/PAUSE) |
 | ATTRIB / LABEL | 1 | test_attrib_label.py | ✅ Phase E (+R/-R host-verified, LABEL/VOL round-trip) |
 | CHKDSK | 1 | test_chkdsk.py | ✅ Phase E (totals match host-side FAT12 math) |
-| FIND/SORT/MORE/COMP/FC | 1 | test_text_tools.py | ✅ Phase E (redirection<>, no pipes; FC via B:) |
+| FIND/SORT/MORE/COMP/FC/pipelines | 1 | test_text_tools.py | ✅ Phase E/F (redirection and multi-stage pipes; FC via B:) |
 | TREE/XCOPY/REPLACE | 1 | test_tree_xcopy_replace.py | ✅ Phase E/F (all host-verified; REPLACE fixed by memory shift/rotate displacement single-decode) |
 | EDLIN | 1 | test_edlin.py | ✅ Phase F (insert/save host-verified; fixed memory shift/rotate displacement double-decode) |
 | DEBUG | 1 | test_debug_tool.py | ✅ Phase D (-A/-T/-R/-D/-E/-Q) |

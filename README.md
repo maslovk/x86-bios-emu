@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1346 fast + 75 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
+└── tests/             # pytest suite (1346 fast + 76 slow: CPU/BIOS/BCD/TF/FAT12-write, DOS tools)
 ```
 
 ## Components
@@ -319,8 +319,8 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 
 ```bash
 python3 -m pytest -q -m "not slow"      # fast tests (1346 tests, ~13s)
-python3 -m pytest -q -m slow            # DOS boot/tool integration tests (73 tests)
-python3 -m pytest -q                    # all 1421 tests
+python3 -m pytest -q -m slow            # DOS boot/tool integration tests (76 tests)
+python3 -m pytest -q                    # all 1422 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```
@@ -389,9 +389,9 @@ instruction-emulation divergence against a trusted reference.
 - INT 20h program-terminate routes to the DOS-owned IVT entry (programs that
   exit via the old-style `INT 20h`, e.g. COMP.COM after its "Compare more files?"
   prompt, return to COMMAND.COM instead of halting the CPU).
-- Redirection (`<`, `>`, `>>`) works; **pipes** (`|`) are not implemented by
-  this COMMAND.COM build ("Invalid parameter") — pipelines are expressed with
-  explicit redirection in the tool tests.
+- Redirection (`<`, `>`, `>>`) and COMMAND.COM pipelines (`|`) work, including
+  multi-stage tool chains and output redirection on the final command; the
+  tool tests also verify that temporary pipe files are removed.
 - Full-disk `DISKCOPY` and `DISKCOMP` complete within the bounded tool-test
   budget. DISKCOPY is checked across all 720 sectors; DISKCOMP covers both
   identical and deliberately different images.

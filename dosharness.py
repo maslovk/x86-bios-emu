@@ -96,12 +96,13 @@ class DOSHarness:
     """
 
     def __init__(self, image_path=DISK01, image_b=None, hard_disk=None,
-                 host_dir=None, boot_drive=0x00, writable=False,
-                 settle_extra=2000):
+                 host_dir=None, host_dir_write=False, boot_drive=0x00,
+                 writable=False, settle_extra=2000):
         self.image_path = image_path
         self.image_b_path = image_b
         self.hard_disk_path = hard_disk
         self.host_dir = host_dir
+        self.host_dir_write = host_dir_write
         self.boot_drive = boot_drive
         self.writable = writable
         self.settle_extra = settle_extra
@@ -124,7 +125,8 @@ class DOSHarness:
         self.emu = Emulator(boot_file=None, step_mode=False,
                              floppy_image=load_path, floppy_b=load_path_b,
                              hard_disk=load_path_hd, boot_drive=boot_drive,
-                             host_dir=host_dir)
+                             host_dir=host_dir, host_dir_write=host_dir_write,
+                             persist=host_dir_write)
         self.emu.bios.initialize()
         if self.emu.pic:
             self.emu.pic.initialize()

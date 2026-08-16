@@ -579,6 +579,8 @@ The read/list criteria are covered by the slow
 `.COM` execution criterion by `test_host_folder_bridge_executes_com_program`.
 The read-only criterion is covered by
 `test_host_folder_bridge_rejects_guest_writes`.
+Explicit write-back is covered by
+`test_host_folder_bridge_writes_back_guest_file`.
 
 ---
 

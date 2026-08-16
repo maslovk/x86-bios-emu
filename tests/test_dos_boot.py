@@ -122,3 +122,16 @@ class TestDOSBoot:
                 'Error' in result.output)
         assert not (tmp_path / 'COMMAND.COM').exists()
         assert (tmp_path / 'ORIGINAL.TXT').read_bytes() == b'original'
+
+    def test_host_folder_bridge_writes_back_guest_file(self, tmp_path):
+        """Explicit write mode persists a DOS-created file to the host."""
+        h = DOSHarness(host_dir=str(tmp_path), host_dir_write=True)
+        h.boot_to_prompt()
+        result = h.run_command('COPY COMMAND.COM B:NEW.COM',
+                               max_steps=6_000_000, probe_errorlevel=False)
+        assert '1 file' in result.output or 'copied' in result.output.lower()
+
+        h.emu._persist_host_dir()
+        host_file = tmp_path / 'NEW.COM'
+        assert host_file.exists()
+        assert host_file.read_bytes()

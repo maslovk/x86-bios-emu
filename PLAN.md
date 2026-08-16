@@ -560,6 +560,9 @@ filesystem syscall path from guest code.
 - commands, plus Eject B:; Refresh B: reinserts the mapped host folder.
 - ✅ Add recursive read-only directories after root-file semantics are tested.
 - Document `python3 main.py --dos --host-dir ./dos-files --gtk`.
+- ✅ Add `--host-dir-dos-text` to normalize recognized source/document files to
+  DOS CR/LF in the guest image without modifying host files. This supports
+  building the v1.25 sources directly from Linux.
 
 ### Milestone 3 — Optional write-back (complete)
 
@@ -569,7 +572,8 @@ handling, and close-time review of every changed file. The initial explicit
 Deletion is separately opt-in with `--host-dir-delete`; persistence reports
 every created/updated/deleted path and never deletes silently. Host files
 changed independently since session start are detected and skipped as
-conflicts.
+conflicts. `DOSHarness.flush_host_dir()` exposes the same explicit flush for
+in-process emulator build workflows.
 
 ### Acceptance tests
 

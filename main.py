@@ -291,7 +291,8 @@ class Emulator:
                  enable_hardware=True, floppy_image=None, floppy_b=None,
                  hard_disk=None, boot_drive=0x00, gtk=False, gtk_font_size=18,
                  persist=False, serial_output=True, host_dir=None,
-                 host_dir_write=False, host_dir_delete=False):
+                 host_dir_write=False, host_dir_delete=False,
+                 host_dir_dos_text=False):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -355,6 +356,7 @@ class Emulator:
         self.floppy_b_image = floppy_b
         self.host_dir = host_dir
         self.host_dir_write = host_dir_write
+        self.host_dir_dos_text = host_dir_dos_text
         self.host_dir_snapshot = {}
         self.host_dir_delete = host_dir_delete
         self.fat = None
@@ -565,7 +567,8 @@ class Emulator:
     def _load_host_dir(self, path: str):
         """Attach a read-only host directory as DOS drive B:."""
         try:
-            self.disk_b = build_host_directory_disk(path)
+            self.disk_b = build_host_directory_disk(
+                path, dos_text=self.host_dir_dos_text)
         except (OSError, ValueError) as exc:
             raise ValueError(f"--host-dir: {exc}") from exc
         self.bios.disk_b = self.disk_b
@@ -580,7 +583,8 @@ class Emulator:
         if not self.host_dir:
             return False
         try:
-            self.disk_b = build_host_directory_disk(self.host_dir)
+            self.disk_b = build_host_directory_disk(
+                self.host_dir, dos_text=self.host_dir_dos_text)
         except (OSError, ValueError) as exc:
             print(f"[host bridge] refresh failed: {exc}", file=sys.stderr)
             if self.gtk_display is not None:
@@ -1091,6 +1095,8 @@ always protects the bundled image and therefore cannot be used with --persist.''
                               '(default: 306, about 10 MB)')
     storage.add_argument('--host-dir', metavar='DIR',
                          help='expose a host folder read-only as DOS drive B:')
+    storage.add_argument('--host-dir-dos-text', action='store_true',
+                         help='normalize known host text files to DOS CR/LF')
     storage.add_argument('--host-dir-write', action='store_true',
                          help='allow host-folder write-back (requires --persist)')
     storage.add_argument('--host-dir-delete', action='store_true',
@@ -1159,6 +1165,8 @@ def parse_args(argv=None):
             parser.error('--host-dir-write requires --host-dir DIR')
         if not args.persist:
             parser.error('--host-dir-write requires --persist')
+    if args.host_dir_dos_text and not args.host_dir:
+        parser.error('--host-dir-dos-text requires --host-dir DIR')
     if args.host_dir_delete:
         if not args.host_dir_write:
             parser.error('--host-dir-delete requires --host-dir-write')
@@ -1217,7 +1225,8 @@ def main(argv=None):
                        persist=args.persist, serial_output=args.serial_output,
                        host_dir=args.host_dir,
                        host_dir_write=args.host_dir_write,
-                       host_dir_delete=args.host_dir_delete)
+                       host_dir_delete=args.host_dir_delete,
+                       host_dir_dos_text=args.host_dir_dos_text)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))

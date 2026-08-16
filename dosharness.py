@@ -208,6 +208,18 @@ class DOSHarness:
             shutil.rmtree(self._tempdir, ignore_errors=True)
             self._tempdir = None
 
+    def flush_host_dir(self):
+        """Persist guest writes made through the host-backed B: drive.
+
+        ``DOSHarness`` runs the emulator directly rather than through
+        :meth:`main.Emulator.run`, so the normal shutdown persistence hook is
+        not called automatically.  Build and file-transfer tests can call
+        this explicitly after a DOS command to make guest-created files
+        visible in the host directory.
+        """
+        if self.host_dir and self.host_dir_write:
+            self.emu._persist_host_dir()
+
     def __del__(self):
         try:
             self.cleanup()

@@ -10,10 +10,25 @@ from video import Disk
 
 
 _SHORT_NAME = re.compile(r'^[A-Z0-9$%\-_~!#&()@^`{}\' ]{1,8}(\.[A-Z0-9$%\-_~!#&()@^`{}\' ]{1,3})?$')
+_DOS_TEXT_EXTENSIONS = {'.ASM', '.BAT', '.BAS', '.CMD', '.DOC', '.INC',
+                        '.LST', '.TXT'}
 
 
-def build_host_directory_disk(directory):
-    """Build a read-only 1.44MB FAT12 disk containing regular root files."""
+def _dos_text_bytes(name, data):
+    """Return DOS CR/LF text for a known text file, preserving binaries."""
+    suffix = Path(name).suffix.upper()
+    if suffix not in _DOS_TEXT_EXTENSIONS or b'\x00' in data:
+        return data
+    return data.replace(b'\r\n', b'\n').replace(b'\r', b'\n').replace(
+        b'\n', b'\r\n')
+
+
+def build_host_directory_disk(directory, dos_text=False):
+    """Build a 1.44MB FAT12 disk containing regular host files.
+
+    When ``dos_text`` is true, recognized text extensions are normalized to
+    DOS CR/LF records in the guest image; host files are never modified.
+    """
     root = Path(directory).resolve()
     if not root.is_dir():
         raise ValueError(f'host directory is not a directory: {directory}')
@@ -31,7 +46,9 @@ def build_host_directory_disk(directory):
             if child.is_dir():
                 children.append((name, True, collect(child)))
             elif child.is_file():
-                children.append((name, False, child.read_bytes()))
+                data = child.read_bytes()
+                children.append((name, False,
+                                 _dos_text_bytes(name, data) if dos_text else data))
             else:
                 raise ValueError(f'host directory contains unsupported entry: {child.name}')
         return children

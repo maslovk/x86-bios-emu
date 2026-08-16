@@ -36,6 +36,7 @@ def test_dos_shortcut_allows_gtk():
     (['--gtk-font-size', '5'], '--gtk-font-size must be between 6 and 72'),
     (['--gtk-font-size', '73'], '--gtk-font-size must be between 6 and 72'),
     (['--dos', '--persist'], '--dos protects the bundled image'),
+    (['--host-dir-dos-text'], '--host-dir-dos-text requires --host-dir DIR'),
     (['--floppy', 'does-not-exist.img'], '--floppy: file not found'),
 ])
 def test_invalid_options_report_concise_errors(argv, message, capsys):
@@ -181,6 +182,20 @@ def test_host_directory_bridge_is_read_only_fat12(tmp_path):
     assert fat.read_file_by_name('HELLO.TXT') == b'hello from host'
     assert disk.read_only
     assert not disk.write_sector(20, bytearray(512))
+
+
+def test_host_directory_dos_text_normalizes_guest_only(tmp_path):
+    source = b'line one\nline two\r\n'
+    (tmp_path / 'SOURCE.ASM').write_bytes(source)
+    (tmp_path / 'PROGRAM.COM').write_bytes(b'A\nB')
+
+    disk = build_host_directory_disk(tmp_path, dos_text=True)
+    fat = FAT12(disk)
+    fat.mount()
+
+    assert fat.read_file_by_name('SOURCE.ASM') == b'line one\r\nline two\r\n'
+    assert fat.read_file_by_name('PROGRAM.COM') == b'A\nB'
+    assert (tmp_path / 'SOURCE.ASM').read_bytes() == source
 
 
 def test_host_directory_bridge_supports_subdirectories_and_rejects_bad_names(tmp_path):

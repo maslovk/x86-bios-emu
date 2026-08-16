@@ -10,6 +10,15 @@ build/
 # External projects
 seabios/
 
+# Local historical DOS images/source trees (kept outside tracked
+# project content; see README "Historical OEM DOS images")
+DOS1_25/
+DOS2/
+DOS4/
+DOS_sources/
+diskettes/
+DOS3_3_525/Eagle_Computer_DOS20.IMD
+
 # Logs
 stderr.log
 *.log

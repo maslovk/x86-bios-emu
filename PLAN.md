@@ -527,6 +527,8 @@ the emulator without changing guest compatibility.
   paste (buttons plus Ctrl+R/Ctrl+V shortcuts).
 - ✅ GTK VGA text selection and copy: click-drag cells, use Copy or Ctrl+C;
   Ctrl+C still stops the emulator when no selection exists.
+- ✅ GTK fullscreen and resizable display via the toolbar or F11, preserving
+  the authentic VGA cell aspect ratio while scaling the grid uniformly.
 - ✅ Dirty-media warnings and true guest restart: modified A:/B:/C: media is
   marked in GTK, non-persistent shutdowns warn before discarding writes, and
   Reset reinitializes memory, CPU, BIOS, IRQ state, and boot execution.

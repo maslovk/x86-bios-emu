@@ -127,6 +127,7 @@ class GtkDisplay:
         self.font_size = font_size
         self.cursor_visible = True
         self._cursor_timer = None
+        self.fullscreen = False
         self.selection_start = None
         self.selection_end = None
 
@@ -135,6 +136,7 @@ class GtkDisplay:
         self.window.set_title(title)
         self.window.connect('delete-event', self._on_delete)
         self.window.connect('destroy', self._on_destroy)
+        self.window.connect('window-state-event', self._on_window_state)
         self.window.connect('key-press-event', self._on_key_press)
 
         self.drawing_area = Gtk.DrawingArea()
@@ -159,6 +161,8 @@ class GtkDisplay:
         paste.connect('clicked', self._on_paste_clicked)
         copy = Gtk.Button.new_with_label('Copy')
         copy.connect('clicked', self._on_copy_clicked)
+        fullscreen = Gtk.Button.new_with_label('Fullscreen')
+        fullscreen.connect('clicked', self._on_fullscreen_clicked)
         self.media_label = Gtk.Label(label=media_status)
         self.media_label.set_xalign(0.0)
         self.session_label = Gtk.Label(label='Starting')
@@ -168,6 +172,7 @@ class GtkDisplay:
         controls.pack_start(eject, False, False, 0)
         controls.pack_start(paste, False, False, 0)
         controls.pack_start(copy, False, False, 0)
+        controls.pack_start(fullscreen, False, False, 0)
         controls.pack_start(self.media_label, True, True, 0)
         controls.pack_start(self.session_label, False, False, 0)
 
@@ -188,9 +193,8 @@ class GtkDisplay:
 
         self.width_px = self.cell_w * video.width
         self.height_px = self.cell_h * video.height
-        self.drawing_area.set_size_request(self.width_px, self.height_px)
         self.window.set_default_size(self.width_px, self.height_px + 34)
-        self.window.set_resizable(False)
+        self.window.set_resizable(True)
 
         # Reusable layout for per-cell glyph drawing (text swapped each draw).
         self._layout = self.drawing_area.create_pango_layout('')
@@ -219,6 +223,11 @@ class GtkDisplay:
         response = dialog.run()
         dialog.destroy()
         return response != self._Gtk.ResponseType.OK
+
+    def _on_window_state(self, _widget, event):
+        self.fullscreen = bool(
+            event.new_window_state & self._Gdk.WindowState.FULLSCREEN)
+        return False
 
     def _on_destroy(self, _widget):
         self.stop = True
@@ -261,6 +270,9 @@ class GtkDisplay:
             for byte in _GWBASIC_FUNCTION_KEYS[function_number].encode('ascii'):
                 self._emit(byte)
             return True
+        if keyval == Gdk.KEY_F11:
+            self._toggle_fullscreen()
+            return True
         # Ctrl+C as a graceful "stop the emulator" shortcut.
         if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (
                 Gdk.KEY_c, Gdk.KEY_C):
@@ -279,6 +291,12 @@ class GtkDisplay:
         return False
 
     def _cell_at(self, x, y):
+        allocation = self.drawing_area.get_allocation()
+        scale = min(allocation.width / self.width_px,
+                    allocation.height / self.height_px)
+        scale = max(0.1, scale)
+        x = (x - (allocation.width - self.width_px * scale) / 2) / scale
+        y = (y - (allocation.height - self.height_px * scale) / 2) / scale
         col = max(0, min(self.video.width - 1, int(x / self.cell_w)))
         row = max(0, min(self.video.height - 1, int(y / self.cell_h)))
         return col, row
@@ -332,6 +350,18 @@ class GtkDisplay:
     def _on_copy_clicked(self, _button):
         self._copy_selection()
 
+    def _on_fullscreen_clicked(self, _button):
+        self._toggle_fullscreen()
+
+    def _toggle_fullscreen(self):
+        if self.fullscreen:
+            self.window.unfullscreen()
+        else:
+            self.window.set_resizable(True)
+            self.window.fullscreen()
+            self.window.present()
+        self.fullscreen = not self.fullscreen
+
     def _on_reset_clicked(self, _button):
         if self.on_reset:
             self.on_reset()
@@ -384,6 +414,18 @@ class GtkDisplay:
         video._sync_from_memory()
         cw, ch = self.cell_w, self.cell_h
         layout = self._layout
+        allocation = _area.get_allocation()
+        scale = min(allocation.width / self.width_px,
+                    allocation.height / self.height_px)
+        scale = max(0.1, scale)
+        cr.set_antialias(0)  # pixel-stable CGA cells; avoid scaled hairlines
+        cr.set_source_rgb(0.0, 0.0, 0.0)
+        cr.rectangle(0, 0, allocation.width, allocation.height)
+        cr.fill()
+        cr.save()
+        cr.translate((allocation.width - self.width_px * scale) / 2,
+                     (allocation.height - self.height_px * scale) / 2)
+        cr.scale(scale, scale)
         for y in range(video.height):
             row = video.buffer[y]
             for x in range(video.width):
@@ -400,7 +442,7 @@ class GtkDisplay:
                 # Background fill.
                 r, g, b = _CGA_RGB[bg]
                 cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)
-                cr.rectangle(x * cw, y * ch, cw, ch)
+                cr.rectangle(x * cw, y * ch, cw + 1, ch + 1)
                 cr.fill()
                 # Glyph (skip for blank cells to save Pango work).
                 if 0x20 <= byte <= 0x7E:
@@ -418,6 +460,7 @@ class GtkDisplay:
                     # the exact widget boundary can be clipped on row 24.
                     cr.rectangle(x * cw, y * ch + ch - 4, cw, 3)
                     cr.fill()
+        cr.restore()
 
     # ── public API ─────────────────────────────────────────────────
 

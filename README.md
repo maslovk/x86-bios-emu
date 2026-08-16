@@ -220,7 +220,7 @@ The emulator supports two VGA output paths:
 - **GTK** (`--gtk` / `-g`) — opens a real `Gtk.DrawingArea` window, paints
   each cell's CGA background + foreground colour, and captures key presses
   directly (injecting ASCII bytes into the keyboard controller).  This is
-  paired with Reset (full guest reboot), Refresh B: (host-folder reload), Paste/Copy (host clipboard text), and a live
+  paired with Reset (full guest reboot), Refresh B: (host-folder reload), Paste/Copy (host clipboard text), Fullscreen/F11, and a resizable
   A:/B:/C: media-status bar; Ctrl+R and Ctrl+V provide keyboard shortcuts.
   The session indicator shows booting/running/stopped state and whether guest
   disk writes will be persisted or discarded. Dirty media is marked with `*`,

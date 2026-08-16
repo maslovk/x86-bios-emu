@@ -127,6 +127,8 @@ class GtkDisplay:
         self.font_size = font_size
         self.cursor_visible = True
         self._cursor_timer = None
+        self.selection_start = None
+        self.selection_end = None
 
         # --- window + drawing area ---
         self.window = Gtk.Window()
@@ -137,6 +139,13 @@ class GtkDisplay:
 
         self.drawing_area = Gtk.DrawingArea()
         self.drawing_area.connect('draw', self._on_draw)
+        self.drawing_area.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK |
+            Gdk.EventMask.BUTTON_RELEASE_MASK |
+            Gdk.EventMask.POINTER_MOTION_MASK)
+        self.drawing_area.connect('button-press-event', self._on_button_press)
+        self.drawing_area.connect('motion-notify-event', self._on_motion)
+        self.drawing_area.connect('button-release-event', self._on_button_release)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         controls.set_border_width(4)
@@ -148,6 +157,8 @@ class GtkDisplay:
         eject.connect('clicked', self._on_eject_clicked)
         paste = Gtk.Button.new_with_label('Paste')
         paste.connect('clicked', self._on_paste_clicked)
+        copy = Gtk.Button.new_with_label('Copy')
+        copy.connect('clicked', self._on_copy_clicked)
         self.media_label = Gtk.Label(label=media_status)
         self.media_label.set_xalign(0.0)
         self.session_label = Gtk.Label(label='Starting')
@@ -156,6 +167,7 @@ class GtkDisplay:
         controls.pack_start(refresh, False, False, 0)
         controls.pack_start(eject, False, False, 0)
         controls.pack_start(paste, False, False, 0)
+        controls.pack_start(copy, False, False, 0)
         controls.pack_start(self.media_label, True, True, 0)
         controls.pack_start(self.session_label, False, False, 0)
 
@@ -252,6 +264,8 @@ class GtkDisplay:
         # Ctrl+C as a graceful "stop the emulator" shortcut.
         if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (
                 Gdk.KEY_c, Gdk.KEY_C):
+            if self._copy_selection():
+                return True
             self.stop = True
             return True
         if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (
@@ -263,6 +277,60 @@ class GtkDisplay:
             self._on_paste_clicked(None)
             return True
         return False
+
+    def _cell_at(self, x, y):
+        col = max(0, min(self.video.width - 1, int(x / self.cell_w)))
+        row = max(0, min(self.video.height - 1, int(y / self.cell_h)))
+        return col, row
+
+    def _on_button_press(self, _widget, event):
+        if event.button == 1:
+            self.selection_start = self._cell_at(event.x, event.y)
+            self.selection_end = self.selection_start
+            self.drawing_area.queue_draw()
+            return True
+        return False
+
+    def _on_motion(self, _widget, event):
+        if self.selection_start is not None and event.state & self._Gdk.ModifierType.BUTTON1_MASK:
+            self.selection_end = self._cell_at(event.x, event.y)
+            self.drawing_area.queue_draw()
+            return True
+        return False
+
+    def _on_button_release(self, _widget, event):
+        if event.button == 1 and self.selection_start is not None:
+            self.selection_end = self._cell_at(event.x, event.y)
+            self.drawing_area.queue_draw()
+            return True
+        return False
+
+    def _selection_cells(self):
+        if self.selection_start is None or self.selection_end is None:
+            return None
+        (sx, sy), (ex, ey) = self.selection_start, self.selection_end
+        if (sy, sx) > (ey, ex):
+            sx, sy, ex, ey = ex, ey, sx, sy
+        return sx, sy, ex, ey
+
+    def _copy_selection(self):
+        bounds = self._selection_cells()
+        if bounds is None:
+            return False
+        sx, sy, ex, ey = bounds
+        self.video._sync_from_memory()
+        lines = []
+        for row in range(sy, ey + 1):
+            text = ''.join(chr(ch) if 0x20 <= ch <= 0x7E else ' '
+                            for ch, _attr in self.video.buffer[row][sx:ex + 1])
+            lines.append(text.rstrip())
+        text = '\n'.join(lines)
+        clipboard = self._Gtk.Clipboard.get(self._Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(text, -1)
+        return True
+
+    def _on_copy_clicked(self, _button):
+        self._copy_selection()
 
     def _on_reset_clicked(self, _button):
         if self.on_reset:
@@ -322,6 +390,13 @@ class GtkDisplay:
                 byte, attr = row[x]
                 fg = attr & 0xF
                 bg = (attr >> 4) & 0xF
+                selected = False
+                bounds = self._selection_cells()
+                if bounds is not None:
+                    sx, sy, ex, ey = bounds
+                    selected = sx <= x <= ex and sy <= y <= ey
+                if selected:
+                    bg, fg = 1, 15
                 # Background fill.
                 r, g, b = _CGA_RGB[bg]
                 cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)

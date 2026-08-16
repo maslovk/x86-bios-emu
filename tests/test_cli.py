@@ -266,6 +266,12 @@ def test_host_directory_writeback_requires_persist(capsys, tmp_path):
     assert '--persist' in capsys.readouterr().err
 
 
+def test_host_directory_startup_reports_write_mode(capsys, tmp_path):
+    Emulator(enable_hardware=False, host_dir=str(tmp_path),
+             persist=True, host_dir_write=True)
+    assert 'write-back enabled' in capsys.readouterr().err
+
+
 def test_host_directory_delete_requires_writeback(capsys, tmp_path):
     with pytest.raises(SystemExit) as error:
         parse_args(['--host-dir', str(tmp_path), '--host-dir-delete'])

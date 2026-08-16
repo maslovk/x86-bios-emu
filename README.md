@@ -55,7 +55,10 @@ x86-bios-emu/
   - **INT 09h**: IRQ 1 keyboard handler (scan code → ASCII, EOI)
   - **INT 0Ah**: IRQ 2 cascade handler
   - **INT 10h**: Video services (AH=00h set mode, AH=13h write string)
-  - **INT 11h**: Equipment list (returns 0x0410: 1 floppy, color VGA)
+  - **INT 11h**: Equipment list (bit 0 = floppy drives installed, bits 6-7 =
+    floppy count - 1, bit 10 = one serial port; returns 0x0411 with one floppy,
+    0x0451 with two — mirrored into BDA `0040:0010`. DOS 4.0's SYSINIT depends
+    on bit 0)
   - **INT 12h**: Memory size (returns 640K)
   - **INT 13h**: Disk services (AH=00h reset, AH=02h read CHS, AH=08h params, AH=42h LBA extended)
   - **INT 15h**: Misc services (AH=87h move block, AH=88h ext memory, AH=CA CRC-32)
@@ -445,6 +448,8 @@ Diagnostic probes (one-shot, kept for future investigations):
 - `probe_ivt.py` / `probe_chain.py` / `probe_devchain.py` / `probe_devnames.py` /
   `probe_step.py` — IVT dumps, device-driver chain walker, single-step INT-handler
   tracers
+- `probe_dos4_open.py` — DOS 4 boot diagnostic: traces the first failing path
+  open into the kernel canonicalizer and dumps the CDS/DPB state
 
 Smoke tests (require an X display):
 - `check_gtk_smoke.py` — boots the sample boot sector under `--gtk`, grabs pixels

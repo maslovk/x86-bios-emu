@@ -110,6 +110,9 @@ class BIOS:
         #     boot; programs that exit via the old-style `INT 20h` (e.g.
         #     COMP.COM after answering its "Compare more files?" prompt with
         #     N) must return to their parent (COMMAND.COM), not halt the CPU.
+        #   * INT 21h (DOS API) - the DOS kernel owns this after IO.SYS has
+        #     initialized; OEM DOS 2.x kernels use it internally while
+        #     starting COMMAND.COM.
         #   * INT 29h (fast console output) - filter drivers such as ANSI.SYS
         #     hook this vector and must see characters before optionally
         #     chaining to the original BIOS putchar stub.
@@ -119,11 +122,12 @@ class BIOS:
         # BIOS IVT stubs are `INT n; IRET`, so an app that hooks and *chains*
         # to the old vector (e.g. IO.SYS's INT 13h) would recurse if we
         # transferred, and the Python handler is what boots DOS correctly.
-        if n in (0x01, 0x03, 0x20, 0x29):
+        if n in (0x01, 0x03, 0x20, 0x21, 0x29):
             ip = self.mem.read_word(n * 4)
             cs = self.mem.read_word(n * 4 + 2)
             stub = self.ivt_stubs.get(n)
-            if stub is not None and (cs, ip) != stub and (ip, cs) != (0, 0):
+            if ((stub is None or (cs, ip) != stub)
+                    and (ip, cs) != (0, 0)):
                 cpu.cs = cs
                 cpu.ip = ip
                 cpu.int_no_return = True
@@ -153,9 +157,9 @@ class BIOS:
         self.mem.write_byte(bda + 0x08, 3)       # Video mode
         self.mem.write_word(bda + 0x0A, 0x0000)  # Cursor shape
         self.mem.write_word(bda + 0x0E, 0xB800)  # Video memory segment
-        # Memory size at 0x10 and 0x13
-        self.mem.write_word(bda + 0x10, 640)     # Conventional memory (KB)
-        self.mem.write_byte(bda + 0x13, 640)     # Conventional memory (KB)
+        # Equipment flag word (matches INT 11h; real layout: 40:10).
+        self.mem.write_word(bda + 0x10, self._equipment_word())
+        self.mem.write_word(bda + 0x13, 640)  # Conventional memory (KB, word)
         # Cursor position at 0x50, 0x51
         self.mem.write_byte(bda + 0x50, 0)       # Cursor row
         self.mem.write_byte(bda + 0x51, 0)       # Cursor col
@@ -506,22 +510,29 @@ class BIOS:
 
     # ── INT 11h: Equipment List ────────────────────────────────
 
-    def _int11h(self, cpu):
-        # Equipment list word:
-        # Bits 15-14: unused
-        # Bits 13-12: BASIC ROM (00 = none)
-        # Bits 11-10: number of floppies - 1 (01 = 1 drive)
-        # Bit 9: 1 = loaded from ROM
-        # Bits 8-5: unused
-        # Bit 4: 1 = color display (CGA/EGA/VGA)
-        # Bits 3-1: unused
-        # Bit 0: 1 = math coprocessor
-        # Our config: 1 floppy, color VGA, no math, no BASIC
-        # = (01 << 10) | (1 << 4) = 0x0400 | 0x0010 = 0x0410
-        # With a second drive present, set bits 6-7 = 01 (two floppies).
-        cpu.ax = 0x0410
+    def _equipment_word(self):
+        """IBM PC equipment flag word (INT 11h / BDA 0040:0010).
+
+        bit 0      1 = floppy disk drive(s) installed
+        bit 1      1 = math coprocessor installed (none here)
+        bits 4-5   initial video mode (01 = colour)
+        bits 6-7   number of floppies - 1 (valid only when bit 0 = 1)
+        bit 10     1 serial port (COM1)
+
+        MS-DOS 4.0's SYSINIT tests bit 0 directly ("any floppy drives
+        installed?"): a 0 there makes it fake drives A:/B: and zero the
+        CDS DPB pointers, so every path open fails with "path not found"
+        ("Bad or missing Command Interpreter").
+        """
+        word = 0x0411  # floppies installed, colour video, one serial port
         if self.disk_b is not None:
-            cpu.ax |= 0x0040
+            word |= 0x0040  # bits 6-7 = 01: two floppies
+        return word
+
+    def _int11h(self, cpu):
+        cpu.ax = self._equipment_word()
+        # Mirror into the BDA like a real BIOS (40:10 is the equipment word).
+        self.mem.write_word(0x00410, cpu.ax)
         cpu.flags = (cpu.flags & ~0x40)
 
     # ── INT 12h: Memory Size ───────────────────────────────────
@@ -531,11 +542,14 @@ class BIOS:
 
     # ── INT 13h: Disk Services ─────────────────────────────────
 
-    _SPT_BY_MEDIA = {0xF9: 18, 0xF8: 15, 0xF0: 15, 0xF1: 9, 0xFD: 9, 0xF2: 18}
+    _SPT_BY_MEDIA = {0xF9: 18, 0xF8: 15, 0xF0: 15, 0xF1: 9,
+                     0xFD: 9, 0xF2: 18, 0xFE: 8, 0xFF: 8}
     # (max_cylinder, max_head) per media descriptor byte; heads = max_head+1.
     _GEO_BY_MEDIA = {
         0xF9: (79, 1), 0xF8: (79, 1), 0xF0: (79, 1),  # 1.44MB / 1.2MB
         0xFD: (39, 1), 0xF1: (39, 1), 0xF2: (79, 1),  # 360KB / 720KB / 2.88MB
+        0xFE: (39, 0),  # 160KB 5.25-inch single-sided floppy
+        0xFF: (39, 1),  # 320KB 5.25-inch double-sided floppy
     }
 
     def _disk_for(self, dl):
@@ -570,6 +584,11 @@ class BIOS:
                 and getattr(disk, 'heads', None) is not None):
             return (disk.sectors_per_track, disk.cylinders - 1,
                     disk.heads - 1)
+        # DOS 1.x images may not carry a BPB/media byte; their exact image
+        # size still identifies the two small 5.25-inch geometries.
+        size_geometry = {320: (8, 39, 0), 640: (8, 39, 1)}
+        if len(getattr(disk, 'sectors', ())) in size_geometry:
+            return size_geometry[len(disk.sectors)]
         media = getattr(disk, 'media_type', 0xF9)
         spt = self._SPT_BY_MEDIA.get(media, 18)
         max_cyl, max_head = self._GEO_BY_MEDIA.get(media, (79, 1))

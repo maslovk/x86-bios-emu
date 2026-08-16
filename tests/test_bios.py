@@ -66,7 +66,10 @@ class TestBIOSInit:
         bios_env.initialize()
         assert bios_env.mem.read_word(0x00406) == 80
         assert bios_env.mem.read_byte(0x00408) == 3
-        assert bios_env.mem.read_word(0x00410) == 640
+        # 40:10 is the equipment flag word (bit 0 = floppies installed);
+        # memory size in KB is the word at 40:13.
+        assert bios_env.mem.read_word(0x00410) & 0x0001
+        assert bios_env.mem.read_word(0x00413) == 640
 
     def test_registers_handlers(self, bios_env):
         bios_env.initialize()
@@ -250,7 +253,8 @@ class TestINT11h:
         bios_env.initialize()
         cpu = FakeCPU()
         bios_env.handlers[0x11](cpu)
-        assert cpu.ax == 0x0410  # 1 floppy, color VGA, no math
+        assert cpu.ax == 0x0411  # floppies installed (bit 0), colour VGA
+        assert bios_env.mem.read_word(0x00410) == cpu.ax
 
 
 # ── INT 12h: Memory Size ───────────────────────────────────────

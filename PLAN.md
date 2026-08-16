@@ -8,7 +8,7 @@ depend on earlier ones. After every phase: `python3 -m pytest -q` must stay
 green (including `-m slow`), and nothing in `DOS3_3_525/` may be modified
 (tests always work on temp copies of the images).
 
-## 0. Current state (verified 2026-08-16)
+## 0. Current state (verified 2026-08-17)
 
 Phases A–J are complete and Phase K is underway. MS-DOS 3.3 boots from the
 shipped floppy images or from a prepared hard-disk image,
@@ -21,6 +21,15 @@ The original blocking gaps are resolved: writable and multi-drive INT 13h,
 FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
 CPU semantics, safe FPU escape decoding, image persistence/copy-on-write, and
 Ctrl-C/Ctrl-Break injection all have implementation and regression coverage.
+
+**MS-DOS 4.00 now boots** (`DOS4/OPERATI3.IMG`, see `tests/test_dos4_boot.py`).
+The single blocker was the INT 11h equipment word reporting no floppy drives
+(bit 0 clear). DOS 4.0's SYSINIT probes that bit; with it clear it fakes
+drives A:/B: by zeroing the CDS `curdir_flags`/`curdir_devptr`, so every path
+open fails with DOS error 3 and IO.SYS ends at `Bad or missing Command
+Interpreter`. Fix: INT 11h and BDA `0040:0010` now report bit 0 (plus a proper
+memory-size word at `0040:0013`); root cause found with `probe_dos4_open.py`
+plus the MS-DOS 4.0 source release (SYSINIT1.ASM TEMPCDS).
 
 ## 1. Tool inventory and target tiers
 
@@ -631,3 +640,4 @@ Explicit write-back is covered by
 | Hard-disk boot | 2 | test_hard_disk_boot.py | ✅ Phase I (FDISK → FORMAT /S → fresh MBR boot to C>; file readback) |
 | FAT16 hard disk | 2 | test_fat16.py, test_fat16_hard_disk.py | ✅ Phase J (20MB type 04h partition; FORMAT /S, host round-trip, direct boot) |
 | KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |
+| MS-DOS 4.00 boot (DOS4/OPERATI3) | 2 | test_dos4_boot.py | ✅ boots to `A>`; DIR/ECHO/external programs (fixed by equipment-word bit 0) |

@@ -136,9 +136,12 @@ class GtkDisplay:
         paste.connect('clicked', self._on_paste_clicked)
         self.media_label = Gtk.Label(label=media_status)
         self.media_label.set_xalign(0.0)
+        self.session_label = Gtk.Label(label='Starting')
+        self.session_label.set_xalign(1.0)
         controls.pack_start(reset, False, False, 0)
         controls.pack_start(paste, False, False, 0)
         controls.pack_start(self.media_label, True, True, 0)
+        controls.pack_start(self.session_label, False, False, 0)
 
         layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         layout.pack_start(self.drawing_area, True, True, 0)
@@ -242,6 +245,9 @@ class GtkDisplay:
 
     def set_media_status(self, text):
         self.media_label.set_text(text)
+
+    def set_session_status(self, text):
+        self.session_label.set_text(text)
 
     def _emit(self, byte):
         if self.on_key:

@@ -521,7 +521,8 @@ the emulator without changing guest compatibility.
 - ✅ Guided hard-disk image creation: `--create-hard-disk IMG` creates an exact
   legacy C/4/17 image (configurable with `--hard-disk-cylinders`), refuses
   accidental overwrite, and prints the FDISK/FORMAT next steps.
-- Clearer run-state/persistence summaries and clean-exit reporting.
+- ✅ Clearer run-state/persistence summaries and clean-exit reporting in the
+  terminal and GTK session indicator.
 - ✅ GTK quality-of-life controls: soft reset, live media status, and clipboard
   paste (buttons plus Ctrl+R/Ctrl+V shortcuts).
 

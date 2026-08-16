@@ -343,6 +343,7 @@ class Emulator:
         # in-memory padding.
         self._image_sectors = None
         self.persist = persist
+        self.stop_reason = 'completed'
         if floppy_image:
             self._load_floppy(floppy_image)
         if floppy_b:
@@ -357,6 +358,8 @@ class Emulator:
             media.append(f"B: {os.path.basename(floppy_b) if floppy_b else 'none'}")
             media.append(f"C: {os.path.basename(hard_disk) if hard_disk else 'none'}")
             self.gtk_display.set_media_status('  '.join(media))
+            self.gtk_display.set_session_status(
+                'Ready • writes ' + ('enabled' if self.persist else 'discarded'))
 
         # Write BIOS ROM string
         bios_str = b"SIMPLE BIOS"
@@ -607,6 +610,10 @@ class Emulator:
 
     def run(self):
         """Initialize and run the emulator."""
+        write_mode = 'enabled' if self.persist else 'discarded'
+        print(f"[Session] starting • writes {write_mode}", file=sys.stderr)
+        if self.gtk_display is not None:
+            self.gtk_display.set_session_status(f'Booting • writes {write_mode}')
         # Load or build boot sector
         if self.boot_file:
             print(f"[Loading boot sector from {self.boot_file}]", file=sys.stderr)
@@ -672,6 +679,8 @@ class Emulator:
 
         # Run the CPU
         print("[Booting...]", file=sys.stderr)
+        if self.gtk_display is not None:
+            self.gtk_display.set_session_status(f'Running • writes {write_mode}')
         # Auto-feed a space key (for INT 16h wait) — skip in interactive mode
         if not self.interactive:
             if self.kbd_ctrl:
@@ -717,10 +726,12 @@ class Emulator:
             while True:
                 if not self.cpu.halted:
                     if not self.cpu.execute():
+                        self.stop_reason = 'CPU halted'
                         break
                     step += 1
 
                 if step > 10000000 and not self.interactive:
+                    self.stop_reason = 'instruction limit reached'
                     print(f"[Reached step limit of 10,000,000]", file=sys.stderr)
                     break
 
@@ -757,6 +768,7 @@ class Emulator:
                         if now - gtk_last_frame >= 1 / 30:
                             gtk_last_frame = now
                             if self.gtk_display.pump():
+                                self.stop_reason = 'GTK window closed'
                                 print("[GTK window closed]", file=sys.stderr)
                                 break
                 elif self.interactive:
@@ -783,6 +795,7 @@ class Emulator:
                 if cur_ip == last_ip:
                     stuck_count += 1
                     if stuck_count > 100000:
+                        self.stop_reason = 'stuck instruction loop'
                         print(f"[STUCK at CS:IP={self.cpu.cs:04X}:{self.cpu.ip:04X} "
                               f"after {step:,} instructions]", file=sys.stderr)
                         break
@@ -806,6 +819,7 @@ class Emulator:
                 if self.cpu.halted and not self.pic:
                     break
         except KeyboardInterrupt:
+            self.stop_reason = 'interrupted by user'
             print("\n[Interrupted by user]", file=sys.stderr)
         finally:
             # Restore terminal settings even if the loop broke or crashed
@@ -826,8 +840,14 @@ class Emulator:
             if not self.gtk:
                 self.video.display()
             status = self.cpu.status()
-            print(f"\n[Emulator stopped] CS:IP={status['cs']:04X}:{status['ip']:04X} "
-                  f"Instructions: {step:,}", file=sys.stderr)
+            summary = (f"[Session] stopped • {self.stop_reason} • writes {write_mode} • "
+                       f"{step:,} instructions")
+            print(f"\n{summary}", file=sys.stderr)
+            if self.gtk_display is not None:
+                self.gtk_display.set_session_status(
+                    f'Stopped • {self.stop_reason}')
+            print(f"[Emulator stopped] CS:IP={status['cs']:04X}:{status['ip']:04X}",
+                  file=sys.stderr)
             # Register state and a 128-byte memory dump are debugging output,
             # useful in --step mode but noisy after a normal GUI close.
             if self.cpu.step_mode:

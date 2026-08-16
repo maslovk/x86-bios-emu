@@ -18,6 +18,52 @@ from fat12 import FAT12, FAT12Error
 import video as video_mod
 
 
+BUNDLED_DOS_IMAGE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'DOS3_3_525', 'DISK01.IMG')
+
+_SNAP_GTK_VARIABLES = (
+    'GTK_PATH', 'GTK_EXE_PREFIX', 'GTK_MODULES', 'GTK_IM_MODULE_FILE',
+    'GIO_MODULE_DIR', 'SNAP_LIBRARY_PATH',
+)
+
+
+def sanitize_snap_gtk_environment(environ=None, executable=None):
+    """Remove incompatible Snap host GTK paths from a native Python process.
+
+    Snap-packaged editors export their own GTK/GIO module paths to integrated
+    terminals.  A system ``/usr/bin/python3`` then mixes those Core runtime
+    libraries with the host Gtk installation and can terminate in the dynamic
+    linker before PyGObject can report an exception.  A Python executable
+    genuinely running inside the same Snap is left untouched.
+
+    Returns the names removed, primarily for startup reporting and tests.
+    """
+    environ = os.environ if environ is None else environ
+    executable = sys.executable if executable is None else executable
+    snap_root = environ.get('SNAP')
+    if not snap_root:
+        return ()
+
+    snap_root = os.path.realpath(snap_root)
+    executable = os.path.realpath(executable)
+    if executable == snap_root or executable.startswith(snap_root + os.sep):
+        return ()
+
+    removed = []
+    for name in _SNAP_GTK_VARIABLES:
+        if name in environ:
+            environ.pop(name)
+            removed.append(name)
+
+    # Some Snap launchers also export LD_LIBRARY_PATH.  Preserve a normal
+    # user path, but discard it when it explicitly references the Snap root.
+    library_path = environ.get('LD_LIBRARY_PATH', '')
+    if library_path and (snap_root in library_path or '/snap/' in library_path):
+        environ.pop('LD_LIBRARY_PATH')
+        removed.append('LD_LIBRARY_PATH')
+    return tuple(removed)
+
+
 # ─── Sample Boot Sector (512 bytes) ────────────────────────────────────────
 #
 # This is a minimal x86 real-mode boot sector written in "assembly" as bytes.
@@ -222,7 +268,7 @@ class Emulator:
     def __init__(self, boot_file=None, step_mode=False, interactive=False,
                  enable_hardware=True, floppy_image=None, floppy_b=None,
                  hard_disk=None, boot_drive=0x00, gtk=False, gtk_font_size=18,
-                 persist=False):
+                 persist=False, serial_output=True):
         self.memory = type('Memory', (), {})()
         # Use the Memory class from cpu module
         from cpu import CPU as _CPU
@@ -232,7 +278,7 @@ class Emulator:
         self.video.attach_memory(self.mem)
         self.kbd = Keyboard()
         self.disk = Disk()
-        self.serial = Serial()
+        self.serial = Serial(echo=serial_output)
 
         # Hardware devices
         self.pit = PIT() if enable_hardware else None
@@ -263,6 +309,10 @@ class Emulator:
         self.gtk = gtk
         self.gtk_display = None
         if gtk:
+            removed = sanitize_snap_gtk_environment()
+            if removed:
+                print("[GTK] Ignoring incompatible Snap host library settings",
+                      file=sys.stderr)
             from gtdisplay import GtkDisplay
             def _on_key(byte):
                 if self.kbd_ctrl:
@@ -570,6 +620,7 @@ class Emulator:
         self.cpu.es = 0x0000
         self.cpu.dl = self.boot_drive
         self.video.print_str(" OK", video_mod.Video.ATTR_GREEN, 36, 13)
+        self.bios.set_text_cursor(14, 0)
 
         # Replace CPU interrupt handling entirely
         # (skip IVT lookup, call BIOS handlers directly)
@@ -613,6 +664,8 @@ class Emulator:
         last_ip = None
         stuck_count = 0
         pit_ticks_since_last = 0
+        gtk_last_frame = 0.0
+        gtk_poll_counter = 0
         # ~500 instructions per PIT tick (rough approximation for timing)
         pit_insn_interval = 500
 
@@ -623,7 +676,7 @@ class Emulator:
                         break
                     step += 1
 
-                if step > 10000000:
+                if step > 10000000 and not self.interactive:
                     print(f"[Reached step limit of 10,000,000]", file=sys.stderr)
                     break
 
@@ -648,9 +701,20 @@ class Emulator:
                 #     up in __init__, so we only need to pump here.
                 #   - terminal mode: cbreak stdin read.
                 if self.gtk:
-                    if self.gtk_display.pump():
-                        print("[GTK window closed]", file=sys.stderr)
-                        break
+                    # Drawing the complete 80x25 Pango grid after every guest
+                    # instruction starves DOS during boot.  Check the clock in
+                    # small batches and cap GTK work at about 30 frames/sec;
+                    # this remains responsive while leaving nearly all CPU
+                    # time to emulation.
+                    gtk_poll_counter += 1
+                    if gtk_poll_counter >= 100:
+                        gtk_poll_counter = 0
+                        now = time.monotonic()
+                        if now - gtk_last_frame >= 1 / 30:
+                            gtk_last_frame = now
+                            if self.gtk_display.pump():
+                                print("[GTK window closed]", file=sys.stderr)
+                                break
                 elif self.interactive:
                     try:
                         if select.select([sys.stdin], [], [], 0)[0]:
@@ -718,22 +782,25 @@ class Emulator:
             if not self.gtk:
                 self.video.display()
             status = self.cpu.status()
-            print(f"\n[CPU HALTED] CS:IP={status['cs']:04X}:{status['ip']:04X} "
+            print(f"\n[Emulator stopped] CS:IP={status['cs']:04X}:{status['ip']:04X} "
                   f"Instructions: {step:,}", file=sys.stderr)
-            print(f"  AX={status['ax']:04X} BX={status['bx']:04X} "
-                  f"CX={status['cx']:04X} DX={status['dx']:04X}", file=sys.stderr)
-            print(f"  SP={status['sp']:04X} BP={status['bp']:04X} "
-                  f"SI={status['si']:04X} DI={status['di']:04X}", file=sys.stderr)
-            print(f"  DS={status['ds']:04X} ES={status['es']:04X} "
-                  f"SS={status['ss']:04X} FL={status['flags']:04X}",
-                  file=sys.stderr)
+            # Register state and a 128-byte memory dump are debugging output,
+            # useful in --step mode but noisy after a normal GUI close.
+            if self.cpu.step_mode:
+                print(f"  AX={status['ax']:04X} BX={status['bx']:04X} "
+                      f"CX={status['cx']:04X} DX={status['dx']:04X}", file=sys.stderr)
+                print(f"  SP={status['sp']:04X} BP={status['bp']:04X} "
+                      f"SI={status['si']:04X} DI={status['di']:04X}", file=sys.stderr)
+                print(f"  DS={status['ds']:04X} ES={status['es']:04X} "
+                      f"SS={status['ss']:04X} FL={status['flags']:04X}",
+                      file=sys.stderr)
 
-            linear_ip = (status['cs'] << 4) + status['ip']
-            print(f"\nMemory dump around IP {linear_ip:08X}:", file=sys.stderr)
-            for i in range(-64, 64):
-                addr = (linear_ip + i) & 0xFFFFF
-                val = self.mem.read_byte(addr)
-                print(f"{addr:08X}: {val:02X}", file=sys.stderr)
+                linear_ip = (status['cs'] << 4) + status['ip']
+                print(f"\nMemory dump around IP {linear_ip:08X}:", file=sys.stderr)
+                for i in range(-64, 64):
+                    addr = (linear_ip + i) & 0xFFFFF
+                    val = self.mem.read_byte(addr)
+                    print(f"{addr:08X}: {val:02X}", file=sys.stderr)
 
     def _persist_floppy(self):
         """Write dirty disk sectors back to the loaded image (only if --persist).
@@ -774,37 +841,88 @@ class Emulator:
             print(f"[persist] hard-disk write failed: {e}", file=sys.stderr)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Simple BIOS Emulator")
-    parser.add_argument('--boot', '-b', metavar='FILE',
-                        help='Load boot sector from binary file (512 bytes)')
-    parser.add_argument('--step', '-s', action='store_true',
-                        help='Step mode: print mnemonic + registers each instruction')
-    parser.add_argument('--interactive', '-i', action='store_true',
-                        help='Interactive mode: read keys from stdin')
-    parser.add_argument('--serial', action='store_true', default=True,
-                        help='Enable COM1 serial output (default: on)')
-    parser.add_argument('--no-serial', action='store_true',
-                        help='Disable COM1 serial output')
-    parser.add_argument('--floppy', '-f', metavar='IMG',
-                        help='Load floppy image (FAT12, 1.44MB)')
-    parser.add_argument('--floppy-b', metavar='IMG',
-                        help='Load a second floppy image as drive B:')
-    parser.add_argument('--hard-disk', metavar='IMG',
-                        help='Load a raw C/4/17 hard-disk image as BIOS drive 80h')
-    parser.add_argument('--boot-hard-disk', action='store_true',
-                        help='Boot from the attached hard-disk MBR instead of A:')
-    parser.add_argument('--gtk', '-g', action='store_true',
-                        help='Use a GTK window for display + keyboard input '
-                             '(replaces the terminal box; sidesteps cbreak/')
-    parser.add_argument('--gtk-font-size', type=int, default=18,
-                        metavar='PT',
-                        help='Pango font point size for --gtk (default: 18)')
-    parser.add_argument('--persist', action='store_true',
-                        help='Write guest-modified disk sectors back to attached '
-                             'floppy/hard-disk images on clean exit (default: off; '
-                             'never use on the shipped repo images)')
-    args = parser.parse_args()
+def build_argument_parser():
+    """Build the user-facing CLI parser independently for fast testing."""
+    parser = argparse.ArgumentParser(
+        prog='python3 main.py',
+        description='Run an x86 real-mode PC with BIOS, VGA, and DOS disks.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''examples:
+  python3 main.py --dos                 boot bundled DOS in this terminal
+  python3 main.py --dos --gtk           boot bundled DOS in a GTK window
+  python3 main.py -f disk.img -i        boot a floppy with terminal input
+  python3 main.py --hard-disk hd.img --boot-hard-disk --gtk
+
+Disk writes are discarded unless --persist is supplied.  The --dos shortcut
+always protects the bundled image and therefore cannot be used with --persist.''')
+
+    boot = parser.add_argument_group('boot media')
+    boot.add_argument('--boot', '-b', metavar='FILE',
+                      help='load a custom 512-byte boot sector')
+    floppy = boot.add_mutually_exclusive_group()
+    floppy.add_argument('--dos', action='store_true',
+                        help='boot the bundled MS-DOS 3.3 disk (changes discarded)')
+    floppy.add_argument('--floppy', '-f', metavar='IMG',
+                        help='boot a FAT12 floppy image')
+    boot.add_argument('--floppy-b', metavar='IMG',
+                      help='attach a second floppy image as drive B:')
+    boot.add_argument('--hard-disk', metavar='IMG',
+                      help='attach an exact C/4/17 raw image as BIOS drive 80h')
+    boot.add_argument('--boot-hard-disk', action='store_true',
+                      help='boot the attached hard-disk MBR instead of drive A:')
+
+    display = parser.add_argument_group('display and input')
+    display.add_argument('--interactive', '-i', action='store_true',
+                         help='read keyboard input from the terminal')
+    display.add_argument('--gtk', '-g', action='store_true',
+                         help='use a GTK window for display and keyboard input')
+    display.add_argument('--gtk-font-size', type=int, default=18, metavar='PT',
+                         help='GTK font size from 6 to 72 points (default: 18)')
+
+    runtime = parser.add_argument_group('runtime')
+    runtime.add_argument('--step', '-s', action='store_true',
+                         help='print each instruction and register state')
+    serial = runtime.add_mutually_exclusive_group()
+    serial.add_argument('--serial', dest='serial_output', action='store_true',
+                        default=True,
+                        help='enable COM1 serial output (default)')
+    serial.add_argument('--no-serial', dest='serial_output', action='store_false',
+                        help='disable COM1 serial output')
+    runtime.add_argument('--persist', action='store_true',
+                         help='write modified sectors back on clean exit')
+    return parser
+
+
+def parse_args(argv=None):
+    """Parse and normalize CLI arguments, reporting actionable errors."""
+    parser = build_argument_parser()
+    args = parser.parse_args(argv)
+
+    if args.boot_hard_disk and not args.hard_disk:
+        parser.error('--boot-hard-disk requires --hard-disk IMG')
+    if not 6 <= args.gtk_font_size <= 72:
+        parser.error('--gtk-font-size must be between 6 and 72')
+    if args.dos and args.persist:
+        parser.error('--dos protects the bundled image; use --floppy with a copy '
+                     'if you want --persist')
+
+    if args.dos:
+        args.floppy = BUNDLED_DOS_IMAGE
+        # A one-flag DOS launch should accept input immediately.  GTK already
+        # implies interactive behavior inside Emulator, but normalizing this
+        # here also makes the selected behavior explicit in startup output.
+        args.interactive = True
+
+    for option, path in (('--boot', args.boot), ('--floppy', args.floppy),
+                         ('--floppy-b', args.floppy_b),
+                         ('--hard-disk', args.hard_disk)):
+        if path and not os.path.isfile(path):
+            parser.error(f'{option}: file not found: {path}')
+    return parser, args
+
+
+def main(argv=None):
+    parser, args = parse_args(argv)
 
     print("=" * 60, file=sys.stderr)
     print("  Simple BIOS Emulator", file=sys.stderr)
@@ -820,13 +938,16 @@ def main():
     print("=" * 60, file=sys.stderr)
     print()
 
-    emu = Emulator(boot_file=args.boot, step_mode=args.step,
-                   interactive=args.interactive, floppy_image=args.floppy,
-                   floppy_b=args.floppy_b, hard_disk=args.hard_disk,
-                   boot_drive=0x80 if args.boot_hard_disk else 0x00,
-                   gtk=args.gtk, gtk_font_size=args.gtk_font_size,
-                   persist=args.persist)
-    emu.run()
+    try:
+        emu = Emulator(boot_file=args.boot, step_mode=args.step,
+                       interactive=args.interactive, floppy_image=args.floppy,
+                       floppy_b=args.floppy_b, hard_disk=args.hard_disk,
+                       boot_drive=0x80 if args.boot_hard_disk else 0x00,
+                       gtk=args.gtk, gtk_font_size=args.gtk_font_size,
+                       persist=args.persist, serial_output=args.serial_output)
+        emu.run()
+    except (OSError, RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

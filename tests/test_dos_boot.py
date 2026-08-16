@@ -24,6 +24,20 @@ class TestDOSBoot:
     def test_boot_reaches_ms_dos_banner(self):
         """DOS boots and prints the 'Microsoft MS-DOS Version 3.30' banner."""
         h = DOSHarness()
+        h.wait_for('Enter new date')
+        h.emu.video._sync_from_memory()
+        prompt = 'Enter new date'
+        prompt_cells = None
+        for row in h.emu.video.buffer:
+            text = ''.join(chr(ch) if 0x20 <= ch <= 0x7E else ' '
+                           for ch, _attr in row)
+            start = text.find(prompt)
+            if start >= 0:
+                assert start == 0
+                prompt_cells = row[start:start + len(prompt)]
+                break
+        assert prompt_cells is not None
+        assert all(attr & 0x0F for _ch, attr in prompt_cells)
         h.boot_to_prompt()  # boot fully to A>
         screen = h.vga_str()
         assert 'MS-DOS' in screen

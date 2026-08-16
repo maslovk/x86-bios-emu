@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1356 fast + 80 slow: CPU/BIOS/disk/FAT, DOS tools)
+└── tests/             # pytest suite (1371 fast + 80 slow: CPU/BIOS/disk/FAT, DOS tools)
 ```
 
 ## Components
@@ -171,6 +171,8 @@ python3 main.py --boot file.bin          # Load external boot sector (512 bytes)
 python3 main.py --step                   # Step mode: trace each instruction
 python3 main.py --interactive            # Interactive: read keys from stdin
 python3 main.py --gtk                    # GTK window display + real keyboard capture
+python3 main.py --dos                    # Bundled DOS 3.3 + terminal keyboard
+python3 main.py --dos --gtk              # Bundled DOS 3.3 in one GTK command
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 truncate -s 10653696 harddisk.img        # Blank 306/4/17 CHS disk (~10 MB)
 # Or: truncate -s 21411840 harddisk.img  # Blank 615/4/17 FAT16 disk (~20 MB)
@@ -192,6 +194,7 @@ python3 main.py --boot dos3.3.img --step  # Step through DOS 3.3 boot
 | `--gtk` / `-g` | Open a GTK window rendering the 80x25 VGA grid with proper keyboard capture (recommended for interactive DOS use) |
 | `--gtk-font-size PT` | Pango font point size for `--gtk` (default 18) |
 | `--no-serial` | Disable COM1 serial port output |
+| `--dos` | Safely boot the bundled MS-DOS 3.3 disk and enable input (`--persist` is intentionally rejected) |
 | `--floppy IMG` / `-f` | Load floppy image (FAT12, auto-detects 360KB–1.44MB) and mount filesystem |
 | `--floppy-b IMG` | Load a second floppy image as drive B: (enables `DIR B:`, `COPY B:..`, DISKCOPY/DISKCOMP) |
 | `--hard-disk IMG` | Attach an exact 1..1024-cylinder C/4/17 raw hard-disk image as BIOS drive 80h (tested at 306 cylinders/FAT12 and 615 cylinders/FAT16) |
@@ -325,9 +328,9 @@ between this CPU and Unicorn across the entire OPEN-CON and FCB-FINDF paths.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1356 tests, ~13s)
+python3 -m pytest -q -m "not slow"      # fast tests (1371 tests, ~13s)
 python3 -m pytest -q -m slow            # DOS boot/tool integration tests (80 tests)
-python3 -m pytest -q                    # all 1436 tests
+python3 -m pytest -q                    # all 1451 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```

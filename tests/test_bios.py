@@ -111,6 +111,12 @@ class TestBIOSInit:
         ch, _ = bios_env.video.buffer[0][0]
         assert ch != ord('X')
 
+    def test_post_places_guest_cursor_on_next_line(self, bios_env):
+        bios_env.initialize()
+
+        assert (bios_env.video.cur_y, bios_env.video.cur_x) == (14, 0)
+        assert bios_env.mem.read_word(0x00450) == 0x0E00
+
 
 # ── INT 10h: Video ──────────────────────────────────────────────
 
@@ -140,10 +146,21 @@ class TestINT10h:
     def test_teletype(self, bios_env):
         bios_env.initialize()
         bios_env.video.cur_x = 10; bios_env.video.cur_y = 5
+        previous_attr = bios_env.video.buffer[5][10][1]
         self._call(bios_env, ax=0x0E48, bx=0x0007)
-        ch, _ = bios_env.video.buffer[5][10]
+        ch, attr = bios_env.video.buffer[5][10]
         assert ch == ord('H')
+        assert attr == previous_attr
         assert bios_env.video.cur_x == 11
+
+    def test_teletype_bh_is_page_and_retains_cell_attribute(self, bios_env):
+        bios_env.initialize()
+        bios_env.video.write(10, 5, ord(' '), 0x1E)
+        bios_env.video.cur_x = 10; bios_env.video.cur_y = 5
+
+        self._call(bios_env, ax=0x0E58, bx=0x0200)
+
+        assert bios_env.video.buffer[5][10] == (ord('X'), 0x1E)
 
     def test_set_cursor(self, bios_env):
         bios_env.initialize()
@@ -440,6 +457,8 @@ class TestINT19h:
         bios_env.handlers[0x19](cpu)
         assert cpu.cs == 0 and cpu.ip == 0x7C00
         assert cpu.int_no_return is True
+        assert (bios_env.video.cur_y, bios_env.video.cur_x) == (14, 0)
+        assert bios_env.mem.read_word(0x00450) == 0x0E00
 
     def test_boot_no_signature(self, bios_env):
         bios_env.initialize()

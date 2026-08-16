@@ -166,7 +166,8 @@ class Video:
 class Serial:
     """Minimal 8250-compatible COM1 serial port (0x3F8-0x3FF)."""
 
-    def __init__(self):
+    def __init__(self, echo=True):
+        self.echo = echo
         self.rx_buffer = []
         self.output = []
         self.ier = 0
@@ -220,13 +221,14 @@ class Serial:
             self._update_baud()
         elif offset == 0x00:   # THR (transmit holding)
             self.output.append(val)
-            if val >= 0x20:
-                sys.stderr.write(f"[COM1] {chr(val)}")
-            elif val == 0x0A:
-                sys.stderr.write('\n')
-            elif val == 0x0D:
-                sys.stderr.write('\r')
-            sys.stderr.flush()
+            if self.echo:
+                if val >= 0x20:
+                    sys.stderr.write(f"[COM1] {chr(val)}")
+                elif val == 0x0A:
+                    sys.stderr.write('\n')
+                elif val == 0x0D:
+                    sys.stderr.write('\r')
+                sys.stderr.flush()
             self.lsr |= 0x20  # THRE set
         elif offset == 0x01:   # IER (interrupt enable)
             self.ier = val

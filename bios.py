@@ -215,6 +215,14 @@ class BIOS:
         self.video.print_str("Disk: 1.44MB Floppy", Video.ATTR_CYAN, 5, 9)
         self.video.print_str("POST: All tests passed.", Video.ATTR_GREEN, 5, 11)
         self.video.print_str("Booting from floppy...", Video.ATTR_YELLOW, 5, 13)
+        self.set_text_cursor(14, 0)
+
+    def set_text_cursor(self, row, col):
+        """Update the page-0 text cursor in both Video and the BIOS data area."""
+        self.video.cur_y = max(0, min(row, self.video.height - 1))
+        self.video.cur_x = max(0, min(col, self.video.width - 1))
+        self.mem.write_word(
+            0x00450, (self.video.cur_y << 8) | self.video.cur_x)
 
     # ── Exception Handlers ─────────────────────────────────────
 
@@ -464,7 +472,16 @@ class BIOS:
             col = dx & 0xFF
             self.video.write(col, row, al, bh)
         elif ah == 0x0E:  # Teletype output
-            self.video.putc(al, bh)
+            # BH selects the display page; it is not a text attribute.  Real
+            # adapters retain the attribute already present at the cursor
+            # while replacing the character.  Treating page 0 as attribute 0
+            # made normal DOS output black-on-black in the GTK renderer.
+            attr = self.video.ATTR_NORMAL
+            if (0 <= self.video.cur_y < self.video.height
+                    and 0 <= self.video.cur_x < self.video.width):
+                _ch, attr = self.video.buffer[
+                    self.video.cur_y][self.video.cur_x]
+            self.video.putc(al, attr)
         elif ah == 0x0F:  # Get text mode
             cpu.ax = (self.video.width << 8) | self.video.mode
             cpu.bx = 0
@@ -928,6 +945,7 @@ class BIOS:
         cpu.dl = self.boot_drive
         cpu.int_no_return = True  # Don't pop return address — boot takes over
         self.video.print_str(" OK", Video.ATTR_GREEN, 36, 13)
+        self.set_text_cursor(14, 0)
 
     # ── INT 20h: Terminate ─────────────────────────────────────
 

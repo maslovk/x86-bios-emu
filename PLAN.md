@@ -10,12 +10,12 @@ green (including `-m slow`), and nothing in `DOS3_3_525/` may be modified
 
 ## 0. Current state (verified 2026-08-16)
 
-Phases A–J are complete. MS-DOS 3.3 boots from the shipped floppy images or
-from a prepared hard-disk image,
+Phases A–J are complete and Phase K is underway. MS-DOS 3.3 boots from the
+shipped floppy images or from a prepared hard-disk image,
 the full internal/external tool matrix is covered, writable workflows operate
 on temporary images, and the shipped images are protected by a session-level
-hash guard. The complete acceptance command, `python3 -m pytest -q`, passes
-all 1,436 tests (1,356 fast and 80 slow) with no xfails.
+hash guard. The suite now contains 1,451 tests (1,371 fast and 80 slow); the
+Phase K CLI slice passes the complete fast suite with no xfails.
 
 The original blocking gaps are resolved: writable and multi-drive INT 13h,
 FAT12 mutation support, reusable DOS harness fixtures, decimal-adjust and trap
@@ -469,6 +469,58 @@ working MS-DOS `C>` prompt on an isolated image.
 The complete FDISK → FAT16 FORMAT /S → host verification → MBR boot workflow
 passes on an isolated 20 MB image, while the 10 MB FAT12 workflows remain
 green.
+
+---
+
+## Phase K — User experience
+
+This phase improves the path from cloning the repository to comfortably using
+the emulator without changing guest compatibility.
+
+### Slice 1 — Guided launch and actionable CLI errors (complete)
+
+1. `python3 main.py --dos` selects the bundled MS-DOS 3.3 disk by an absolute
+   repository-relative path and enables terminal input. `--dos --gtk` is the
+   corresponding one-command graphical launch. Bundled media remains
+   protected: `--dos --persist` is rejected with instructions to copy the
+   image and use `--floppy` instead.
+2. CLI help is grouped by boot media, display/input, and runtime behavior, and
+   includes working launch examples. Missing files, invalid GTK font sizes,
+   mutually exclusive media, and hard-disk boot without an attached image fail
+   before startup with concise argparse errors instead of tracebacks.
+3. The documented `--no-serial` option now suppresses host COM1 echo while
+   preserving the emulated serial device and its captured output.
+4. A native Python launched from a Snap-packaged editor now discards only the
+   inherited Snap GTK/GIO library settings before loading PyGObject, avoiding
+   mixed-runtime linker failures. Python interpreters genuinely running inside
+   the Snap and normal non-Snap environments are left unchanged.
+5. Closing a normal GTK session prints one concise stop summary. Register and
+   memory diagnostics are reserved for explicit `--step` sessions.
+6. GTK rendering is capped at roughly 30 frames per second instead of drawing
+   the full 80x25 Pango grid after nearly every guest instruction. BIOS
+   teletype output now correctly treats BH as a display-page number and retains
+   the existing text attribute, so DOS prompts are visible instead of being
+   rendered black-on-black.
+7. The BIOS positions the cursor at the start of the next line after its boot
+   status, keeping DOS's date message separate. Interactive terminal and GTK
+   sessions no longer stop at the non-interactive 10-million-instruction
+   safety limit.
+
+### Tests
+
+- `tests/test_cli.py` (fast): bundled-DOS normalization and protection, GTK
+  launch selection, grouped help/examples, invalid-option diagnostics, missing
+  image reporting, and functional serial-output suppression.
+  It also covers native/Snap GTK environment isolation without importing GTK.
+- `tests/test_bios.py` (fast) verifies INT 10h AH=0Eh page/attribute semantics;
+  `tests/test_dos_boot.py` confirms the real DOS date prompt has visible
+  foreground attributes before continuing the normal boot workflow.
+
+### Next UX slices
+
+- A guided command for creating correctly sized blank hard-disk images.
+- Clearer run-state/persistence summaries and clean-exit reporting.
+- GTK quality-of-life controls such as reset, media status, and clipboard paste.
 
 ---
 

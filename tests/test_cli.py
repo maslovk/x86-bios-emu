@@ -6,7 +6,7 @@ import pytest
 
 from main import (BUNDLED_DOS_IMAGE, Emulator, build_argument_parser,
                   create_hard_disk_image, parse_args,
-                  sanitize_snap_gtk_environment)
+                  sanitize_snap_gtk_environment, schedule_pit_ticks)
 from gtdisplay import CURSOR_BLINK_INTERVAL_MS, _GWBASIC_FUNCTION_KEYS
 from hostbridge import (audit_host_directory_deletions,
                         build_host_directory_disk, snapshot_host_directory,
@@ -287,6 +287,14 @@ def test_host_directory_delete_warns_before_persistent_close(tmp_path):
     warning = emulator._close_warning()
     assert warning is not None
     assert 'deleted from the host folder' in warning
+
+
+def test_pit_scheduler_uses_wall_clock_and_bounds_catchup():
+    interval = 1.0 / 18.2065
+    assert schedule_pit_ticks(1.0, 1.0 + interval, interval) == (0, 1.0 + interval)
+    ticks, deadline = schedule_pit_ticks(10.0, 1.0, interval)
+    assert ticks == 4
+    assert deadline == 10.0 + interval
 
 
 def test_host_dir_cli_rejects_writes_and_second_floppy(capsys, tmp_path):

@@ -30,6 +30,14 @@ _SNAP_GTK_VARIABLES = (
 )
 
 
+def schedule_pit_ticks(now, deadline, interval):
+    """Return bounded elapsed PIT ticks and the next wall-clock deadline."""
+    if now < deadline:
+        return 0, deadline
+    ticks = min(4, 1 + int((now - deadline) / interval))
+    return ticks, now + interval
+
+
 def sanitize_snap_gtk_environment(environ=None, executable=None):
     """Remove incompatible Snap host GTK paths from a native Python process.
 
@@ -869,15 +877,11 @@ class Emulator:
                 # PIT tick: advance timer against wall-clock time
                 if self.pit:
                     now = time.monotonic()
-                    if now >= pit_next_tick:
-                        # Deliver elapsed ticks against wall time.  Cap the
-                        # catch-up burst so a paused/debugged session cannot
-                        # generate an unbounded IRQ backlog.
-                        elapsed_ticks = min(
-                            4, 1 + int((now - pit_next_tick) / pit_interval))
+                    elapsed_ticks, pit_next_tick = schedule_pit_ticks(
+                        now, pit_next_tick, pit_interval)
+                    if elapsed_ticks:
                         for _ in range(elapsed_ticks):
                             self.io.tick(pit_interval)
-                        pit_next_tick = now + pit_interval
 
                 # Check for pending IRQs and dispatch
                 if self.pic:

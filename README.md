@@ -21,7 +21,7 @@ x86-bios-emu/
 ├── probe_*.py         # IVT/device-chain/snapshot probes (one-shot diagnostics)
 ├── check_*.py         # GTK render/keyboard smoke tests + pty interactive test
 ├── DOS3_3_525/         # MS-DOS 3.3 floppy images (DISK01.IMG, DISK02.IMG)
-└── tests/             # pytest suite (1388 fast + 84 slow: CPU/BIOS/disk/FAT, DOS tools)
+└── tests/             # pytest suite (1389 fast + 84 slow: CPU/BIOS/disk/FAT, DOS tools)
 ```
 
 ## Components
@@ -399,9 +399,9 @@ Run `FDISK`, exit, relaunch the emulator, and then run `FORMAT C: /S`.
 ## Testing
 
 ```bash
-python3 -m pytest -q -m "not slow"      # fast tests (1388 tests, ~13s)
+python3 -m pytest -q -m "not slow"      # fast tests (1389 tests, ~13s)
 python3 -m pytest -q -m slow            # DOS boot/tool integration tests (84 tests)
-python3 -m pytest -q                    # all 1472 tests
+python3 -m pytest -q                    # all 1473 tests
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```

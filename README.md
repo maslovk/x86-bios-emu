@@ -495,7 +495,8 @@ instruction-emulation divergence against a trusted reference.
   memory. RAMDRIVE registers `C:`; creating, listing, and reading a file there
   is covered end-to-end.
 - Step-mode mnemonics are approximate (operand decoding is simplified)
-- PIT timing is instruction-count-based (~500 insns per tick), not real-time
+- PIT channel 0 timing is wall-clock based at the classic ~18.2 Hz rate;
+  heavily stalled/debugged sessions cap catch-up to four ticks per loop.
 - CMOS RTC syncs with host time (no independent battery-backed clock)
 - DOS DATE/TIME prompts accept typed input via the harness / `--interactive` / `--gtk`
 - Undefined x86 flag bits (AF after INC, MUL/IMUL SF/ZF/PF) are masked out by

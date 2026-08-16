@@ -848,11 +848,10 @@ class Emulator:
         last_display = 0
         last_ip = None
         stuck_count = 0
-        pit_ticks_since_last = 0
+        pit_interval = 1.0 / 18.2065  # IBM PC PIT channel 0 / 65536
+        pit_next_tick = time.monotonic() + pit_interval
         gtk_last_frame = 0.0
         gtk_poll_counter = 0
-        # ~500 instructions per PIT tick (rough approximation for timing)
-        pit_insn_interval = 500
 
         try:
             while True:
@@ -867,15 +866,18 @@ class Emulator:
                     print(f"[Reached step limit of 10,000,000]", file=sys.stderr)
                     break
 
-                # PIT tick: advance timer every N instructions
+                # PIT tick: advance timer against wall-clock time
                 if self.pit:
-                    if self.cpu.halted:
-                        self.io.tick(1.0 / 18.2)  # ~18.2 Hz
-                    else:
-                        pit_ticks_since_last += 1
-                        if pit_ticks_since_last >= pit_insn_interval:
-                            pit_ticks_since_last = 0
-                            self.io.tick(1.0 / 18.2)  # ~18.2 Hz
+                    now = time.monotonic()
+                    if now >= pit_next_tick:
+                        # Deliver elapsed ticks against wall time.  Cap the
+                        # catch-up burst so a paused/debugged session cannot
+                        # generate an unbounded IRQ backlog.
+                        elapsed_ticks = min(
+                            4, 1 + int((now - pit_next_tick) / pit_interval))
+                        for _ in range(elapsed_ticks):
+                            self.io.tick(pit_interval)
+                        pit_next_tick = now + pit_interval
 
                 # Check for pending IRQs and dispatch
                 if self.pic:

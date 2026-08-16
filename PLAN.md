@@ -529,6 +529,8 @@ the emulator without changing guest compatibility.
   Ctrl+C still stops the emulator when no selection exists.
 - ✅ GTK fullscreen and resizable display via the toolbar or F11, preserving
   the authentic VGA cell aspect ratio while scaling the grid uniformly.
+- ✅ Real-time PIT scheduling: channel 0 advances from wall-clock deadlines at
+  ~18.2 Hz with bounded catch-up after stalls.
 - ✅ Dirty-media warnings and true guest restart: modified A:/B:/C: media is
   marked in GTK, non-persistent shutdowns warn before discarding writes, and
   Reset reinitializes memory, CPU, BIOS, IRQ state, and boot execution.

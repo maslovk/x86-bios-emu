@@ -31,6 +31,15 @@ Interpreter`. Fix: INT 11h and BDA `0040:0010` now report bit 0 (plus a proper
 memory-size word at `0040:0013`); root cause found with `probe_dos4_open.py`
 plus the MS-DOS 4.0 source release (SYSINIT1.ASM TEMPCDS).
 
+**MS-DOS 5.00 boots** (`DOS5/Disk01.img`, see `tests/test_dos5_boot.py`):
+the Setup disk reaches its Welcome screen and flows through configuration
+into the install phase. Three blockers were fixed: 0xF9-media geometry is
+ambiguous so 1440-sector images are pinned to 80/2/9 CHS (head-1 reads were
+nine sectors off); port 61h bit 4 (DRAM-refresh toggle) must flip or DOS 5
+IO.SYS's PS/2 keyboard init spins forever; INT 16h AH=00/AH=10h must block
+(Setup drains type-ahead then waits, and phantom NUL returns made its input
+loop spin — hence `DOSHarness.inject_background` for the second ENTER).
+
 ## 1. Tool inventory and target tiers
 
 From the root directories of the two shipped images:
@@ -641,3 +650,4 @@ Explicit write-back is covered by
 | FAT16 hard disk | 2 | test_fat16.py, test_fat16_hard_disk.py | ✅ Phase J (20MB type 04h partition; FORMAT /S, host round-trip, direct boot) |
 | KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |
 | MS-DOS 4.00 boot (DOS4/OPERATI3) | 2 | test_dos4_boot.py | ✅ boots to `A>`; DIR/ECHO/external programs (fixed by equipment-word bit 0) |
+| MS-DOS 5.00 boot (DOS5/Disk01 Setup disk) | 2 | test_dos5_boot.py | ✅ boots to Setup welcome; flows through configuration into install (fixed by 0xF9 geometry pin, port 61h toggle, INT 16h blocking) |

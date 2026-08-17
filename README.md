@@ -213,6 +213,26 @@ but are not bundled or redistributed by this repository.
   cause localised with `probe_dos4_open.py` (kernel canonicalizer at
   `0286:8299` rejecting the CDS) and the MS-DOS 4.0 source release
   (`SYSINIT1.ASM` TEMPCDS / `Fake_Floppy_Drv`).
+- **MS-DOS 5.00 boots** (`DOS5/Disk01.img`, the interactive 720 KB 3.5"
+  Setup disk): the boot sector loads IO.SYS, DOS starts, and the Setup UI
+  reaches its Welcome screen, advances through hardware configuration and
+  into the install phase (see `tests/test_dos5_boot.py`).  Three contracts
+  had to be fixed for it:
+  1. **INT 13h geometry for 0xF9 media** — the byte is ambiguous (1.44 MB
+     18-spt *and* 720 KB 9-spt both use it), so a 1440-sector image is now
+     pinned to 80/2/9 CHS; previously every head-1 sector read landed 9
+     tracks off and IO.SYS executed garbage (`ljmp 0x70:0` into zeros).
+  2. **Port 61h refresh toggle** — DOS 5 IO.SYS's PS/2 keyboard init waits
+     for bit 4 (DRAM-refresh check toggle) to flip; the port returned a
+     constant and the wait loop spun forever.
+  3. **INT 16h blocking semantics** — `AH=00`/`AH=10h` now wait (bounded
+     spin) for a key instead of returning a phantom NUL immediately.
+     MS-DOS 5 Setup drains the type-ahead buffer before issuing the real
+     blocking read, and treats each phantom NUL as an unusable input event,
+     spinning forever.  Because the drain eats any key queued ahead of it,
+     the second ENTER must arrive *during* the blocked read —
+     `DOSHarness.inject_background` injects from a thread for exactly
+     that pattern.
 - Xerox and SCP OEM images use their own direct hardware controller paths;
   they need dedicated device emulation rather than generic PC INT 13h support.
 

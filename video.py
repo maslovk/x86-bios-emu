@@ -256,6 +256,11 @@ class IO:
         self.cmos = cmos
         self.kbd_ctrl = kbd_ctrl  # Keyboard controller (8042)
         self._pit_pending_irqs = []  # IRQs fired since last check
+        # Last byte written to port 0x61 (speaker/timer gates).  Bit 4 is
+        # the refresh-check toggle: real hardware flips it on every DRAM
+        # refresh cycle (~15 us), and legacy timing loops (DOS 5 IO.SYS
+        # keyboard init, BIOS beep waits) poll it until it changes.
+        self._port61 = 0x00
         # Ports not handled by a modeled device are recorded for diagnosing
         # legacy guests (notably SCP/WD1791 disk drivers).
         self.unhandled_ports = set()
@@ -273,7 +278,10 @@ class IO:
                 return self.kbd_ctrl.read_data()
             return self.kbd.read_key()
         if port == 0x61:  # PIT control / speaker
-            return 0x00
+            # Toggle the refresh-check bit on each read so DRAM-refresh
+            # timing loops observe a change (see __init__).
+            self._port61 ^= 0x10
+            return self._port61
         if port == 0x64:  # Keyboard controller status
             if self.kbd_ctrl:
                 return self.kbd_ctrl.read_status()
@@ -313,6 +321,9 @@ class IO:
 
     def outb(self, port, val):
         if port in (0xF4, 0xF5):
+            return
+        if port == 0x61:  # PIT control / speaker
+            self._port61 = (self._port61 & ~0x03) | (val & 0x03)
             return
         if port == 0x60:  # Keyboard data port
             if self.kbd_ctrl:

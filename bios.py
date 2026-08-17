@@ -542,6 +542,13 @@ class BIOS:
 
     # ── INT 13h: Disk Services ─────────────────────────────────
 
+    # Poll iterations spent inside a blocking INT 16h AH=00/AH=10h read
+    # before falling back to the legacy NUL-key return.  Keys are queued
+    # from the host at any time, so a few thousand polls (~1 ms wall clock)
+    # are enough to catch a queued keystroke while keeping single-stepping
+    # host loops responsive.
+    KBD_WAIT_POLLS = 1024
+
     _SPT_BY_MEDIA = {0xF9: 18, 0xF8: 15, 0xF0: 15, 0xF1: 9,
                      0xFD: 9, 0xF2: 18, 0xFE: 8, 0xFF: 8}
     # (max_cylinder, max_head) per media descriptor byte; heads = max_head+1.
@@ -885,29 +892,44 @@ class BIOS:
             0x74: 0x14, 0x75: 0x16, 0x76: 0x2F, 0x77: 0x11, 0x78: 0x2D,
             0x79: 0x15, 0x7A: 0x2C,
         }
-        if ah == 0x00:  # Wait for key (blocking)
+        if ah in (0x00, 0x10):  # Wait for key (blocking); 0x10 = enhanced
             # Drain keyboard controller output into kbd buffer first. Keys
             # arrive here as ASCII bytes (kbd_ctrl.inject_key bypasses scan
             # translation), so the buffer holds ASCII, NOT scan codes.
-            if self.kbd_ctrl and self.kbd_ctrl.has_data():
-                while self.kbd_ctrl.has_data():
-                    ch = self.kbd_ctrl.read_data()
-                    if ch:
-                        self.kbd.buffer.append(ch)
-            if self.kbd.key_pressed():
-                asc = self.kbd.read_key()
-                if isinstance(asc, str):
-                    asc = ord(asc)
-                asc &= 0xFF
-                sc = _ASCII_TO_SCAN.get(asc, 0)   # best-effort AH scan code
-                cpu.ax = (sc << 8) | asc
-                cpu.flags &= ~0x40
-            else:
-                # No key available — return scan code 0, ZF=0
-                # DOS boot loops on this; auto-feed should prevent infinite loop
+            def _take_key():
+                if self.kbd_ctrl and self.kbd_ctrl.has_data():
+                    while self.kbd_ctrl.has_data():
+                        ch = self.kbd_ctrl.read_data()
+                        if ch:
+                            self.kbd.buffer.append(ch)
+                if self.kbd.key_pressed():
+                    asc = self.kbd.read_key()
+                    if isinstance(asc, str):
+                        asc = ord(asc)
+                    asc &= 0xFF
+                    sc = _ASCII_TO_SCAN.get(asc, 0)   # best-effort AH scan code
+                    cpu.ax = (sc << 8) | asc
+                    cpu.flags &= ~0x40
+                    return True
+                return False
+
+            if not _take_key():
+                # Real BIOS semantics: AH=00/AH=10h BLOCK until a key
+                # arrives.  Returning a phantom NUL key immediately (the
+                # old behaviour) breaks callers that use the blocking read
+                # as their only wait primitive -- MS-DOS 5 Setup polls
+                # AH=10h/AH=00 in a loop and treats each NUL as an input
+                # event that matches no filter, spinning forever.  Spin for
+                # a bounded budget (keys can be queued from the host at any
+                # time), then fall back to the NUL return so host run
+                # loops that only check the screen between guest steps
+                # still make progress.
+                for _ in range(self.KBD_WAIT_POLLS):
+                    if _take_key():
+                        return
                 cpu.ax = 0
                 cpu.flags &= ~0x40
-        elif ah == 0x01:  # Check key (peek; do NOT consume)
+        elif ah in (0x01, 0x11):  # Check key (peek; do NOT consume)
             # Drain the keyboard controller output buffer into the BIOS key
             # buffer first.  Without this, keys injected via kbd_ctrl (the
             # path used by the interactive main loop) are invisible to AH=01,

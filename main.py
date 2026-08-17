@@ -284,6 +284,33 @@ def build_boot_sector():
 
 # ─── Emulator ──────────────────────────────────────────────────────────────
 
+# Legacy PC floppy formats are fully described by their sector count:
+# 8 spt for the earliest 160/320 KB 5.25" disks, 9 spt for 360 KB 5.25"
+# and 720 KB 3.5", 15 spt for 1.2 MB 5.25", 18 spt for 1.44 MB 3.5".
+# The media descriptor byte alone cannot pick between them (0xF9 covers
+# both 720 KB and 1.44 MB depending on vendor convention), so exact
+# geometry is pinned from the image size whenever it matches a known
+# format.  INT 13h CHS translation then agrees with the boot sector's
+# own BPB-derived arithmetic.
+_FLOPPY_SIZE_GEOMETRY = {
+    320: (40, 1, 8),    # 160 KB 5.25"
+    640: (40, 2, 8),    # 320 KB 5.25"
+    720: (40, 2, 9),    # 360 KB 5.25"
+    1440: (80, 2, 9),   # 720 KB 3.5"
+    2400: (80, 2, 15),  # 1.2 MB 5.25"
+    2880: (80, 2, 18),  # 1.44 MB 3.5"
+}
+
+
+def _pin_floppy_geometry(disk, actual_sectors):
+    """Pin CHS geometry on ``disk`` when the sector count is unambiguous."""
+    geo = _FLOPPY_SIZE_GEOMETRY.get(actual_sectors)
+    if geo is None:
+        return False
+    disk.cylinders, disk.heads, disk.sectors_per_track = geo
+    return True
+
+
 class Emulator:
     """Main emulator loop."""
 
@@ -541,18 +568,11 @@ class Emulator:
 
         # Store media type for BIOS to use in INT 13h AH=08
         self.disk.media_type = media_byte
-        # Preserve the physical geometry of DOS 1.x images explicitly.  The
-        # boot sector has no standard BPB, so size alone is the reliable
-        # source of the 160/320 KB cylinder/head layout.
-        if actual_sectors == 320:
-            self.disk.cylinders, self.disk.heads = 40, 1
-            self.disk.sectors_per_track = 8
-        elif actual_sectors == 640:
-            self.disk.cylinders, self.disk.heads = 40, 2
-            self.disk.sectors_per_track = 8
-        elif actual_sectors == 720:
-            self.disk.cylinders, self.disk.heads = 40, 2
-            self.disk.sectors_per_track = 9
+        # Pin the physical geometry by image size.  The media descriptor
+        # alone is ambiguous: 0xF9 means both 1.44 MB (18 spt) and 720 KB
+        # 3.5" (9 spt), and DOS 1.x boot sectors carry no BPB at all.  The
+        # image size uniquely identifies the legacy cylinder/head layout.
+        _pin_floppy_geometry(self.disk, actual_sectors)
 
         # Mount FAT12
         try:
@@ -587,6 +607,7 @@ class Emulator:
             buf[:512] = padded[i * 512:(i + 1) * 512]
             self.disk_b.write_sector(i, buf)
         self.disk_b.media_type = media_byte
+        _pin_floppy_geometry(self.disk_b, actual_sectors)
         print(f"  Floppy B: {len(data)//1024}KB, {actual_sectors} sectors, "
               f"media=0x{media_byte:02X}", file=sys.stderr)
 

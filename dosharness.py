@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 
 # Repo-root importability: tests/conftest inserts the parent dir, but this
@@ -320,6 +321,32 @@ class DOSHarness:
         for ch in s:
             self.emu.kbd_ctrl.inject_key(ord(ch))
             self.run_steps(delay)
+
+    def inject_background(self, s, interval=0.05, repeat=1):
+        """Start a background thread that re-injects ``s`` while stepping.
+
+        Guests with a drain-then-block keyboard discipline (MS-DOS 5 Setup
+        first flushes any pending key with INT 16h AH=01/AH=00, then does the
+        real blocking AH=00 read) discard keys queued before the drain.  On
+        real hardware the keystroke arrives during the blocked read; with a
+        single-threaded runner that window is never open, so the injection
+        must come from another thread while ``run_steps``/``wait_for`` keep
+        the CPU spinning.  Keys landing in a drain window are discarded and
+        re-injected on the next repeat.
+
+        Returns the started thread (daemon; callers keep stepping in the
+        main thread).
+        """
+        import threading
+
+        def worker():
+            for _ in range(repeat):
+                for ch in s:
+                    time.sleep(interval)
+                    self.emu.kbd_ctrl.inject_key(ord(ch))
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        return t
 
     def boot_to_prompt(self):
         """Boot through DATE/TIME prompts to the boot drive's DOS prompt."""

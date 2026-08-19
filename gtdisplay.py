@@ -25,6 +25,8 @@ exactly (foreground = attr low nibble, background = attr high nibble).
 
 import sys
 
+from video import decode_vga_char
+
 
 # CGA 16-colour palette, RGB 0-255 each.  Index = attr nibble value.
 _CGA_RGB = [
@@ -339,8 +341,8 @@ class GtkDisplay:
         self.video._sync_from_memory()
         lines = []
         for row in range(sy, ey + 1):
-            text = ''.join(chr(ch) if 0x20 <= ch <= 0x7E else ' '
-                            for ch, _attr in self.video.buffer[row][sx:ex + 1])
+            text = ''.join(decode_vga_char(ch)
+                           for ch, _attr in self.video.buffer[row][sx:ex + 1])
             lines.append(text.rstrip())
         text = '\n'.join(lines)
         clipboard = self._Gtk.Clipboard.get(self._Gdk.SELECTION_CLIPBOARD)
@@ -445,8 +447,9 @@ class GtkDisplay:
                 cr.rectangle(x * cw, y * ch, cw + 1, ch + 1)
                 cr.fill()
                 # Glyph (skip for blank cells to save Pango work).
-                if 0x20 <= byte <= 0x7E:
-                    layout.set_text(chr(byte), -1)
+                glyph = decode_vga_char(byte)
+                if glyph != ' ':
+                    layout.set_text(glyph, -1)
                     r, g, b = _CGA_RGB[fg]
                     cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)
                     cr.move_to(x * cw + 1, y * ch)

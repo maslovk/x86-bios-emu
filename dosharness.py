@@ -22,6 +22,7 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from main import Emulator  # noqa: E402
+from video import decode_vga_char  # noqa: E402
 
 # Canonical 5.25" DOS 3.3 distribution images shipped in this repo.
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -240,7 +241,7 @@ class DOSHarness:
             row = ''
             for x in range(80):
                 ch = self.emu.mem.read_byte(0xB8000 + (y * 80 + x) * 2)
-                row += chr(ch) if 0x20 <= ch <= 0x7E else ' '
+                row += decode_vga_char(ch)
             lines.append(row.rstrip())
         return lines
 

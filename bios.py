@@ -458,6 +458,27 @@ class BIOS:
             # Mirror the scroll into VRAM so display()/GTK see it (they read
             # from 0xB8000 via _sync_from_memory before each redraw).
             self.video._sync_to_memory()
+        elif ah == 0x07:  # Scroll down
+            top = (cx >> 8) & 0xFF
+            left = cx & 0xFF
+            # AH=07 has the same window and AL semantics as AH=06, but
+            # shifts the contents down.  AL=0 clears the window using BH as
+            # the attribute; Setup uses this to remove its temporary blue
+            # "Please wait" panel before drawing the welcome page.
+            bottom = min((dx >> 8) & 0xFF, 24)
+            right = min(dx & 0xFF, 79)
+            if top >= 25 or left >= 80 or top > bottom or left > right:
+                return
+            height = bottom - top + 1
+            rows = min(al, height) if al else height
+            attr = bh
+            for y in range(bottom, top - 1, -1):
+                for x in range(left, right + 1):
+                    if y - rows >= top:
+                        self.video.buffer[y][x] = self.video.buffer[y - rows][x]
+                    else:
+                        self.video.buffer[y][x] = (0x20, attr)
+            self.video._sync_to_memory()
         elif ah == 0x08:  # Read char/attr at cursor
             x, y = self.video.cur_x, self.video.cur_y
             if 0 <= y < 25 and 0 <= x < 80:

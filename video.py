@@ -8,6 +8,18 @@ import os
 import sys
 
 
+def decode_vga_char(ch):
+    """Decode printable ASCII and the CP437 box/shading glyphs used by DOS."""
+    if 0x20 <= ch <= 0x7E:
+        return chr(ch)
+    # DOS text-mode UI frames conventionally use this CP437 range. Keep
+    # unrelated high bytes (for example 0x9B) blank rather than leaking
+    # arbitrary control/symbol characters into terminal transcripts.
+    if 0xB0 <= ch <= 0xDF:
+        return bytes((ch,)).decode('cp437')
+    return ' '
+
+
 class Video:
     """VGA text mode 0xB8000, 80x25, 16 colors."""
 
@@ -88,7 +100,7 @@ class Video:
     def scroll(self):
         if self.on_scroll_line is not None:
             top = self.buffer[0]
-            line = ''.join(chr(ch) if 0x20 <= ch <= 0x7E else ' '
+            line = ''.join(decode_vga_char(ch)
                             for ch, _attr in top).rstrip()
             self.on_scroll_line(line)
         self.buffer = self.buffer[1:]
@@ -129,7 +141,7 @@ class Video:
         cur_fg = None
         for ch, attr in row:
             fg = attr & 0xF
-            c = chr(ch) if 0x20 <= ch <= 0x7E else ' '
+            c = decode_vga_char(ch)
             if use_color and fg != cur_fg:
                 out.append(f"\033[{self._FG.get(fg, 37)}m")
                 cur_fg = fg

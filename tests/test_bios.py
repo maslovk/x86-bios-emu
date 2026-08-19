@@ -208,6 +208,26 @@ class TestINT10h:
         assert bios_env.video.buffer[5][5] == (ord('X'), 0x0A)
         assert bios_env.video.buffer[6][5] == (0x20, 0x1E)
 
+    def test_scroll_down_honors_window_and_fill_attribute(self, bios_env):
+        bios_env.initialize()
+        bios_env.video.write(5, 5, ord('X'), 0x0A)
+
+        self._call(bios_env, ax=0x0701, bx=0x1E00,
+                   cx=0x0505, dx=0x0606)
+
+        assert bios_env.video.buffer[6][5] == (ord('X'), 0x0A)
+        assert bios_env.video.buffer[5][5] == (0x20, 0x1E)
+
+    def test_scroll_down_clear_clips_ansi_open_ended_window(self, bios_env):
+        """AH=07/AL=0 clears a window, including an open-ended corner."""
+        bios_env.initialize()
+        bios_env.video.write(79, 24, ord('X'), 0x0C)
+
+        self._call(bios_env, ax=0x0700, bx=0x3000,
+                   cx=0x0000, dx=0x19FF)
+
+        assert bios_env.video.buffer[24][79] == (0x20, 0x30)
+
     def test_scroll_clear_clips_ansi_open_ended_window(self, bios_env):
         """ANSI.SYS clears the display with lower-right coordinate 19FF."""
         bios_env.initialize()

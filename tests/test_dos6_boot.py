@@ -60,5 +60,9 @@ class TestDOS6Boot:
             screen = h.vga_str()
             assert 'MS-DOS 6.22 Setup' in screen
             assert 'To set up MS-DOS now, press ENTER' in screen
+            # Setup clears its temporary system-check panel before showing
+            # the welcome page; a stale blue "Please wait" box indicates
+            # that INT 10h/AH=07 (scroll down/clear window) is broken.
+            assert 'Please wait.' not in screen
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

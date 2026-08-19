@@ -40,6 +40,17 @@ IO.SYS's PS/2 keyboard init spins forever; INT 16h AH=00/AH=10h must block
 (Setup drains type-ahead then waits, and phantom NUL returns made its input
 loop spin — hence `DOSHarness.inject_background` for the second ENTER).
 
+**MS-DOS 6.22 boots** (`DOS6_22/disk01.img`, see `tests/test_dos6_boot.py`):
+the EXEPACK-compressed Setup disk decompresses its kernel and reaches the
+Setup welcome flow (blank-HDD dialog, or the full welcome with a legacy HDD
+attached). The blocker was four CPU semantics bugs, each Unicorn-verified by
+the differential tracer `probe_dos6_diff.py`: TEST r/m,r used AL/AX instead
+of the ModRM reg field (the killer — `TEST BX,BX` always said ZF=1, so the
+EXEPACK decoder mis-walked every record and left the relocated kernel mostly
+zeros); INC/DEC never set AF; logic ops left AF stale; SHR r/m,1 computed OF
+from the result instead of the original MSB. Pinned by
+tests/test_dos6_flags.py (17 fast) plus 2 slow boot tests.
+
 ## 1. Tool inventory and target tiers
 
 From the root directories of the two shipped images:
@@ -651,3 +662,4 @@ Explicit write-back is covered by
 | KEYB/NLSFUNC/SELECT/DISPLAY/GRAPHICS | 3 | test_tier3_graceful.py | ✅ Phase E (graceful return; SELECT declined via dialog) |
 | MS-DOS 4.00 boot (DOS4/OPERATI3) | 2 | test_dos4_boot.py | ✅ boots to `A>`; DIR/ECHO/external programs (fixed by equipment-word bit 0) |
 | MS-DOS 5.00 boot (DOS5/Disk01 Setup disk) | 2 | test_dos5_boot.py | ✅ boots to Setup welcome; flows through configuration into install (fixed by 0xF9 geometry pin, port 61h toggle, INT 16h blocking) |
+| MS-DOS 6.22 boot (DOS6_22/disk01 Setup disk) | 2 | test_dos6_boot.py | ✅ EXEPACK kernel decompresses; Setup welcome with/without blank HDD (fixed by TEST ModRM reg field, INC/DEC AF, logic AF clear, SHR OF) |

@@ -366,6 +366,7 @@ class CPU:
         self.sf = bool(r & 0x80)
         self.cf = False
         self.of = False
+        self.af = False   # real x86 clears AF on logic ops
         self.pf = bin(r).count('1') % 2 == 0
 
     def _set_szp8(self, r):
@@ -383,6 +384,7 @@ class CPU:
         self.sf = bool(r & 0x8000)
         self.cf = False
         self.of = False
+        self.af = False   # real x86 clears AF on logic ops
         self.pf = bin(r & 0xFF).count('1') % 2 == 0
 
     # ── Arithmetic helpers for opcode groups ───────────────────────
@@ -1038,19 +1040,26 @@ class CPU:
         # 40-47 INC r16
         if 0x40 <= opc <= 0x47:
             r = opc - 0x40
-            v = (self._reg16(r) + 1) & 0xFFFF
+            old = self._reg16(r)
+            v = (old + 1) & 0xFFFF
             self._set_reg16(r, v)
             self.zf = v == 0; self.sf = bool(v & 0x8000)
             self.of = v == 0x8000; self.pf = bin(v & 0xFF).count('1') % 2 == 0
+            # AF carries out of bit 3 (0x0F -> 0x10 wrap)
+            self.af = (old & 0x0F) == 0x0F
             return
 
         # 48-4F DEC r16
         if 0x48 <= opc <= 0x4F:
             r = opc - 0x48
-            v = (self._reg16(r) - 1) & 0xFFFF
+            old = self._reg16(r)
+            v = (old - 1) & 0xFFFF
             self._set_reg16(r, v)
             self.zf = v == 0; self.sf = bool(v & 0x8000)
             self.of = v == 0x7FFF; self.pf = bin(v & 0xFF).count('1') % 2 == 0
+            # AF borrows out of bit 3 (0x00 -> 0x0F wrap); EXEPACK-style
+            # decompressors (MS-DOS 6 SYSINIT) probe this flag.
+            self.af = (old & 0x0F) == 0x00
             return
 
         # 50-57 PUSH r16
@@ -1197,16 +1206,16 @@ class CPU:
                 self._exec_group1_mem_arith(addr, reg, imm, is_word=True)
             return
 
-        # 84 TEST AL, r/m8
+        # 84 TEST r/m8, r8
         if opc == 0x84:
             mod, reg, rm = self._decode_modrm()
-            self._flags_logic8(self.ax & self._ea_byte(mod, rm))
+            self._flags_logic8(self._get_reg8_modrm(reg) & self._ea_byte(mod, rm))
             return
 
-        # 85 TEST AX, r/m16
+        # 85 TEST r/m16, r16
         if opc == 0x85:
             mod, reg, rm = self._decode_modrm()
-            self._flags_logic16(self.ax & self._ea_word(mod, rm))
+            self._flags_logic16(self._reg16(reg) & self._ea_word(mod, rm))
             return
 
         # 86 XCHG r/m8, r8
@@ -2019,13 +2028,17 @@ class CPU:
                 a = self._ea(mod, rm)
                 v = self._readb(a)
             if reg & 1:  # DEC
+                old = v
                 v = (v - 1) & 0xFF
                 self.zf = v == 0; self.sf = bool(v & 0x80)
                 self.of = v == 0x7F
+                self.af = (old & 0x0F) == 0x00
             else:  # INC
+                old = v
                 v = (v + 1) & 0xFF
                 self.zf = v == 0; self.sf = bool(v & 0x80)
                 self.of = v == 0x80
+                self.af = (old & 0x0F) == 0x0F
             self.pf = bin(v).count('1') % 2 == 0
             if mod == 3:
                 self._set_reg8_modrm(rm, v)
@@ -2046,12 +2059,14 @@ class CPU:
                 v = (target + 1) & 0xFFFF
                 self.zf = v == 0; self.sf = bool(v & 0x8000)
                 self.of = v == 0x8000; self.pf = bin(v & 0xFF).count('1') % 2 == 0
+                self.af = (target & 0x0F) == 0x0F
                 if mod == 3: self._set_reg16(rm, v)
                 else: self._writew(addr, v)
             elif reg == 1:  # DEC
                 v = (target - 1) & 0xFFFF
                 self.zf = v == 0; self.sf = bool(v & 0x8000)
                 self.of = v == 0x7FFF; self.pf = bin(v & 0xFF).count('1') % 2 == 0
+                self.af = (target & 0x0F) == 0x00
                 if mod == 3: self._set_reg16(rm, v)
                 else: self._writew(addr, v)
             elif reg == 2:  # CALL near
@@ -2156,8 +2171,9 @@ class CPU:
                 self.of = self.cf ^ bool(val & sign_bit) if count == 1 else False
             elif reg == 5:  # SHR
                 self.cf = val & 1
-                val = (val >> 1) & mask
+                # OF (count=1) is the MSB of the ORIGINAL operand
                 self.of = bool(val & sign_bit) if count == 1 else False
+                val = (val >> 1) & mask
             elif reg == 6:  # SHL (same as SAL)
                 self.cf = bool(val & sign_bit)
                 val = (val << 1) & mask

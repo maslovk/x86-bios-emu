@@ -235,6 +235,24 @@ but are not bundled or redistributed by this repository.
      that pattern.
 - Xerox and SCP OEM images use their own direct hardware controller paths;
   they need dedicated device emulation rather than generic PC INT 13h support.
+- **MS-DOS 6.22 boots** (`DOS6_22/disk01.img`, the EXEPACK-compressed 1.44 MB
+  Setup disk): the kernel decompresses, DOS starts, and Setup reaches its
+  welcome flow — without a hard disk it shows the legitimate "does not have
+  a hard disk" dialog, and with a blank legacy HDD image it shows the full
+  "To set up MS-DOS now, press ENTER" welcome (see `tests/test_dos6_boot.py`).
+  The blocker was a quartet of CPU semantics bugs (all Unicorn-verified via
+  the differential tracer `probe_dos6_diff.py`):
+  1. `TEST r/m,r` (opcodes 84h/85h) ignored the ModRM **reg** field and
+     always tested AL/AX — `TEST BX,BX` with AX=0 always reported ZF=1, so
+     SYSINIT's EXEPACK bit-stream decompressor walked the wrong branch for
+     every record, terminated early, and the relocated kernel was mostly
+     zeros (boot slid into garbage via the relocation `retf`).
+  2. `INC`/`DEC` (r16, r/m8, r/m16) never set **AF** (nibble borrow/carry).
+  3. Logic ops left **AF** stale instead of clearing it.
+  4. `SHR r/m,1` computed **OF** from the result; the SDM defines it as the
+     MSB of the original operand.
+  After the fixes the decompressor matches Unicorn for 200,000 consecutive
+  instructions (register-exact).
 
 ### BIOS Interrupt Handlers
 - **INT 08h**: IRQ 0 timer handler (increments BDA ticks at 0x046C, calls INT 1Ch)
@@ -539,6 +557,9 @@ Diagnostic probes (one-shot, kept for future investigations):
   tracers
 - `probe_dos4_open.py` — DOS 4 boot diagnostic: traces the first failing path
   open into the kernel canonicalizer and dumps the CDS/DPB state
+- `probe_dos6_diff.py` — DOS 6.22 boot diagnostic: single-step differential
+  tracer (our CPU vs Unicorn) from a live SYSINIT EXEPACK-decoder state;
+  stops at the first register/flag divergence
 - `imd_decode.py` — ImageDisk (.IMD) floppy image decoder (raw output suitable
   for `--floppy`), used to unpack the Eagle DOS 2.0 reference disk
 

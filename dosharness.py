@@ -358,6 +358,25 @@ class DOSHarness:
         t.start()
         return t
 
+    def inject_extended_background(self, scan_code, interval=0.05,
+                                   repeat=1):
+        """Re-inject an enhanced scan code while the guest is stepping.
+
+        DOS Setup drains type-ahead before blocking for its menu key.  This
+        mirrors :meth:`inject_background` for arrows and function keys so a
+        raw scan code lands during that blocking window.
+        """
+        import threading
+
+        def worker():
+            for _ in range(repeat):
+                time.sleep(interval)
+                self.emu.kbd_ctrl.inject_extended_key(scan_code)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        return t
+
     def boot_to_prompt(self):
         """Boot through DATE/TIME prompts to the boot drive's DOS prompt."""
         self.wait_for('Enter new date')

@@ -254,6 +254,15 @@ but are not bundled or redistributed by this repository.
   After the fixes the decompressor matches Unicorn for 200,000 consecutive
   instructions (register-exact).
 
+  Verify the two supported Setup stages with the historical image present:
+
+  ```bash
+  python3 -m pytest -q tests/test_dos6_boot.py -m slow
+  ```
+
+  The test without a hard disk stops at the expected hardware dialog; the
+  second test creates a private legacy HDD and reaches the full Setup welcome.
+
 ### BIOS Interrupt Handlers
 - **INT 08h**: IRQ 0 timer handler (increments BDA ticks at 0x046C, calls INT 1Ch)
 - **INT 09h**: IRQ 1 keyboard handler (reads ASCII from i8042, stores in kbd buffer, EOI)

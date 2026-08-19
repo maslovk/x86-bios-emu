@@ -8,7 +8,7 @@ depend on earlier ones. After every phase: `python3 -m pytest -q` must stay
 green (including `-m slow`), and nothing in `DOS3_3_525/` may be modified
 (tests always work on temp copies of the images).
 
-## 0. Current state (verified 2026-08-17)
+## 0. Current state (verified 2026-08-19)
 
 Phases A–J are complete and Phase K is underway. MS-DOS 3.3 boots from the
 shipped floppy images or from a prepared hard-disk image,

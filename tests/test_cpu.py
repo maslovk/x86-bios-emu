@@ -457,7 +457,9 @@ class TestOpcodes:
         self._load(cpu, [0xD0, 0xF0])
         cpu.ax = 0x0040
         cpu.execute()
-        assert (cpu.ax & 0xFF) == 0x80  # NOTE: CF may not be set correctly (known CPU bug)
+        assert (cpu.ax & 0xFF) == 0x80
+        assert cpu.cf is False
+        assert cpu.of is True
 
     def test_shift_shr(self, cpu):
         # D0 E8: mod=11, reg=101(SHR), rm=000(AL) → SHR AL, 1
@@ -469,21 +471,72 @@ class TestOpcodes:
     def test_shift_sar(self, cpu):
         self._load(cpu, [0xD0, 0xF8])  # D0 F8: SAR AL, 1
         cpu.ax = 0x0081
+        cpu.of = True
         cpu.execute()
         assert (cpu.ax & 0xFF) == 0xC0 and cpu.cf is True
+        assert cpu.of is False
 
     def test_neg_al(self, cpu):
-        # F6 D8: mod=11, reg=001, rm=000 → BUG: reg&1 catches NOT before NEG
-        # Skip this test due to known CPU bug in F6 dispatch
-        pass
+        # F6 D8: mod=11, /3, rm=000 -> NEG AL.
+        self._load(cpu, [0xF6, 0xD8])
+        cpu.ax = 0x1270
+        cpu.execute()
+        # NEG is byte-sized: preserve AH while updating AL and set the
+        # subtraction flags for 0 - 0x70.
+        assert cpu.ax == 0x1290
+        assert cpu.cf is True
+        assert cpu.zf is False
+        assert cpu.sf is True
+        assert cpu.of is False
 
     def test_not_al(self, cpu):
-        # F6 D0: NOT AL — known CPU bug: _get_reg8 returns full 16-bit value
-        # so NOT operates on 16 bits instead of 8. Skip assertion, just check no crash.
+        # F6 D0: mod=11, /2, rm=000 -> NOT AL.
         self._load(cpu, [0xF6, 0xD0])
-        cpu.ax = 0x00F0
+        cpu.ax = 0x12F0
+        flags_before = cpu.flags
         cpu.execute()
-        assert not cpu.halted  # doesn't crash
+        assert cpu.ax == 0x120F
+        # NOT leaves all arithmetic flags unchanged.
+        assert cpu.flags == flags_before
+
+    def test_not_byte_direct_memory_operand(self, cpu):
+        # F6 16 34 12: NOT byte [1234h].  The direct displacement must be
+        # consumed once for the read and reused for the write.
+        self._load(cpu, [0xF6, 0x16, 0x34, 0x12])
+        cpu.ds = 0
+        cpu.mem.write_byte(0x1234, 0xA5)
+        cpu.execute()
+        assert cpu.mem.read_byte(0x1234) == 0x5A
+        assert cpu.ip == 0x7C04
+
+    def test_neg_byte_direct_memory_operand(self, cpu):
+        # F6 1E 34 12: NEG byte [1234h], sharing the same RMW address path.
+        self._load(cpu, [0xF6, 0x1E, 0x34, 0x12])
+        cpu.ds = 0
+        cpu.mem.write_byte(0x1234, 0x03)
+        cpu.execute()
+        assert cpu.mem.read_byte(0x1234) == 0xFD
+        assert cpu.cf is True
+        assert cpu.ip == 0x7C04
+
+    def test_not_word_direct_memory_operand(self, cpu):
+        # F7 16 34 12: NOT word [1234h].
+        self._load(cpu, [0xF7, 0x16, 0x34, 0x12])
+        cpu.ds = 0
+        cpu.mem.write_word(0x1234, 0xA55A)
+        cpu.execute()
+        assert cpu.mem.read_word(0x1234) == 0x5AA5
+        assert cpu.ip == 0x7C04
+
+    def test_neg_word_direct_memory_operand(self, cpu):
+        # F7 1E 34 12: NEG word [1234h].
+        self._load(cpu, [0xF7, 0x1E, 0x34, 0x12])
+        cpu.ds = 0
+        cpu.mem.write_word(0x1234, 0x0003)
+        cpu.execute()
+        assert cpu.mem.read_word(0x1234) == 0xFFFD
+        assert cpu.cf is True
+        assert cpu.ip == 0x7C04
 
     def test_pusha_popa(self, cpu):
         self._load(cpu, [0x60, 0x61])

@@ -360,6 +360,32 @@ class CPU:
         self.pf = bin(r & 0xFF).count('1') % 2 == 0
         return r
 
+    @staticmethod
+    def _idiv_trunc(dividend, divisor):
+        """Return an x86-style signed quotient and remainder.
+
+        Python's ``//`` rounds toward negative infinity, while 8086 IDIV
+        truncates the quotient toward zero and gives the remainder the same
+        sign as the dividend.  Keeping this in one helper avoids subtly
+        different behavior between the byte and word instruction groups.
+        """
+        quotient = abs(dividend) // abs(divisor)
+        if (dividend < 0) != (divisor < 0):
+            quotient = -quotient
+        return quotient, dividend - quotient * divisor
+
+    def _raise_divide_error(self):
+        """Raise x86 ``#DE`` (INT 0), halting if no vector is installed."""
+        # The standalone CPU has no interrupt dispatcher; the Emulator
+        # replaces this bound method with its BIOS-aware hook.  Identify the
+        # former so unit-level faults remain deterministic even when the test
+        # program occupies the low IVT addresses.
+        bare_cpu_interrupt = (getattr(self._do_interrupt, '__func__', None)
+                              is CPU._do_interrupt)
+        self._do_interrupt(0)
+        if bare_cpu_interrupt and not self.int_no_return:
+            self.halted = True
+
     def _flags_logic8(self, r):
         r &= 0xFF
         self.zf = r == 0
@@ -1690,9 +1716,7 @@ class CPU:
         if opc == 0xD4:
             factor = self._fetchb()
             if factor == 0:
-                # Divide-by-zero -> #DE (INT 0); stop the CPU in the simple
-                # unit-test path where exception machinery isn't wired.
-                self.halted = True
+                self._raise_divide_error()
                 return
             ah_val = (self.ax & 0xFF) // factor
             al_val = (self.ax & 0xFF) % factor
@@ -1903,13 +1927,29 @@ class CPU:
                 imm = self._fetchb()
                 self._flags_logic8(v & imm)
             elif reg == 2:  # NOT r/m8
-                v = self._ea_byte(mod, rm)
+                if mod == 3:
+                    addr = None
+                    v = self._get_reg8_modrm(rm)
+                else:
+                    addr = self._ea(mod, rm)
+                    v = self._readb(addr)
                 v = (~v) & 0xFF
-                self._ea_write_byte(mod, rm, v)
+                if mod == 3:
+                    self._set_reg8_modrm(rm, v)
+                else:
+                    self._writeb(addr, v)
             elif reg == 3:  # NEG r/m8
-                v = self._ea_byte(mod, rm)
+                if mod == 3:
+                    addr = None
+                    v = self._get_reg8_modrm(rm)
+                else:
+                    addr = self._ea(mod, rm)
+                    v = self._readb(addr)
                 r = self._flags_sub8(0, v)
-                self._ea_write_byte(mod, rm, r)
+                if mod == 3:
+                    self._set_reg8_modrm(rm, r)
+                else:
+                    self._writeb(addr, r)
             elif reg == 4:  # MUL r/m8
                 v = self._ea_byte(mod, rm)
                 prod = (self.ax & 0xFF) * v
@@ -1927,18 +1967,27 @@ class CPU:
                 self.of = self.cf
             elif reg == 6:  # DIV r/m8
                 v = self._ea_byte(mod, rm)
-                if v == 0: self.cf = True; return
+                if v == 0:
+                    self._raise_divide_error()
+                    return
                 ax_val = self.ax
-                self.al = (ax_val // v) & 0xFF
-                self.ah = (ax_val % v) & 0xFF
+                quotient, remainder = divmod(ax_val, v)
+                if quotient > 0xFF:
+                    self._raise_divide_error()
+                    return
+                self.al = quotient
+                self.ah = remainder
             elif reg == 7:  # IDIV r/m8
                 v = self._ea_byte(mod, rm)
-                if v & 0x80: v |= 0xFF00
-                if v == 0: self.cf = True; return
-                ax_val = self.ax
-                if ax_val & 0x80: ax_val |= 0xFF00
-                q = ax_val // v
-                r = ax_val % v
+                v = v - 0x100 if v & 0x80 else v
+                if v == 0:
+                    self._raise_divide_error()
+                    return
+                ax_val = self.ax - 0x10000 if self.ax & 0x8000 else self.ax
+                q, r = self._idiv_trunc(ax_val, v)
+                if not -0x80 <= q <= 0x7F:
+                    self._raise_divide_error()
+                    return
                 self.al = q & 0xFF
                 self.ah = r & 0xFF
             return
@@ -1951,13 +2000,29 @@ class CPU:
                 imm = self._fetchw()
                 self._flags_logic16(v & imm)
             elif reg == 2:  # NOT r/m16
-                v = self._ea_word(mod, rm)
+                if mod == 3:
+                    addr = None
+                    v = self._get_reg16(rm)
+                else:
+                    addr = self._ea(mod, rm)
+                    v = self._readw(addr)
                 v = (~v) & 0xFFFF
-                self._ea_write_word(mod, rm, v)
+                if mod == 3:
+                    self._set_reg16(rm, v)
+                else:
+                    self._writew(addr, v)
             elif reg == 3:  # NEG r/m16
-                v = self._ea_word(mod, rm)
+                if mod == 3:
+                    addr = None
+                    v = self._get_reg16(rm)
+                else:
+                    addr = self._ea(mod, rm)
+                    v = self._readw(addr)
                 r = self._flags_sub16(0, v)
-                self._ea_write_word(mod, rm, r)
+                if mod == 3:
+                    self._set_reg16(rm, r)
+                else:
+                    self._writew(addr, r)
             elif reg == 4:  # MUL r/m16
                 v = self._ea_word(mod, rm)
                 prod = self.ax * v
@@ -1977,18 +2042,29 @@ class CPU:
                 self.of = self.cf
             elif reg == 6:  # DIV r/m16
                 v = self._ea_word(mod, rm)
-                if v == 0: self.cf = True; return
+                if v == 0:
+                    self._raise_divide_error()
+                    return
                 dxax = (self.dx << 16) | self.ax
-                self.ax = (dxax // v) & 0xFFFF
-                self.dx = (dxax % v) & 0xFFFF
+                quotient, remainder = divmod(dxax, v)
+                if quotient > 0xFFFF:
+                    self._raise_divide_error()
+                    return
+                self.ax = quotient
+                self.dx = remainder
             elif reg == 7:  # IDIV r/m16
                 v = self._ea_word(mod, rm)
-                if v & 0x8000: v |= 0xFFFF0000
-                if v == 0: self.cf = True; return
+                v = v - 0x10000 if v & 0x8000 else v
+                if v == 0:
+                    self._raise_divide_error()
+                    return
                 dxax = (self.dx << 16) | self.ax
-                if dxax & 0x80000000: dxax |= 0xFFFFFFFF00000000
-                q = dxax // v
-                r = dxax % v
+                if dxax & 0x80000000:
+                    dxax -= 0x100000000
+                q, r = self._idiv_trunc(dxax, v)
+                if not -0x8000 <= q <= 0x7FFF:
+                    self._raise_divide_error()
+                    return
                 self.ax = q & 0xFFFF
                 self.dx = r & 0xFFFF
             return
@@ -2130,6 +2206,14 @@ class CPU:
             count = self.cl & 0x1F
 
         is_word = opc in (0xD1, 0xD3)
+        # Rotate counts wrap at the operand width.  Through-carry rotates
+        # include CF in the ring, so their modulus is width+1.  Without this
+        # reduction ROL AL,8 and RCL AL,9 incorrectly perform a full cycle,
+        # changing CF even though the architectural count is zero.
+        if reg in (0, 1):
+            count %= 16 if is_word else 8
+        elif reg in (2, 3):
+            count %= 17 if is_word else 9
         if mod == 3:
             addr = None
             val = self._get_reg16(rm) if is_word else self._get_reg8_modrm(rm)
@@ -2151,20 +2235,30 @@ class CPU:
                 cf = bool(val & sign_bit)
                 val = ((val << 1) | cf) & mask
                 self.cf = cf
+                if count == 1:
+                    self.of = bool((val & sign_bit) ^ self.cf)
             elif reg == 1:  # ROR
                 cf = val & 1
                 val = ((val >> 1) | (cf << (size - 1))) & mask
                 self.cf = bool(cf)
+                if count == 1:
+                    self.of = bool((val & sign_bit) ^
+                                   ((val >> (size - 2)) & 1))
             elif reg == 2:  # RCL
                 old_cf = 1 if self.cf else 0
                 cf = bool(val & sign_bit)
                 val = ((val << 1) | old_cf) & mask
                 self.cf = cf
+                if count == 1:
+                    self.of = bool((val & sign_bit) ^ self.cf)
             elif reg == 3:  # RCR
                 old_cf = 1 if self.cf else 0
                 cf = val & 1
                 val = ((val >> 1) | (old_cf << (size - 1))) & mask
                 self.cf = bool(cf)
+                if count == 1:
+                    self.of = bool((val & sign_bit) ^
+                                   ((val >> (size - 2)) & 1))
             elif reg == 4:  # SAL/SHL
                 self.cf = bool(val & sign_bit)
                 val = (val << 1) & mask
@@ -2177,9 +2271,11 @@ class CPU:
             elif reg == 6:  # SHL (same as SAL)
                 self.cf = bool(val & sign_bit)
                 val = (val << 1) & mask
+                self.of = self.cf ^ bool(val & sign_bit) if count == 1 else False
             elif reg == 7:  # SAR
                 self.cf = val & 1
                 val = ((val >> 1) | (val & sign_bit)) & mask
+                self.of = False
 
         if is_word:
             if mod == 3:
@@ -2192,7 +2288,7 @@ class CPU:
             else:
                 self._writeb(addr, val)
 
-        if count != 1:
+        if count > 1:
             self.of = False
 
         # Scalar shifts (SHL/SAL, SHR, SAR -- reg 4/5/6/7) update SF, ZF, PF

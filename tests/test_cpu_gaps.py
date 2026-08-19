@@ -1281,6 +1281,83 @@ class TestMulDivGroups:
         assert cpu.al == 4
         assert cpu.ah == 1
 
+    def test_f6_div_byte_overflow_raises_divide_error(self):
+        cpu = _make_cpu()
+        cpu.cs = 0
+        cpu.ip = 0
+        cpu.ax = 0x0400  # 1024 / 2 = 512, beyond an 8-bit quotient
+        cpu.mem.write_byte(0x0100, 2)
+        cpu.mem.write_byte(0x0000, 0xF6)
+        cpu.mem.write_byte(0x0001, 0x36)  # /6, disp16
+        cpu.mem.write_word(0x0002, 0x0100)
+
+        cpu.execute()
+
+        assert cpu.halted is True
+
+    def test_f6_idiv_byte_overflow_raises_divide_error(self):
+        cpu = _make_cpu()
+        cpu.cs = 0
+        cpu.ip = 0
+        cpu.ax = 0xFF80  # -128 / -1 = +128, beyond signed byte range
+        cpu.mem.write_byte(0x0100, 0xFF)
+        cpu.mem.write_byte(0x0000, 0xF6)
+        cpu.mem.write_byte(0x0001, 0x3E)  # /7, disp16
+        cpu.mem.write_word(0x0002, 0x0100)
+
+        cpu.execute()
+
+        assert cpu.halted is True
+
+    def test_f6_idiv_byte_truncates_toward_zero(self):
+        cpu = _make_cpu()
+        cpu.cs = 0
+        cpu.ip = 0
+        # Signed AX=-7 divided by signed byte +3 is quotient -2,
+        # remainder -1.  Floor division would incorrectly produce -3,+2.
+        cpu.ax = 0xFFF9
+        cpu.mem.write_byte(0x0100, 3)
+        cpu.mem.write_byte(0x0000, 0xF6)
+        cpu.mem.write_byte(0x0001, 0x3E)  # /7, disp16
+        cpu.mem.write_word(0x0002, 0x0100)
+
+        cpu.execute()
+
+        assert cpu.al == 0xFE
+        assert cpu.ah == 0xFF
+
+    def test_f7_idiv_word_signs_dxax_and_divisor(self):
+        cpu = _make_cpu()
+        cpu.cs = 0
+        cpu.ip = 0
+        # Signed DX:AX=-7 divided by signed word -3 is +2 remainder -1.
+        cpu.dx = 0xFFFF
+        cpu.ax = 0xFFF9
+        cpu.mem.write_word(0x0100, 0xFFFD)
+        cpu.mem.write_byte(0x0000, 0xF7)
+        cpu.mem.write_byte(0x0001, 0x3E)  # /7, disp16
+        cpu.mem.write_word(0x0002, 0x0100)
+
+        cpu.execute()
+
+        assert cpu.ax == 0x0002
+        assert cpu.dx == 0xFFFF
+
+    def test_f7_idiv_word_overflow_raises_divide_error(self):
+        cpu = _make_cpu()
+        cpu.cs = 0
+        cpu.ip = 0
+        cpu.dx = 0xFFFF
+        cpu.ax = 0x8000  # -32768 / -1 = +32768, beyond signed word range
+        cpu.mem.write_word(0x0100, 0xFFFF)
+        cpu.mem.write_byte(0x0000, 0xF7)
+        cpu.mem.write_byte(0x0001, 0x3E)  # /7, disp16
+        cpu.mem.write_word(0x0002, 0x0100)
+
+        cpu.execute()
+
+        assert cpu.halted is True
+
 
 class TestMovModRM8:
     def test_88_stores_dl_to_memory(self):

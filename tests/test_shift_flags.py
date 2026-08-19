@@ -151,6 +151,42 @@ class TestShiftFlags:
         assert cpu.zf is True, "ROL must not clobber ZF"
         assert cpu.sf is False, "ROL must not clobber SF"
         assert cpu.pf is False, "ROL must not clobber PF"
+        assert cpu.of is True, "ROL count 1 sets OF from result MSB xor CF"
+
+    def test_shift_count_zero_preserves_all_flags(self):
+        """A zero CL count is a complete no-op, including flags."""
+        cpu = make_cpu([0xD3, 0xE0])  # SHL AX, CL
+        cpu.ax = 0x1234
+        cpu.cx = 0
+        # Keep TF/IF clear so the CPU's instruction-level trap machinery does
+        # not legitimately alter those control flags after execute().
+        cpu.flags = 0x0CD7
+        flags_before = cpu.flags
+        cpu.execute()
+        assert cpu.ax == 0x1234
+        assert cpu.flags == flags_before
+
+    def test_rotate_count_wraps_at_operand_width(self):
+        """ROL AL,8 is architecturally a zero-count rotate."""
+        cpu = make_cpu([0xD2, 0xC0])  # ROL AL, CL
+        cpu.ax = 0x0081
+        cpu.cx = 8
+        cpu.flags = 0x0CD7
+        flags_before = cpu.flags
+        cpu.execute()
+        assert cpu.ax == 0x0081
+        assert cpu.flags == flags_before
+
+    def test_through_carry_rotate_uses_nine_bit_ring(self):
+        """RCL AL,9 is a zero-count rotate (8 data bits plus CF)."""
+        cpu = make_cpu([0xD2, 0xD0])  # RCL AL, CL
+        cpu.ax = 0x0081
+        cpu.cx = 9
+        cpu.flags = 0x0CD7
+        flags_before = cpu.flags
+        cpu.execute()
+        assert cpu.ax == 0x0081
+        assert cpu.flags == flags_before
 
 
 class TestLahfSahf:

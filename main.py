@@ -10,7 +10,7 @@ import time
 import os
 import argparse
 
-from cpu import CPU
+from cpu_backend import BACKENDS, create_cpu, normalize_backend
 from video import Video, IO, Keyboard, Disk, Serial
 from bios import BIOS
 from hardware import PIT, PIC, CMOS, KeyboardController
@@ -319,10 +319,10 @@ class Emulator:
                  hard_disk=None, boot_drive=0x00, gtk=False, gtk_font_size=18,
                  persist=False, serial_output=True, host_dir=None,
                  host_dir_write=False, host_dir_delete=False,
-                 host_dir_dos_text=False, max_instructions=10_000_000):
+                 host_dir_dos_text=False, max_instructions=10_000_000,
+                 cpu_backend='python'):
         self.memory = type('Memory', (), {})()
-        # Use the Memory class from cpu module
-        from cpu import CPU as _CPU
+        self.cpu_backend = normalize_backend(cpu_backend)
         # We need a proper Memory class
         self.mem = self._create_memory()
         self.video = Video()
@@ -340,9 +340,8 @@ class Emulator:
         self.io = IO(self.video, self.kbd, self.disk, self.serial,
                      pit=self.pit, pic=self.pic, cmos=self.cmos,
                      kbd_ctrl=self.kbd_ctrl)
-        self.cpu = _CPU(self.mem, self.io)
-        self.cpu.step_mode = step_mode
         self.step_mode = step_mode
+        self.cpu = self._new_cpu()
         if max_instructions < 1:
             raise ValueError('max-instructions must be positive')
         self.max_instructions = max_instructions
@@ -421,7 +420,6 @@ class Emulator:
 
     def reset_guest(self):
         """Perform a soft hardware reset from the GTK control bar."""
-        from cpu import CPU as _CPU
         self.mem.ram[:0xA0000] = b'\x00' * 0xA0000
         self.video.clear()
         self.kbd.buffer.clear()
@@ -431,8 +429,7 @@ class Emulator:
             self.kbd_ctrl._raw_buffer.clear()
             self.kbd_ctrl._scan_fifo.clear()
             self.kbd_ctrl.irq_pending = False
-        self.cpu = _CPU(self.mem, self.io)
-        self.cpu.step_mode = self.step_mode
+        self.cpu = self._new_cpu()
         boot_disk = self.hard_disk if self.boot_drive == 0x80 else self.disk
         buf = bytearray(512)
         boot_disk.read_sector(0, buf)
@@ -451,6 +448,12 @@ class Emulator:
                 'Running • writes ' + ('enabled' if self.persist else 'discarded'))
         if self.gtk_display is not None:
             self.gtk_display.show_cursor()
+
+    def _new_cpu(self):
+        """Construct the selected CPU backend for initial boot or reset."""
+        cpu = create_cpu(self.cpu_backend, self.mem, self.io)
+        cpu.step_mode = self.step_mode
+        return cpu
 
     def _media_status(self):
         """Return compact GUI media labels, marking guest-dirty devices."""
@@ -1163,6 +1166,9 @@ always protects the bundled image and therefore cannot be used with --persist.''
                          help='GTK font size from 6 to 72 points (default: 18)')
 
     runtime = parser.add_argument_group('runtime')
+    runtime.add_argument('--cpu-backend', choices=BACKENDS, default='python',
+                         help='CPU implementation: python (reference/default) '
+                              'or c (optional native backend)')
     runtime.add_argument('--step', '-s', action='store_true',
                          help='print each instruction and register state')
     runtime.add_argument('--max-instructions', type=int, default=10_000_000,
@@ -1266,6 +1272,7 @@ def main(argv=None):
         print(f"  Boot file: {args.boot}", file=sys.stderr)
     if args.step:
         print(f"  Step mode: ON", file=sys.stderr)
+    print(f"  CPU backend: {args.cpu_backend}", file=sys.stderr)
     if args.gtk:
         print(f"  Display: GTK window", file=sys.stderr)
     elif args.interactive:
@@ -1284,7 +1291,8 @@ def main(argv=None):
                        host_dir_write=args.host_dir_write,
                        host_dir_delete=args.host_dir_delete,
                        host_dir_dos_text=args.host_dir_dos_text,
-                       max_instructions=args.max_instructions)
+                       max_instructions=args.max_instructions,
+                       cpu_backend=args.cpu_backend)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))

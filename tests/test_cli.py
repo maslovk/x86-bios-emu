@@ -31,6 +31,23 @@ def test_dos_shortcut_allows_gtk():
     assert args.interactive
 
 
+def test_cpu_backend_defaults_to_reference_python():
+    _parser, args = parse_args([])
+    assert args.cpu_backend == 'python'
+
+
+def test_cpu_backend_c_is_an_explicit_optional_choice():
+    _parser, args = parse_args(['--cpu-backend', 'c'])
+    assert args.cpu_backend == 'c'
+
+
+def test_emulator_python_backend_is_explicit_and_resettable():
+    emulator = Emulator(enable_hardware=False, cpu_backend='python')
+    assert emulator.cpu.__class__.__module__ == 'cpu'
+    emulator.reset_guest()
+    assert emulator.cpu.__class__.__module__ == 'cpu'
+
+
 @pytest.mark.parametrize('argv,message', [
     (['--boot-hard-disk'], '--boot-hard-disk requires --hard-disk IMG'),
     (['--gtk-font-size', '5'], '--gtk-font-size must be between 6 and 72'),

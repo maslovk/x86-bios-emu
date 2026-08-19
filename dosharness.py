@@ -86,6 +86,9 @@ class DOSHarness:
         hard_disk: optional raw C/4/17 image exposed as BIOS drive 80h.
         host_dir: optional host directory exposed read-only as drive B.
         boot_drive: BIOS drive to boot (00h for floppy A:, 80h for HDD).
+        cpu_backend: CPU implementation name passed to :class:`main.Emulator`.
+            ``python`` is the complete reference backend and default; ``c``
+            is an explicit opt-in for a built native backend.
         writable: when True, the image(s) are copied to a private temp dir
             before booting, so any future writeback (host-side FAT12 writes,
             ``--persist``) can never mutate the repo images.  When False (the
@@ -98,7 +101,7 @@ class DOSHarness:
 
     def __init__(self, image_path=DISK01, image_b=None, hard_disk=None,
                  host_dir=None, host_dir_write=False, boot_drive=0x00,
-                 writable=False, settle_extra=2000):
+                 writable=False, settle_extra=2000, cpu_backend='python'):
         self.image_path = image_path
         self.image_b_path = image_b
         self.hard_disk_path = hard_disk
@@ -107,6 +110,7 @@ class DOSHarness:
         self.boot_drive = boot_drive
         self.writable = writable
         self.settle_extra = settle_extra
+        self.cpu_backend = cpu_backend
 
         # Full scrollback transcript, accumulated by the Video scroll hook.
         self._scrollback = []
@@ -127,7 +131,8 @@ class DOSHarness:
                              floppy_image=load_path, floppy_b=load_path_b,
                              hard_disk=load_path_hd, boot_drive=boot_drive,
                              host_dir=host_dir, host_dir_write=host_dir_write,
-                             persist=host_dir_write)
+                             persist=host_dir_write,
+                             cpu_backend=cpu_backend)
         self.emu.bios.initialize()
         if self.emu.pic:
             self.emu.pic.initialize()

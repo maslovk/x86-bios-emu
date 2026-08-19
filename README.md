@@ -11,6 +11,7 @@ x86-bios-emu/
 ├── video.py           # VGA 80x25 text + I/O ports + COM1 serial + keyboard + disk
 ├── hardware.py        # PIT (8254), PIC (8259A), CMOS RTC (MC146818), Keyboard (i8042)
 ├── fat12.py           # FAT12/FAT16 reader + writer (BPB, FAT, dir, chains, blank-image factory)
+├── cpu_backend.py     # Explicit Python/native CPU backend boundary
 ├── main.py            # Emulator harness + sample boot sector + IRQ dispatch + floppy loader
 ├── gtdisplay.py       # Optional GTK window display (real keyboard capture, CGA colours)
 ├── trace_boot.py      # Boot tracer with INT 13h/INT 10h call logging
@@ -295,6 +296,7 @@ python3 main.py --dos --gtk              # Bundled DOS 3.3 in one GTK command
 python3 main.py --dos --host-dir ./dos-files --gtk  # Read-only host folder as B:
 python3 main.py --dos --host-dir ./DOS_sources/v1.25/source --host-dir-dos-text --gtk
 python3 main.py --dos --host-dir ./dos-files --host-dir-write --persist --gtk
+python3 main.py --dos --cpu-backend python --gtk  # Explicit reference CPU
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 python3 main.py --create-hard-disk harddisk.img --hard-disk-cylinders 306
 # For a larger FAT16-sized image, use: --hard-disk-cylinders 615
@@ -327,9 +329,27 @@ python3 main.py --boot dos3.3.img --step  # Step through DOS 3.3 boot
 | `--create-hard-disk IMG` | Create a blank legacy C/4/17 hard-disk image and exit; refuses to overwrite an existing file |
 | `--hard-disk-cylinders N` | Cylinder count for `--create-hard-disk` (1..1024, default 306; 306 is about 10 MB) |
 | `--boot-hard-disk` | Load the attached hard-disk MBR at 0000:7C00 and boot with DL=80h instead of booting floppy A: |
+| `--cpu-backend {python,c}` | Select the CPU implementation; `python` is the complete reference path and default, while `c` requires the optional native backend |
 | `--persist` | Write guest-modified sectors back to attached floppy/hard-disk images on exit (default off; never use on the shipped repo images) |
 
 The emulator runs for ~1 second, displays the VGA screen, then exits with final CPU state.
+
+### CPU backend separation
+
+The Python CPU remains the reference implementation and the default. All
+normal tests, BIOS callbacks, DOS harnesses, and full-fidelity debugging use
+it unchanged. The `--cpu-backend` boundary lets a native implementation be
+introduced without moving or weakening that path:
+
+```bash
+python3 main.py --dos --cpu-backend python --gtk
+```
+
+The `c` choice is intentionally opt-in. This checkout does not bundle a
+native `c_cpu_native` module yet, so selecting it fails immediately with an
+actionable message rather than silently changing CPU semantics. Future C
+implementations must expose `c_cpu_native.create_cpu(memory, io_ports)` and
+the CPU surface consumed by `main.py`, `bios.py`, and `dosharness.py`.
 
 ## Display modes
 
@@ -516,6 +536,41 @@ python3 main.py --floppy DOS3_3_525/DISK01.IMG --hard-disk hd.img --gtk
 ```
 
 Run `FDISK`, exit, relaunch the emulator, and then run `FORMAT C: /S`.
+
+## Running DOS CPU benchmarks
+
+An optional local copy of Landmark System Speed Test 6.00 is kept under
+`DOS_tools/SPEED600/`. These historical benchmark files are not part of the
+tracked repository; keep their original license and distribution terms. Map
+the folder as drive B: and launch the benchmark from the GTK interface:
+
+```bash
+python3 main.py --dos --host-dir DOS_tools/SPEED600 --gtk
+```
+
+At the DOS prompt, run a short quiet test:
+
+```dos
+B:SPEED600 /B /NV /Q /05
+```
+
+`/B` skips the introductory screen, `/NV` disables the video test, `/Q`
+silences the beeper, and `/05` exits after five seconds. A representative
+run reached the following screen before returning to `A>`:
+
+```text
+CPU Type : Intel 80386DX
+CPU Clock: 0.139 MHz
+FPU Type : None
+Video    : <Not tested>
+```
+
+These values are useful as a compatibility/run-through check, not as a
+calibrated hardware score. The emulator provides a 16-bit real-mode CPU and
+80x25 text VGA rendering, so Landmark's CPU identification, clock estimate,
+and graphical speed bars are approximate or unavailable. The newer
+`SPEEDSYS.EXE` benchmark in `DOS_tools/speedsys/` requires DOS 5+, a 386+,
+VGA, and 4 MB of XMS, so it is not suitable for the bundled DOS 3.3 image.
 
 ## Testing
 

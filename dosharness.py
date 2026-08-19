@@ -260,6 +260,18 @@ class DOSHarness:
 
     # ── CPU stepping ───────────────────────────────────────────────────
 
+    def _execute_cpu_batch(self, budget):
+        """Execute a bounded batch through an optional native backend."""
+        native = getattr(self.cpu, 'execute_many', None)
+        if native is not None and not getattr(self.cpu, 'step_mode', False):
+            return native(budget)
+        executed = 0
+        while executed < budget and not self.cpu.halted:
+            if not self.cpu.execute():
+                break
+            executed += 1
+        return executed
+
     def run_steps(self, n):
         # Keep interrupt/timer servicing bounded while amortizing Python loop
         # overhead for long-running guest programs (MASM is a notable case).
@@ -270,19 +282,24 @@ class DOSHarness:
         while remaining:
             if self.cpu.halted:
                 # HLT is DOS's normal wait primitive for console input. Give
-                # queued keyboard/timer IRQs a chance to wake the guest
-                # before treating the requested step budget as exhausted.
+                # queued keyboard/timer IRQs a chance to wake the guest. A
+                # timer tick is important for native batches because Unicorn
+                # returns from HLT with no instruction count to consume.
+                if self.emu.pit:
+                    self.emu.io.tick(1.0 / 18.2)
                 self._pump()
                 if self.cpu.halted:
-                    break
+                    remaining -= 1
                 continue
-            batch = min(256, remaining)
-            for _ in range(batch):
-                if not self.cpu.execute():
-                    remaining = 0
-                    break
-            remaining -= batch
-            pit += batch
+            native = getattr(self.cpu, 'execute_many', None)
+            batch_limit = getattr(self.cpu, 'native_batch_size', 4096) \
+                if native is not None else 256
+            batch = min(batch_limit, remaining)
+            executed = self._execute_cpu_batch(batch)
+            if not executed:
+                break
+            remaining -= executed
+            pit += executed
             if pit >= 500 and self.emu.pit:
                 pit %= 500
                 self.emu.io.tick(1.0 / 18.2)
@@ -305,10 +322,21 @@ class DOSHarness:
         last_ip = None
         stuck = 0
         while step < max_steps:
+            if self.cpu.halted:
+                if self.emu.pit:
+                    self.emu.io.tick(1.0 / 18.2)
+                self._pump()
+                if self.cpu.halted:
+                    step += 1
+                    continue
             if not self.cpu.halted:
-                if not self.cpu.execute():
+                batch_limit = min(
+                    getattr(self.cpu, 'native_batch_size', 4096),
+                    max_steps - step) if hasattr(self.cpu, 'execute_many') else 1
+                executed = self._execute_cpu_batch(batch_limit)
+                if not executed:
                     break
-                step += 1
+                step += executed
             if step % 10000 == 0 and text in self.vga_str():
                 return step
             if step % 500 == 0 and self.emu.pit:
@@ -420,12 +448,18 @@ class DOSHarness:
         next_prompt_check = 5000
         next_pit_tick = 500
         while step < limit:
-            batch = min(256, limit - step)
-            executed = 0
-            while executed < batch and not self.cpu.halted:
-                if not self.cpu.execute():
-                    break
-                executed += 1
+            if self.cpu.halted:
+                if self.emu.pit:
+                    self.emu.io.tick(1.0 / 18.2)
+                self._pump()
+                if self.cpu.halted:
+                    step += 1
+                    continue
+            batch_limit = min(
+                getattr(self.cpu, 'native_batch_size', 4096)
+                if hasattr(self.cpu, 'execute_many') else 256,
+                limit - step)
+            executed = self._execute_cpu_batch(batch_limit)
             if not executed:
                 break
             step += executed

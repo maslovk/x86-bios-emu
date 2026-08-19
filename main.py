@@ -920,10 +920,16 @@ class Emulator:
         try:
             while True:
                 if not self.cpu.halted:
-                    if not self.cpu.execute():
+                    native = getattr(self.cpu, 'execute_many', None)
+                    if native is not None and not self.step_mode:
+                        executed = native(getattr(
+                            self.cpu, 'native_batch_size', 4096))
+                    else:
+                        executed = 1 if self.cpu.execute() else 0
+                    if not executed:
                         self.stop_reason = 'CPU halted'
                         break
-                    step += 1
+                    step += executed
 
                 if step > self.max_instructions and not self.interactive:
                     self.stop_reason = 'instruction limit reached'

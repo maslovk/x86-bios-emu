@@ -1,10 +1,10 @@
 """CPU backend selection.
 
 The Python :class:`cpu.CPU` implementation is the reference backend and is
-always available.  The optional native backend is deliberately loaded through
-this small factory instead of being imported from the emulator and BIOS code;
-that keeps the Python execution path complete and makes the future C ABI an
-isolated implementation detail.
+always available.  The optional Unicorn-backed native backend is deliberately
+loaded through this small factory instead of being imported from the emulator
+and BIOS code; that keeps the Python execution path complete and the native
+implementation isolated behind one stable CPU factory.
 """
 
 PYTHON_BACKEND = 'python'
@@ -44,8 +44,9 @@ def create_cpu(backend, memory, io_ports):
         import c_cpu_native
     except ImportError as exc:
         raise CPUBackendError(
-            "the C CPU backend is not built; use --cpu-backend python "
-            "for the complete reference implementation") from exc
+            "the C CPU backend is unavailable (install unicorn); use "
+            "--cpu-backend python for the complete reference "
+            "implementation") from exc
 
     factory = getattr(c_cpu_native, 'create_cpu', None)
     if factory is None:

@@ -12,6 +12,7 @@ x86-bios-emu/
 ├── hardware.py        # PIT (8254), PIC (8259A), CMOS RTC (MC146818), Keyboard (i8042)
 ├── fat12.py           # FAT12/FAT16 reader + writer (BPB, FAT, dir, chains, blank-image factory)
 ├── cpu_backend.py     # Explicit Python/native CPU backend boundary
+├── c_cpu_native.py    # Optional Unicorn-backed native 16-bit CPU adapter
 ├── main.py            # Emulator harness + sample boot sector + IRQ dispatch + floppy loader
 ├── gtdisplay.py       # Optional GTK window display (real keyboard capture, CGA colours)
 ├── trace_boot.py      # Boot tracer with INT 13h/INT 10h call logging
@@ -345,11 +346,23 @@ introduced without moving or weakening that path:
 python3 main.py --dos --cpu-backend python --gtk
 ```
 
-The `c` choice is intentionally opt-in. This checkout does not bundle a
-native `c_cpu_native` module yet, so selecting it fails immediately with an
-actionable message rather than silently changing CPU semantics. Future C
-implementations must expose `c_cpu_native.create_cpu(memory, io_ports)` and
-the CPU surface consumed by `main.py`, `bios.py`, and `dosharness.py`.
+The `c` choice is intentionally opt-in and requires the optional `unicorn`
+package from `requirements-dev.txt`:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 main.py --dos --cpu-backend c --gtk
+```
+
+The native backend uses Unicorn's C x86 engine for 16-bit instruction
+execution, while the existing Python BIOS, DOS, and device callbacks remain
+authoritative for interrupts and I/O. This makes it useful for long-running
+guest programs without changing the complete Python reference path. It is
+still experimental: native RAM is shared directly with the emulator, and
+translation blocks are flushed only around interrupts that can modify guest
+code. Native instruction counts are batch-bounded around interrupt hooks, and
+unusual software or hardware may require the Python backend for maximum
+compatibility.
 
 ## Display modes
 

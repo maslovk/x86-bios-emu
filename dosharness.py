@@ -280,7 +280,9 @@ class DOSHarness:
         if self.emu.pic:
             self.emu._check_and_dispatch_irq()
         kc = self.emu.kbd_ctrl
-        if kc and kc.has_data() and not getattr(kc, 'irq_pending', False):
+        if (kc and kc.has_data()
+                and (not getattr(kc, 'irq_pending', False)
+                     or self.emu.io.get_pending_irq() < 0)):
             kc.irq_pending = True
             if self.emu.pic:
                 self.emu.pic.raise_irq(1)

@@ -976,7 +976,9 @@ class Emulator:
                         pass
 
                 # Keyboard controller: inject scan codes → raise IRQ 1
-                if self.kbd_ctrl and self.kbd_ctrl.has_data() and not self.kbd_ctrl.irq_pending:
+                if (self.kbd_ctrl and self.kbd_ctrl.has_data()
+                        and (not self.kbd_ctrl.irq_pending
+                             or self.io.get_pending_irq() < 0)):
                     self.kbd_ctrl.irq_pending = True
                     if self.pic:
                         self.pic.raise_irq(1)

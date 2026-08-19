@@ -79,6 +79,7 @@ class KeyboardController:
 
     def __init__(self):
         self._out_buffer = []       # FIFO of translated ASCII chars
+        self._scan_buffer = []      # matching scan code (or None for ASCII)
         self._out_full = False
         self._in_buffer = None
         self._in_full = False
@@ -118,21 +119,18 @@ class KeyboardController:
         self._in_full = True
 
         if val == 0xAA:
-            self._out_buffer.append(self._self_test_ok)
-            self._out_full = True
+            self._queue_output(self._self_test_ok)
         elif val == 0xAD:
             self.irq_pending = False
         elif val == 0xAE:
             pass  # Enable keyboard interrupt
         elif val == 0xD0:
-            self._out_buffer.append(0x00)
-            self._out_full = True
+            self._queue_output(0x00)
         elif val == 0xD1:
             self._cmd_mode = True
             self._in_full = False
         elif val == 0x20:
-            self._out_buffer.append(0x9D)
-            self._out_full = True
+            self._queue_output(0x9D)
         elif val == 0x60:
             self._cmd_mode = True
             self._in_full = False
@@ -143,19 +141,38 @@ class KeyboardController:
 
     def read_data(self):
         """Read from data port (port 0x60)."""
+        scan, ascii_value = self.read_key_event()
+        # Guest DOS IRQ handlers read the raw 8042 data port rather than
+        # calling INT 16h. Enhanced keys have no ASCII byte, so expose their
+        # set-1 scan code as real hardware does. Printable host injections
+        # and translated scan codes retain the public ASCII behavior.
+        if scan is not None and ascii_value == 0:
+            return scan
+        return ascii_value
+
+    def read_key_event(self):
+        """Return ``(scan_code, ascii)`` while consuming one output byte.
+
+        Normal host-injected ASCII has no scan code and returns ``(None,
+        ascii)``.  Raw/extended scan-code injection preserves the scan code
+        so INT 16h enhanced reads can distinguish arrow and function keys.
+        """
         if self._cmd_mode:
             self._cmd_mode = False
-            val = self._out_buffer.pop(0) if self._out_buffer else 0x00
-            if not self._out_buffer:
-                self._out_full = False
-                self.irq_pending = False
-            return val
-
-        val = self._out_buffer.pop(0) if self._out_buffer else 0x00
+        if self._out_buffer:
+            val = self._out_buffer.pop(0)
+            scan = self._scan_buffer.pop(0)
+        else:
+            val, scan = 0x00, None
         if not self._out_buffer:
             self._out_full = False
             self.irq_pending = False
-        return val
+        return scan, val
+
+    def _queue_output(self, value, scan_code=None):
+        self._out_buffer.append(value & 0xFF)
+        self._scan_buffer.append(scan_code)
+        self._out_full = True
 
     def write_data(self, val):
         """Write to data port (port 0x60)."""
@@ -179,8 +196,7 @@ class KeyboardController:
             if self._out_buffer:
                 self._out_full = True
         elif val == 0xFF:
-            self._out_buffer.append(0xAA)
-            self._out_full = True
+            self._queue_output(0xAA)
 
     def inject_scan_code(self, code):
         """Inject a raw scan code (make 0x00-0x80, break 0x80+)."""
@@ -192,8 +208,15 @@ class KeyboardController:
 
         Bypasses scan code translation — the exact ASCII value is buffered.
         """
-        self._out_buffer.append(ascii_char)
-        self._out_full = True
+        self._queue_output(ascii_char)
+        self.irq_pending = True
+
+    def inject_extended_key(self, scan_code):
+        """Inject a non-ASCII enhanced key (e.g. an arrow key).
+
+        Enhanced BIOS reads return AL=00h and the set-1 scan code in AH.
+        """
+        self._queue_output(0x00, scan_code & 0xFF)
         self.irq_pending = True
 
     def _ascii_to_scan(self, ascii_val):
@@ -247,13 +270,11 @@ class KeyboardController:
                 lo_c = lo if isinstance(lo, int) else ord(lo)
                 hi_c = hi if isinstance(hi, int) else ord(hi)
                 ascii_val = self._apply_modifiers(lo_c, hi_c)
-                self._out_buffer.append(ascii_val)
-                self._out_full = True
+                self._queue_output(ascii_val, code)
                 self.irq_pending = True
                 return  # Only process one char-producing code per call
             else:
-                self._out_buffer.append(code)
-                self._out_full = True
+                self._queue_output(code, code)
                 self.irq_pending = True
                 return
 

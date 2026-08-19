@@ -389,6 +389,24 @@ class TestINT16h:
         cpu = FakeCPU(ax=0x0000); bios.handlers[0x16](cpu)
         assert (cpu.ax & 0xFF) == 0x0D  # CR
 
+    def test_wait_for_extended_key_preserves_scan_code(self):
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        kbd_ctrl.inject_extended_key(0x50)  # Down arrow
+        cpu = FakeCPU(ax=0x1000)  # AH=10h, enhanced read
+        bios.handlers[0x16](cpu)
+        assert cpu.ah == 0x50
+        assert cpu.al == 0x00
+
+    def test_extended_keyboard_probe_92h(self):
+        """AH=92h reports support without consuming a queued key."""
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        kbd_ctrl.inject_key(0x0D)
+        cpu = FakeCPU(ax=0x9218)
+        bios.handlers[0x16](cpu)
+        assert cpu.ah == 0x80
+        assert cpu.al == 0x18
+        assert kbd_ctrl.has_data()
+
     def test_check_key_empty(self, bios_env):
         bios_env.initialize()
         cpu = FakeCPU(ax=0x0100)

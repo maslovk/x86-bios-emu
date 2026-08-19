@@ -287,10 +287,12 @@ class BIOS:
         """
         # Read scan code / ASCII from keyboard controller
         if self.kbd_ctrl:
-            sc = self.kbd_ctrl.read_data()
+            scan, sc = self.kbd_ctrl.read_key_event()
+            if scan is not None:
+                sc = (scan, sc)
         else:
             sc = self.kbd.read_key()
-        if sc:
+        if sc or isinstance(sc, tuple):
             self.kbd.buffer.append(sc)
 
         # Send EOI to PIC
@@ -899,15 +901,20 @@ class BIOS:
             def _take_key():
                 if self.kbd_ctrl and self.kbd_ctrl.has_data():
                     while self.kbd_ctrl.has_data():
-                        ch = self.kbd_ctrl.read_data()
-                        if ch:
-                            self.kbd.buffer.append(ch)
+                        scan, ch = self.kbd_ctrl.read_key_event()
+                        if ch or scan is not None:
+                            self.kbd.buffer.append(
+                                (scan, ch) if scan is not None else ch)
                 if self.kbd.key_pressed():
-                    asc = self.kbd.read_key()
+                    entry = self.kbd.read_key()
+                    if isinstance(entry, tuple):
+                        scan, asc = entry
+                    else:
+                        scan, asc = None, entry
                     if isinstance(asc, str):
                         asc = ord(asc)
                     asc &= 0xFF
-                    sc = _ASCII_TO_SCAN.get(asc, 0)   # best-effort AH scan code
+                    sc = scan if scan is not None else _ASCII_TO_SCAN.get(asc, 0)
                     cpu.ax = (sc << 8) | asc
                     cpu.flags &= ~0x40
                     return True
@@ -937,15 +944,20 @@ class BIOS:
             # fired.  DOS's idle loop polls AH=01, so this would deadlock.
             if self.kbd_ctrl and self.kbd_ctrl.has_data():
                 while self.kbd_ctrl.has_data():
-                    ch = self.kbd_ctrl.read_data()
-                    if ch:
-                        self.kbd.buffer.append(ch)
+                    scan, ch = self.kbd_ctrl.read_key_event()
+                    if ch or scan is not None:
+                        self.kbd.buffer.append(
+                            (scan, ch) if scan is not None else ch)
             if self.kbd.key_pressed():
                 # AH=01 peeks (returns the key in AX but leaves it in the
                 # buffer for AH=00 to consume).  Buffer holds ASCII; put it
                 # in AL and best-effort scan code in AH.
-                key = self.kbd.buffer[0] & 0xFF
-                sc = _ASCII_TO_SCAN.get(key, 0)
+                entry = self.kbd.buffer[0]
+                if isinstance(entry, tuple):
+                    sc, key = entry
+                else:
+                    key = entry & 0xFF
+                    sc = _ASCII_TO_SCAN.get(key, 0)
                 cpu.ax = (sc << 8) | key
                 cpu.flags &= ~0x40         # ZF=0: key available
             else:
@@ -956,6 +968,14 @@ class BIOS:
                 cpu.ax = self.kbd_ctrl.shift_state
             else:
                 cpu.ax = 0
+        elif ah == 0x92:
+            # DOS KEYB/Setup probes extended-keyboard support by invoking the
+            # intentionally undocumented AH=92h function.  IBM-compatible
+            # BIOSes decrement the function number through their dispatch
+            # table and return AH <= 80h when AH=10h-12h are supported.  Do
+            # not consume a queued keystroke here; the caller performs its
+            # actual read with AH=00h/10h after the probe.
+            cpu.ah = 0x80
 
     # ── INT 17h: Printer Services ───────────────────────────────
 

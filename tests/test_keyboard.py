@@ -65,6 +65,16 @@ class TestScanCodeInjection:
         kbd.inject_scan_code(0x1C)  # Enter
         assert kbd.read_data() == 0x0D
 
+    def test_extended_key_preserves_scan_code(self):
+        kbd = KeyboardController()
+        kbd.inject_extended_key(0x50)  # Down arrow
+        assert kbd.read_key_event() == (0x50, 0x00)
+
+    def test_extended_key_data_port_returns_scan_code(self):
+        kbd = KeyboardController()
+        kbd.inject_extended_key(0x50)
+        assert kbd.read_data() == 0x50
+
     def test_backspace(self):
         kbd = KeyboardController()
         kbd.inject_scan_code(0x0E)  # Backspace

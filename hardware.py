@@ -80,6 +80,7 @@ class KeyboardController:
     def __init__(self):
         self._out_buffer = []       # FIFO of translated ASCII chars
         self._scan_buffer = []      # matching scan code (or None for ASCII)
+        self._raw_buffer = []       # host events exposed as raw port bytes
         self._out_full = False
         self._in_buffer = None
         self._in_full = False
@@ -140,13 +141,22 @@ class KeyboardController:
             self._in_full = False
 
     def read_data(self):
-        """Read from data port (port 0x60)."""
-        scan, ascii_value = self.read_key_event()
+        """Read translated ASCII from the controller (test/API helper)."""
+        _scan, ascii_value, _raw = self._read_event()
+        return ascii_value
+
+    def read_port_data(self):
+        """Read the guest-visible byte from port 60h.
+
+        Host-injected keys carry both a convenient ASCII value for the BIOS
+        event path and the raw set-1 scan code that a DOS IRQ09 handler sees.
+        """
+        scan, ascii_value, raw = self._read_event()
         # Guest DOS IRQ handlers read the raw 8042 data port rather than
         # calling INT 16h. Enhanced keys have no ASCII byte, so expose their
         # set-1 scan code as real hardware does. Printable host injections
         # and translated scan codes retain the public ASCII behavior.
-        if scan is not None and ascii_value == 0:
+        if raw and scan is not None:
             return scan
         return ascii_value
 
@@ -157,21 +167,27 @@ class KeyboardController:
         ascii)``.  Raw/extended scan-code injection preserves the scan code
         so INT 16h enhanced reads can distinguish arrow and function keys.
         """
+        scan, value, _raw = self._read_event()
+        return scan, value
+
+    def _read_event(self):
         if self._cmd_mode:
             self._cmd_mode = False
         if self._out_buffer:
             val = self._out_buffer.pop(0)
             scan = self._scan_buffer.pop(0)
+            raw = self._raw_buffer.pop(0)
         else:
-            val, scan = 0x00, None
+            val, scan, raw = 0x00, None, False
         if not self._out_buffer:
             self._out_full = False
             self.irq_pending = False
-        return scan, val
+        return scan, val, raw
 
-    def _queue_output(self, value, scan_code=None):
+    def _queue_output(self, value, scan_code=None, raw=False):
         self._out_buffer.append(value & 0xFF)
         self._scan_buffer.append(scan_code)
+        self._raw_buffer.append(bool(raw))
         self._out_full = True
 
     def write_data(self, val):
@@ -208,7 +224,7 @@ class KeyboardController:
 
         Bypasses scan code translation — the exact ASCII value is buffered.
         """
-        self._queue_output(ascii_char)
+        self._queue_output(ascii_char, self._ascii_to_scan(ascii_char), raw=True)
         self.irq_pending = True
 
     def inject_extended_key(self, scan_code):
@@ -216,7 +232,7 @@ class KeyboardController:
 
         Enhanced BIOS reads return AL=00h and the set-1 scan code in AH.
         """
-        self._queue_output(0x00, scan_code & 0xFF)
+        self._queue_output(0x00, scan_code & 0xFF, raw=True)
         self.irq_pending = True
 
     def _ascii_to_scan(self, ascii_val):

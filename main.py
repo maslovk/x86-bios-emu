@@ -427,6 +427,8 @@ class Emulator:
         self.kbd.buffer.clear()
         if self.kbd_ctrl:
             self.kbd_ctrl._out_buffer.clear()
+            self.kbd_ctrl._scan_buffer.clear()
+            self.kbd_ctrl._raw_buffer.clear()
             self.kbd_ctrl._scan_fifo.clear()
             self.kbd_ctrl.irq_pending = False
         self.cpu = _CPU(self.mem, self.io)

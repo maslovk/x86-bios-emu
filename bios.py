@@ -968,6 +968,14 @@ class BIOS:
                 cpu.ax = self.kbd_ctrl.shift_state
             else:
                 cpu.ax = 0
+        elif ah == 0x12:  # Extended shift/toggle state
+            # Enhanced keyboard callers (including DOS Setup) use AH=12h to
+            # query the left/right modifier and lock state after probing
+            # extended INT 16h support.  This emulator tracks the compatible
+            # aggregate state, which is sufficient for menu navigation.
+            state = self.kbd_ctrl.shift_state if self.kbd_ctrl else 0
+            cpu.ah = state
+            cpu.al = state & 0x70
         elif ah == 0x92:
             # DOS KEYB/Setup probes extended-keyboard support by invoking the
             # intentionally undocumented AH=92h function.  IBM-compatible

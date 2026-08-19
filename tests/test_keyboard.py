@@ -73,7 +73,7 @@ class TestScanCodeInjection:
     def test_extended_key_data_port_returns_scan_code(self):
         kbd = KeyboardController()
         kbd.inject_extended_key(0x50)
-        assert kbd.read_data() == 0x50
+        assert kbd.read_port_data() == 0x50
 
     def test_backspace(self):
         kbd = KeyboardController()
@@ -256,6 +256,11 @@ class TestASCIIInjection:
         kbd = KeyboardController()
         kbd.inject_key(ord('a'))
         assert kbd.read_data() == ord('a')
+
+    def test_host_ascii_injection_exposes_scan_to_guest_port(self):
+        kbd = KeyboardController()
+        kbd.inject_key(ord('a'))
+        assert kbd.read_port_data() == 0x1E
 
     def test_inject_enter(self):
         kbd = KeyboardController()

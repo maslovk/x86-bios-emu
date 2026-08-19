@@ -275,7 +275,7 @@ class IO:
             return 0xFF
         if port == 0x60:  # Keyboard data port
             if self.kbd_ctrl:
-                return self.kbd_ctrl.read_data()
+                return self.kbd_ctrl.read_port_data()
             return self.kbd.read_key()
         if port == 0x61:  # PIT control / speaker
             # Toggle the refresh-check bit on each read so DRAM-refresh

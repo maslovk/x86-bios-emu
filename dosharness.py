@@ -262,7 +262,15 @@ class DOSHarness:
         # batched, so keyboard and PIT latency stays well below one batch.
         pit = 0
         remaining = n
-        while remaining and not self.cpu.halted:
+        while remaining:
+            if self.cpu.halted:
+                # HLT is DOS's normal wait primitive for console input. Give
+                # queued keyboard/timer IRQs a chance to wake the guest
+                # before treating the requested step budget as exhausted.
+                self._pump()
+                if self.cpu.halted:
+                    break
+                continue
             batch = min(256, remaining)
             for _ in range(batch):
                 if not self.cpu.execute():

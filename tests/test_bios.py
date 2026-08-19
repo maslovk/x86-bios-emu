@@ -407,6 +407,15 @@ class TestINT16h:
         assert cpu.al == 0x18
         assert kbd_ctrl.has_data()
 
+    def test_extended_shift_state_12h(self):
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        kbd_ctrl.caps_lock = True
+        kbd_ctrl.num_lock = True
+        cpu = FakeCPU(ax=0x1200)
+        bios.handlers[0x16](cpu)
+        assert cpu.ah & 0x60 == 0x60
+        assert cpu.al & 0x60 == 0x60
+
     def test_check_key_empty(self, bios_env):
         bios_env.initialize()
         cpu = FakeCPU(ax=0x0100)

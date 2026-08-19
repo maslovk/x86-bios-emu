@@ -49,6 +49,8 @@ _REGMAP = {
     'ss': UC_X86_REG_SS,
     'ip': UC_X86_REG_IP,
 }
+_REG_NAMES = tuple(_REGMAP)
+_REG_IDS = tuple(_REGMAP.values()) + (UC_X86_REG_FLAGS,)
 
 
 class CCPU(CPU):
@@ -77,6 +79,7 @@ class CCPU(CPU):
             0, len(self._ram), UC_PROT_ALL,
             ctypes.addressof(self._ram_buffer))
         self._pending_interrupt = None
+        self._last_reg_values = None
 
         self._uc.hook_add(UC_HOOK_INTR, self._on_interrupt)
         self._uc.hook_add(
@@ -87,14 +90,28 @@ class CCPU(CPU):
     # ── State synchronization ──────────────────────────────────────
 
     def _sync_regs_to_uc(self):
-        for name, reg in _REGMAP.items():
-            self._uc.reg_write(reg, getattr(self, name) & 0xFFFF)
-        self._uc.reg_write(UC_X86_REG_FLAGS, self.flags & 0xFFFF)
+        values = tuple([getattr(self, name) & 0xFFFF
+                        for name in _REG_NAMES] + [self.flags & 0xFFFF])
+        previous = self._last_reg_values
+        if previous is None:
+            for reg, value in zip(_REG_IDS, values):
+                self._uc.reg_write(reg, value)
+        else:
+            for reg, value, old in zip(_REG_IDS, values, previous):
+                if value != old:
+                    self._uc.reg_write(reg, value)
+        self._last_reg_values = values
 
     def _sync_regs_from_uc(self):
+        values = []
         for name, reg in _REGMAP.items():
-            setattr(self, name, self._uc.reg_read(reg) & 0xFFFF)
-        self.flags = self._uc.reg_read(UC_X86_REG_FLAGS) & 0xFFFF
+            value = self._uc.reg_read(reg) & 0xFFFF
+            values.append(value)
+            setattr(self, name, value)
+        flags = self._uc.reg_read(UC_X86_REG_FLAGS) & 0xFFFF
+        values.append(flags)
+        self.flags = flags
+        self._last_reg_values = tuple(values)
 
     def _sync_to_uc(self):
         self._sync_regs_to_uc()

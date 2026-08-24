@@ -317,6 +317,7 @@ With the retail `Disk1.img`, `Disk2.img`, and `Disk3.img` files under
 
 ```bash
 python3 install_dos622.py dos622-new.hdd
+python3 install_dos622.py dos622-new.hdd --cpu-backend c  # Force native CPU
 python3 main.py --floppy DOS6_22/Disk1.img \
   --hard-disk dos622-new.hdd --boot-hard-disk --gtk
 ```
@@ -328,6 +329,10 @@ startup configuration—exactly as an interactive floppy installation would.
 Work happens on a private temporary image and is published atomically only after
 FAT16 validation and a hard-disk boot where `VER` must report MS-DOS 6.22.
 Source floppy images are authenticated, hashed again afterward, and never written.
+The installer defaults to `--cpu-backend auto`, which uses the native C-backed
+Unicorn engine when available and applies the selected backend to partitioning,
+Setup, and final boot verification. Use `--cpu-backend python` for the slower
+reference implementation.
 
 ### Options
 | Flag | Description |
@@ -366,7 +371,7 @@ python3 main.py --dos --cpu-backend python --gtk
 ```
 
 The `c` choice is intentionally opt-in and requires the optional `unicorn`
-package from `requirements-dev.txt`:
+and `capstone` packages from `requirements-dev.txt`:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt

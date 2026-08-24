@@ -33,3 +33,19 @@ def test_native_backend_keeps_python_memory_in_sync(memory, io_ports):
 
     assert memory.read_word(0x100) == 0xABCD
     assert cpu.halted
+
+
+def test_native_backend_does_not_treat_f4_branch_offset_as_hlt(
+        memory, io_ports):
+    # XOR AX,AX; JNZ -12. The untaken branch leaves IP immediately after an
+    # F4 displacement byte, which must not be confused with an executed HLT.
+    memory.ram[0x200:0x204] = bytes((0x31, 0xC0, 0x75, 0xF4))
+    cpu = CCPU(memory, io_ports)
+    cpu.cs = cpu.ds = cpu.es = cpu.ss = 0
+    cpu.ip = 0x200
+    cpu.sp = 0x7000
+
+    cpu.execute_many(2)
+
+    assert cpu.ip == 0x204
+    assert not cpu.halted

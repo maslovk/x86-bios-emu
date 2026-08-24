@@ -1,6 +1,7 @@
 """Fast tests for the MS-DOS 6.22 installation driver."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import install_dos622 as installer
@@ -92,6 +93,42 @@ def test_installer_refuses_overwrite_before_touching_media(tmp_path):
 def test_explicit_backend_is_preserved():
     assert choose_backend("python") == "python"
     assert choose_backend("c") == "c"
+
+
+def test_selected_backend_is_used_for_entire_install(tmp_path, monkeypatch):
+    media = SimpleNamespace(
+        disk1=tmp_path / "Disk1.img",
+        paths=tuple(tmp_path / f"Disk{number}.img" for number in range(1, 4)),
+    )
+    used_backends = []
+    monkeypatch.setattr(installer, "resolve_media", lambda _path: media)
+    monkeypatch.setattr(installer, "file_hashes", lambda _paths: {})
+    monkeypatch.setattr(
+        installer, "create_hard_disk_image",
+        lambda path, cylinders: Path(path).touch())
+    monkeypatch.setattr(
+        installer, "_run_partition_stage",
+        lambda _media, _image, backend, _steps, _progress:
+        used_backends.append(("partition", backend)))
+    monkeypatch.setattr(
+        installer, "_run_setup_stage",
+        lambda _media, _image, backend, _steps, _progress:
+        used_backends.append(("setup", backend)))
+    monkeypatch.setattr(
+        installer, "verify_host_image",
+        lambda _image, _cylinders: {"dos_files": 120})
+    monkeypatch.setattr(
+        installer, "verify_guest_boot",
+        lambda _media, _image, backend, _steps:
+        used_backends.append(("verify", backend)))
+    monkeypatch.setattr(installer, "_publish_atomic", lambda *_args, **_kwargs: None)
+
+    install_dos622(
+        tmp_path / "installed.hdd", media_dir=tmp_path,
+        cpu_backend="c", progress=lambda _message: None)
+
+    assert used_backends == [
+        ("partition", "c"), ("setup", "c"), ("verify", "c")]
 
 
 def test_resolve_media_rejects_unknown_same_size_set(tmp_path):

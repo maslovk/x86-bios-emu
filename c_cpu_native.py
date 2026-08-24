@@ -11,7 +11,8 @@ import ctypes
 
 try:
     from unicorn import (Uc, UcError, UC_ARCH_X86, UC_MODE_16,
-                         UC_HOOK_INSN, UC_HOOK_INTR, UC_PROT_ALL)
+                         UC_HOOK_BLOCK, UC_HOOK_INSN, UC_HOOK_INTR,
+                         UC_PROT_ALL)
     from unicorn.x86_const import (
         UC_X86_INS_IN, UC_X86_INS_OUT,
         UC_X86_REG_AX, UC_X86_REG_BX, UC_X86_REG_CX, UC_X86_REG_DX,
@@ -21,6 +22,11 @@ try:
     )
 except ImportError as exc:  # pragma: no cover - exercised by no-dev installs
     raise ImportError('the C backend requires the optional unicorn package') from exc
+
+try:
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_16
+except ImportError as exc:  # pragma: no cover - installed with Unicorn in dev
+    raise ImportError('the C backend requires the optional capstone package') from exc
 
 from cpu import CPU
 
@@ -80,8 +86,11 @@ class CCPU(CPU):
             ctypes.addressof(self._ram_buffer))
         self._pending_interrupt = None
         self._last_reg_values = None
+        self._last_block = None
+        self._decoder = Cs(CS_ARCH_X86, CS_MODE_16)
 
         self._uc.hook_add(UC_HOOK_INTR, self._on_interrupt)
+        self._uc.hook_add(UC_HOOK_BLOCK, self._on_block)
         self._uc.hook_add(
             UC_HOOK_INSN, self._on_in, aux1=UC_X86_INS_IN)
         self._uc.hook_add(
@@ -143,6 +152,32 @@ class CCPU(CPU):
         self._pending_interrupt = number & 0xFF
         uc.emu_stop()
 
+    def _on_block(self, uc, address, size, user_data=None):
+        self._last_block = (address, size)
+
+    def _stopped_on_hlt(self):
+        """Return whether the last executed instruction was actually HLT.
+
+        Unicorn advances IP and returns normally for both HLT and an exhausted
+        instruction budget. Looking only at the byte before IP is ambiguous:
+        an immediate or branch displacement can also be F4h. The last basic
+        block provides a trusted decoding boundary, allowing Capstone to
+        identify the instruction that ended at the current linear address.
+        """
+        if self._last_block is None:
+            return False
+        current = ((self.cs << 4) + self.ip) & 0xFFFFF
+        if self._ram[(current - 1) & 0xFFFFF] != 0xF4:
+            return False
+        address, size = self._last_block
+        if address + size > len(self._ram):
+            return False
+        code = bytes(self._ram[address:address + size])
+        for instruction in self._decoder.disasm(code, address):
+            if ((instruction.address + instruction.size) & 0xFFFFF) == current:
+                return instruction.mnemonic == 'hlt'
+        return False
+
     def _on_in(self, uc, port, size, value, user_data=None):
         if size == 2:
             return self.io.inw(port) & 0xFFFF
@@ -163,6 +198,7 @@ class CCPU(CPU):
             return 0
         count = min(int(count), self.max_insns - self.insn_count)
         self._pending_interrupt = None
+        self._last_block = None
         self._sync_to_uc()
         start = ((self.cs << 4) + self.ip) & 0xFFFFF
         try:
@@ -190,12 +226,10 @@ class CCPU(CPU):
                 self._uc.ctl_flush_tb()
         else:
             self._sync_from_uc()
-            # Unicorn returns from HLT with IP after the instruction.  Detect
-            # it without a per-instruction code hook so normal blocks stay in
-            # native code.
-            prev = ((self.cs << 4) + self.ip - 1) & 0xFFFFF
-            if self._ram[prev] == 0xF4:
-                self._sync_from_uc()
+            # A basic-block hook is substantially cheaper than a Python
+            # callback for every instruction and avoids mistaking operand
+            # bytes equal to F4h for HLT.
+            if self._stopped_on_hlt():
                 self.halted = True
 
         # Unicorn's count is the requested architectural budget.  Interrupts

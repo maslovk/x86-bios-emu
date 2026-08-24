@@ -44,7 +44,8 @@ def create_cpu(backend, memory, io_ports):
         import c_cpu_native
     except ImportError as exc:
         raise CPUBackendError(
-            "the C CPU backend is unavailable (install unicorn); use "
+            "the C CPU backend is unavailable (install unicorn and "
+            "capstone); use "
             "--cpu-backend python for the complete reference "
             "implementation") from exc
 

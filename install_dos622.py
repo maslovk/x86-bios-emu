@@ -228,10 +228,10 @@ def _run_partition_stage(media, work_image, backend, max_steps, progress):
         harness.cleanup()
 
 
-def _run_setup_stage(media, work_image, max_steps, progress):
+def _run_setup_stage(media, work_image, backend, max_steps, progress):
     """Resume Microsoft Setup and perform its authentic three-disk install."""
     progress("Restarting Microsoft Setup to install MS-DOS onto C:")
-    harness = _new_harness(media, work_image, "python")
+    harness = _new_harness(media, work_image, backend)
     current_disk = 1
     try:
         for _ in range(32):
@@ -377,13 +377,12 @@ def install_dos622(output, media_dir=None, cylinders=DEFAULT_CYLINDERS,
     work_image = work_dir / "dos622-working.hdd"
     try:
         create_hard_disk_image(str(work_image), cylinders=cylinders)
-        progress(f"Partition CPU backend: {backend}")
+        progress(f"CPU backend: {backend}")
         _run_partition_stage(media, work_image, backend, max_steps, progress)
-        progress("Using the reference CPU for Microsoft Setup")
-        _run_setup_stage(media, work_image, max_steps, progress)
+        _run_setup_stage(media, work_image, backend, max_steps, progress)
         details = verify_host_image(work_image, cylinders)
         progress("Host-side FAT16 verification passed")
-        verify_guest_boot(media, work_image, "python", max_steps)
+        verify_guest_boot(media, work_image, backend, max_steps)
         progress("Guest boot verification passed")
         if file_hashes(media.paths) != before:
             raise InstallError("one or more source installation disks changed")
@@ -414,7 +413,7 @@ def build_parser():
     parser.add_argument("--cylinders", type=int, default=DEFAULT_CYLINDERS,
                         help="C/4/17 hard-disk cylinders (default: 615)")
     parser.add_argument("--cpu-backend", choices=("auto", "python", "c"),
-                        default="auto", help="partition CPU backend")
+                        default="auto", help="CPU backend for the full install")
     parser.add_argument("--max-steps", type=int, default=20_000_000,
                         help="instruction budget per Setup state")
     parser.add_argument("--force", action="store_true",

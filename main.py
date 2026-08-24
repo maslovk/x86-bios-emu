@@ -441,7 +441,10 @@ class Emulator:
             self.kbd_ctrl._out_buffer.clear()
             self.kbd_ctrl._scan_buffer.clear()
             self.kbd_ctrl._raw_buffer.clear()
+            self.kbd_ctrl._bios_key_buffer.clear()
+            self.kbd_ctrl._state_buffer.clear()
             self.kbd_ctrl._scan_fifo.clear()
+            self.kbd_ctrl._irq_port_event = None
             self.kbd_ctrl.irq_pending = False
         self.cpu = self._new_cpu()
         boot_disk = self.hard_disk if self.boot_drive == 0x80 else self.disk
@@ -749,6 +752,8 @@ class Emulator:
         if irq < 0:
             return False
         vector = self.io.get_irq_vector(irq)
+        if irq == 1 and self.kbd_ctrl:
+            self.kbd_ctrl.begin_irq()
         # Any delivered interrupt resumes a CPU halted by HLT.
         self.cpu.halted = False
         # Push FLAGS, CS, IP and jump to handler
@@ -762,6 +767,16 @@ class Emulator:
         # Pop IP, CS, FLAGS (return to interrupted code)
         if not self.cpu.int_no_return:
             self._finish_interrupt_return(saved_flags)
+        return True
+
+    def _schedule_keyboard_irq(self):
+        """Raise IRQ 1 for queued controller data without claiming another IRQ."""
+        if (not self.kbd_ctrl or not self.pic
+                or not self.kbd_ctrl.has_data()
+                or self.pic.is_irq_pending(1)):
+            return False
+        self.kbd_ctrl.irq_pending = True
+        self.pic.raise_irq(1)
         return True
 
     def _dispatch_hardware_interrupt(self, vector):
@@ -1013,12 +1028,7 @@ class Emulator:
                         pass
 
                 # Keyboard controller: inject scan codes → raise IRQ 1
-                if (self.kbd_ctrl and self.kbd_ctrl.has_data()
-                        and (not self.kbd_ctrl.irq_pending
-                             or self.io.get_pending_irq() < 0)):
-                    self.kbd_ctrl.irq_pending = True
-                    if self.pic:
-                        self.pic.raise_irq(1)
+                self._schedule_keyboard_irq()
 
                 # Detect infinite loops
                 cur_ip = (self.cpu.cs << 4) + self.cpu.ip

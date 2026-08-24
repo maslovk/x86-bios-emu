@@ -60,14 +60,18 @@ class KeyboardController:
         0x60  Data port (read scan code / ASCII, write command/data)
         0x64  Status/command port (read status, write command)
 
-    Generates IRQ 1 when a character is available in the output buffer.
+    Generates IRQ 1 for every physical scan-code byte, including prefixes,
+    modifiers, and break codes, as well as translated key events.
     Tracks shift/Ctrl/Alt/CapsLock/NumLock/ScrollLock state.
     """
 
     def __init__(self):
-        self._out_buffer = []       # FIFO of translated ASCII chars
+        self._out_buffer = []       # FIFO of controller output bytes/events
         self._scan_buffer = []      # matching scan code (or None for ASCII)
         self._raw_buffer = []       # host events exposed as raw port bytes
+        self._bios_key_buffer = []  # True only for BIOS-bufferable key makes
+        self._state_buffer = []     # modifier-state snapshot for each byte
+        self._irq_port_event = None  # byte read by a guest IRQ 1 handler
         self._out_full = False
         self._in_buffer = None
         self._in_full = False
@@ -134,11 +138,17 @@ class KeyboardController:
             self._in_full = False
         else:
             self._in_full = False
+        # Commands are handled synchronously, so the controller has consumed
+        # its input byte before the guest can poll status port 64h again.
+        self._in_full = False
 
     def read_data(self):
         """Read translated ASCII from the controller (test/API helper)."""
-        _scan, ascii_value, _raw = self._read_event()
-        return ascii_value
+        while self._out_buffer:
+            _scan, ascii_value, _raw, bios_key, _state = self._read_event()
+            if bios_key is not False:
+                return ascii_value
+        return 0x00
 
     def read_port_data(self):
         """Read the guest-visible byte from port 60h.
@@ -146,7 +156,9 @@ class KeyboardController:
         Host-injected keys carry both a convenient ASCII value for the BIOS
         event path and the raw set-1 scan code that a DOS IRQ09 handler sees.
         """
-        scan, ascii_value, raw = self._read_event()
+        event = self._read_event()
+        self._irq_port_event = event
+        scan, ascii_value, raw, _bios_key, _state = event
         # Guest DOS IRQ handlers read the raw 8042 data port rather than
         # calling INT 16h. Enhanced keys have no ASCII byte, so expose their
         # set-1 scan code as real hardware does. Printable host injections
@@ -162,8 +174,29 @@ class KeyboardController:
         Raw/extended injection preserves the supplied scan code so INT 16h
         can distinguish modifier chords, arrows, and function keys.
         """
-        scan, value, _raw = self._read_event()
-        return scan, value
+        while self._out_buffer:
+            scan, value, _raw, bios_key, _state = self._read_event()
+            if bios_key is not False:
+                return scan, value
+        return None, 0x00
+
+    def read_bios_event(self, replay_port=False):
+        """Consume one hardware event for the built-in IRQ 1 handler.
+
+        The third result says whether the event is a key make that belongs in
+        the BIOS type-ahead buffer. Prefixes, modifiers, and break bytes still
+        raise IRQ 1 but must not become characters returned by INT 16h.
+        """
+        if replay_port and self._irq_port_event is not None:
+            scan, value, _raw, bios_key, state = self._irq_port_event
+            self._irq_port_event = None
+        else:
+            scan, value, _raw, bios_key, state = self._read_event()
+        return scan, value, bios_key is True, state[0], state[1], state[2]
+
+    def begin_irq(self):
+        """Start a new IRQ 1 delivery and discard any unchained port read."""
+        self._irq_port_event = None
 
     def _read_event(self):
         if self._cmd_mode:
@@ -172,17 +205,24 @@ class KeyboardController:
             val = self._out_buffer.pop(0)
             scan = self._scan_buffer.pop(0)
             raw = self._raw_buffer.pop(0)
+            bios_key = self._bios_key_buffer.pop(0)
+            state = self._state_buffer.pop(0)
         else:
-            val, scan, raw = 0x00, None, False
+            val, scan, raw, bios_key = 0x00, None, False, None
+            state = (self.shift_state, self.extended_shift_state,
+                     self.bios_flags_3)
         if not self._out_buffer:
             self._out_full = False
             self.irq_pending = False
-        return scan, val, raw
+        return scan, val, raw, bios_key, state
 
-    def _queue_output(self, value, scan_code=None, raw=False):
+    def _queue_output(self, value, scan_code=None, raw=False, bios_key=None):
         self._out_buffer.append(value & 0xFF)
         self._scan_buffer.append(scan_code)
         self._raw_buffer.append(bool(raw))
+        self._bios_key_buffer.append(bios_key)
+        self._state_buffer.append(
+            (self.shift_state, self.extended_shift_state, self.bios_flags_3))
         self._out_full = True
 
     def write_data(self, val):
@@ -219,7 +259,8 @@ class KeyboardController:
 
         Bypasses scan code translation — the exact ASCII value is buffered.
         """
-        self._queue_output(ascii_char, self._ascii_to_scan(ascii_char), raw=True)
+        self._queue_output(ascii_char, self._ascii_to_scan(ascii_char),
+                           raw=True, bios_key=True)
         self.irq_pending = True
 
     def inject_extended_key(self, scan_code):
@@ -227,7 +268,7 @@ class KeyboardController:
 
         Enhanced BIOS reads return AL=00h and the set-1 scan code in AH.
         """
-        self._queue_output(0x00, scan_code & 0xFF, raw=True)
+        self._queue_output(0x00, scan_code & 0xFF, raw=True, bios_key=True)
         self.irq_pending = True
 
     def _ascii_to_scan(self, ascii_val):
@@ -260,18 +301,24 @@ class KeyboardController:
 
             if code == 0xE0:
                 self._ext_prefix = True
-                continue
+                self._queue_output(0, 0xE0, raw=True, bios_key=False)
+                self.irq_pending = True
+                return
 
             extended = self._ext_prefix
             self._ext_prefix = False
 
             if code & 0x80:
                 self._handle_modifier_release(code & 0x7F, extended)
-                continue
+                self._queue_output(0, code, raw=True, bios_key=False)
+                self.irq_pending = True
+                return
 
             if code in _MOD_KEYS:
                 self._handle_modifier_make(code, extended)
-                continue
+                self._queue_output(0, code, raw=True, bios_key=False)
+                self.irq_pending = True
+                return
 
             if not extended and code in _FUNCTION_KEYS:
                 scan_code = code
@@ -288,7 +335,7 @@ class KeyboardController:
                     scan_code = 0x89 + (code - 0x57)
                 elif self.shift:
                     scan_code = 0x87 + (code - 0x57)
-                self._queue_output(0, scan_code, raw=True)
+                self._queue_output(0, scan_code, raw=True, bios_key=True)
                 self.irq_pending = True
                 return
 
@@ -302,11 +349,11 @@ class KeyboardController:
                 lo_c = lo if isinstance(lo, int) else ord(lo)
                 hi_c = hi if isinstance(hi, int) else ord(hi)
                 ascii_val = self._apply_modifiers(lo_c, hi_c, code)
-                self._queue_output(ascii_val, code, raw=True)
+                self._queue_output(ascii_val, code, raw=True, bios_key=True)
                 self.irq_pending = True
                 return  # Only process one char-producing code per call
             else:
-                self._queue_output(0, code, raw=True)
+                self._queue_output(0, code, raw=True, bios_key=True)
                 self.irq_pending = True
                 return
 
@@ -447,6 +494,18 @@ class KeyboardController:
             state |= 0x20
         if self.caps_pressed:
             state |= 0x40
+        return state
+
+    @property
+    def bios_flags_3(self):
+        """Enhanced-keyboard flags stored in the BDA at 0040:0096."""
+        state = 0x10  # Enhanced 101/102-key keyboard installed
+        if self.right_ctrl:
+            state |= 0x04
+        if self.right_alt:
+            state |= 0x08
+        if self._ext_prefix:
+            state |= 0x02
         return state
 
 
@@ -595,6 +654,7 @@ class PIC:
         for i in range(8):
             if self.ims & (1 << i):
                 self.ims &= ~(1 << i)
+                self.irr &= ~(1 << i)
                 break
 
     def send_eoi(self, irq):
@@ -616,6 +676,15 @@ class PIC:
             i = irq - 8
             self.slave_irr |= (1 << i)
             self.irr |= (1 << self.cascade_irq)
+
+    def is_irq_pending(self, irq):
+        """Return whether *irq* is requested or in service, without claiming it."""
+        if not 0 <= irq < 16:
+            raise ValueError("IRQ must be in range 0..15")
+        if irq < 8:
+            return bool((self.irr | self.ims) & (1 << irq))
+        bit = 1 << (irq - 8)
+        return bool((self.slave_irr | self.slave_ims) & bit)
 
     def get_highest_irq(self):
         slave_pending = self.slave_irr & ~self.slave_mask

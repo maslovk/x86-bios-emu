@@ -50,10 +50,12 @@ class TestDOS5Boot:
 
     def test_enter_advances_to_configuration(self):
         h = self.boot_to_welcome()
-        h.inject_string('\r')
-        h.wait_for('determining your system configuration',
-                   max_steps=6_000_000)
-        assert 'determining your system configuration' in h.vga_str()
+        target = 'Setup has determined'
+        h.inject_background(
+            '\r', interval=0.05, repeat=30,
+            stop_when_absent='Welcome to Setup')
+        h.wait_for(target, max_steps=6_000_000)
+        assert target in h.vga_str()
 
     def test_setup_flows_to_install_screen(self):
         """Drive Setup past the configuration phase into the install setup.
@@ -64,11 +66,16 @@ class TestDOS5Boot:
         DOSHarness.inject_background).
         """
         h = self.boot_to_welcome()
-        h.inject_string('\r')
-        h.wait_for('determining your system configuration',
-                   max_steps=6_000_000)
-        h.inject_background('\r', interval=0.05, repeat=30)
-        h.wait_for('now being set up', max_steps=10_000_000)
+        config_target = 'Setup has determined'
+        h.inject_background(
+            '\r', interval=0.05, repeat=30,
+            stop_when_absent='Welcome to Setup')
+        h.wait_for(config_target, max_steps=6_000_000)
+        install_target = 'now being set up'
+        h.inject_background(
+            '\r', interval=0.05, repeat=30,
+            stop_when=install_target)
+        h.wait_for(install_target, max_steps=10_000_000)
         screen = h.vga_str()
         assert 'now being set up' in screen
         assert 'Bad or missing Command Interpreter' not in screen

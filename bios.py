@@ -160,6 +160,12 @@ class BIOS:
         # Equipment flag word (matches INT 11h; real layout: 40:10).
         self.mem.write_word(bda + 0x10, self._equipment_word())
         self.mem.write_word(bda + 0x13, 640)  # Conventional memory (KB, word)
+        self._sync_keyboard_bda()
+        # Standard 16-word BIOS keyboard ring buffer at 40:1E..3D.
+        self.mem.write_word(bda + 0x1A, 0x001E)  # Head
+        self.mem.write_word(bda + 0x1C, 0x001E)  # Tail
+        self.mem.write_word(bda + 0x80, 0x001E)  # Buffer start
+        self.mem.write_word(bda + 0x82, 0x003E)  # Buffer end (exclusive)
         # Cursor position at 0x50, 0x51
         self.mem.write_byte(bda + 0x50, 0)       # Cursor row
         self.mem.write_byte(bda + 0x51, 0)       # Cursor col
@@ -171,6 +177,42 @@ class BIOS:
                             1 if self.hard_disk is not None else 0)
         # Sector size
         self.mem.write_word(bda + 0x7D, 512)     # Sector size
+
+    def _sync_keyboard_bda(self, shift_state=None, extended_state=None,
+                           flags_3=None):
+        """Mirror BIOS keyboard flags at 40:17, 40:18, and 40:96."""
+        if shift_state is None:
+            shift_state = self.kbd_ctrl.shift_state if self.kbd_ctrl else 0
+        if extended_state is None:
+            extended_state = (
+                self.kbd_ctrl.extended_shift_state if self.kbd_ctrl else 0)
+        if flags_3 is None:
+            flags_3 = self.kbd_ctrl.bios_flags_3 if self.kbd_ctrl else 0
+        self.mem.write_byte(0x00417, shift_state)
+        # Flags byte 2 contains left Ctrl/Alt and physically depressed lock
+        # keys. Right Ctrl/Alt live in enhanced-keyboard flags byte 3.
+        self.mem.write_byte(0x00418, extended_state & 0x73)
+        self.mem.write_byte(0x00496, flags_3)
+
+    def _read_bda_keyboard_key(self, consume=False):
+        """Peek or consume one AX-style key from the BIOS BDA ring buffer."""
+        head = self.mem.read_word(0x0041A)
+        tail = self.mem.read_word(0x0041C)
+        if head == tail:
+            return None
+        start = self.mem.read_word(0x00480)
+        end = self.mem.read_word(0x00482)
+        if not (0x001E <= start < end <= 0x0100
+                and start <= head < end and not (head & 1)
+                and start <= tail < end and not (tail & 1)):
+            return None
+        key = self.mem.read_word(0x00400 + head)
+        if consume:
+            head += 2
+            if head >= end:
+                head = start
+            self.mem.write_word(0x0041A, head)
+        return key
 
     def _setup_diskette_tables(self):
         # INT 1Eh points at the BIOS diskette parameter table. DOS boot sectors
@@ -287,9 +329,13 @@ class BIOS:
         """
         # Read scan code / ASCII from keyboard controller
         if self.kbd_ctrl:
-            scan, sc = self.kbd_ctrl.read_key_event()
-            if scan is not None:
+            scan, sc, bufferable, shift_state, extended_state, flags_3 = \
+                self.kbd_ctrl.read_bios_event(replay_port=True)
+            self._sync_keyboard_bda(shift_state, extended_state, flags_3)
+            if bufferable and scan is not None:
                 sc = (scan, sc)
+            elif not bufferable:
+                sc = None
         else:
             sc = self.kbd.read_key()
         if sc or isinstance(sc, tuple):
@@ -948,8 +994,11 @@ class BIOS:
             def _take_key():
                 if self.kbd_ctrl and self.kbd_ctrl.has_data():
                     while self.kbd_ctrl.has_data():
-                        scan, ch = self.kbd_ctrl.read_key_event()
-                        if ch or scan is not None:
+                        (scan, ch, bufferable, shift_state, extended_state,
+                         flags_3) = self.kbd_ctrl.read_bios_event()
+                        self._sync_keyboard_bda(
+                            shift_state, extended_state, flags_3)
+                        if bufferable:
                             self.kbd.buffer.append(
                                 (scan, ch) if scan is not None else ch)
                 if self.kbd.key_pressed():
@@ -963,6 +1012,11 @@ class BIOS:
                     asc &= 0xFF
                     sc = scan if scan is not None else _ASCII_TO_SCAN.get(asc, 0)
                     cpu.ax = (sc << 8) | asc
+                    cpu.flags &= ~0x40
+                    return True
+                entry = self._read_bda_keyboard_key(consume=True)
+                if entry is not None:
+                    cpu.ax = entry
                     cpu.flags &= ~0x40
                     return True
                 return False
@@ -991,8 +1045,11 @@ class BIOS:
             # fired.  DOS's idle loop polls AH=01, so this would deadlock.
             if self.kbd_ctrl and self.kbd_ctrl.has_data():
                 while self.kbd_ctrl.has_data():
-                    scan, ch = self.kbd_ctrl.read_key_event()
-                    if ch or scan is not None:
+                    (scan, ch, bufferable, shift_state, extended_state,
+                     flags_3) = self.kbd_ctrl.read_bios_event()
+                    self._sync_keyboard_bda(
+                        shift_state, extended_state, flags_3)
+                    if bufferable:
                         self.kbd.buffer.append(
                             (scan, ch) if scan is not None else ch)
             if self.kbd.key_pressed():
@@ -1008,23 +1065,23 @@ class BIOS:
                 cpu.ax = (sc << 8) | key
                 cpu.flags &= ~0x40         # ZF=0: key available
             else:
-                cpu.ax = 0
-                cpu.flags |= 0x40         # ZF=1: no key
+                entry = self._read_bda_keyboard_key()
+                if entry is not None:
+                    cpu.ax = entry
+                    cpu.flags &= ~0x40     # ZF=0: key available
+                else:
+                    cpu.ax = 0
+                    cpu.flags |= 0x40      # ZF=1: no key
         elif ah == 0x02:  # Shift state
-            if self.kbd_ctrl:
-                cpu.ax = self.kbd_ctrl.shift_state
-            else:
-                cpu.ax = 0
+            cpu.ax = self.mem.read_byte(0x00417)
         elif ah == 0x12:  # Extended shift/toggle state
             # Enhanced keyboard callers (including DOS Setup) use AH=12h to
             # query left/right modifier state. AL is the same legacy flag
             # byte returned by AH=02h; AH distinguishes left/right Ctrl/Alt
             # and reports whether each lock key is physically depressed.
-            if self.kbd_ctrl:
-                cpu.al = self.kbd_ctrl.shift_state
-                cpu.ah = self.kbd_ctrl.extended_shift_state
-            else:
-                cpu.ax = 0
+            cpu.al = self.mem.read_byte(0x00417)
+            cpu.ah = (self.mem.read_byte(0x00418) & 0x73) | \
+                (self.mem.read_byte(0x00496) & 0x0C)
         elif ah == 0x92:
             # DOS KEYB/Setup probes extended-keyboard support by invoking the
             # intentionally undocumented AH=92h function.  IBM-compatible

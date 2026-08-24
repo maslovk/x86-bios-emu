@@ -55,6 +55,18 @@ def test_alt_f_reaches_bios_as_alt_key_event():
     assert controller.alt is False
 
 
+def test_standalone_alt_emits_physical_make_and_break():
+    display = make_display()
+    scans = []
+    display.on_scan_code = scans.append
+    gdk = display._Gdk
+
+    assert display._on_key_press(None, event(gdk.KEY_Alt_L))
+    assert display._on_key_release(None, event(gdk.KEY_Alt_L))
+
+    assert scans == [0x38, 0xB8]
+
+
 def test_f5_is_a_function_key_not_a_text_macro():
     display = make_display()
     scans = []

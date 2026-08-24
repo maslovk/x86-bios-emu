@@ -311,13 +311,7 @@ class DOSHarness:
     def _pump(self):
         if self.emu.pic:
             self.emu._check_and_dispatch_irq()
-        kc = self.emu.kbd_ctrl
-        if (kc and kc.has_data()
-                and (not getattr(kc, 'irq_pending', False)
-                     or self.emu.io.get_pending_irq() < 0)):
-            kc.irq_pending = True
-            if self.emu.pic:
-                self.emu.pic.raise_irq(1)
+        self.emu._schedule_keyboard_irq()
 
     def wait_for(self, text, max_steps=6_000_000):
         step = 0
@@ -367,7 +361,8 @@ class DOSHarness:
             self.emu.kbd_ctrl.inject_key(ord(ch))
             self.run_steps(delay)
 
-    def inject_background(self, s, interval=0.05, repeat=1):
+    def inject_background(self, s, interval=0.05, repeat=1, stop_when=None,
+                          stop_when_absent=None):
         """Start a background thread that re-injects ``s`` while stepping.
 
         Guests with a drain-then-block keyboard discipline (MS-DOS 5 Setup
@@ -379,15 +374,29 @@ class DOSHarness:
         the CPU spinning.  Keys landing in a drain window are discarded and
         re-injected on the next repeat.
 
-        Returns the started thread (daemon; callers keep stepping in the
-        main thread).
+        If ``stop_when`` is supplied, injection stops once that text appears
+        on the VGA screen. If ``stop_when_absent`` is supplied, it stops once
+        text that was present disappears. Returns the started thread (daemon;
+        callers keep stepping in the main thread).
         """
         import threading
+
+        def should_stop():
+            if not stop_when and not stop_when_absent:
+                return False
+            screen = self.vga_str()
+            return ((stop_when and stop_when in screen)
+                    or (stop_when_absent
+                        and stop_when_absent not in screen))
 
         def worker():
             for _ in range(repeat):
                 for ch in s:
+                    if should_stop():
+                        return
                     time.sleep(interval)
+                    if should_stop():
+                        return
                     self.emu.kbd_ctrl.inject_key(ord(ch))
         t = threading.Thread(target=worker, daemon=True)
         t.start()

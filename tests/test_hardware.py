@@ -125,6 +125,15 @@ class TestPIC:
         assert pic.slave_irr & 0x01
         assert pic.irr & (1 << 2)
 
+    def test_pending_query_does_not_claim_irq(self):
+        pic = PIC()
+        pic.raise_irq(0)
+
+        assert pic.is_irq_pending(0) is True
+        assert pic.is_irq_pending(1) is False
+        assert pic.irr == 0x01
+        assert pic.ims == 0
+
     def test_get_highest_irq_unmasked(self):
         pic = PIC()
         pic.raise_irq(0)
@@ -153,6 +162,16 @@ class TestPIC:
         pic.send_eoi(0)
         assert not (pic.ims & 0x01)
         assert not (pic.irr & 0x01)
+
+    def test_port_eoi_retires_request_and_service_bits(self):
+        pic = PIC()
+        pic.raise_irq(1)
+        assert pic.get_highest_irq() == 1
+
+        pic.write_master(0x20, 0x20)
+
+        assert not pic.is_irq_pending(1)
+        assert pic.get_highest_irq() == -1
 
     def test_get_vector_master(self):
         pic = PIC()

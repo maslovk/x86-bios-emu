@@ -100,12 +100,13 @@ class TestScanCodeInjection:
         kbd.inject_scan_code(0x01)  # Escape
         assert kbd.read_data() == 0x1B
 
-    def test_break_code_no_output(self):
-        """Break codes (key release) should not produce output."""
+    def test_break_code_is_raw_hardware_event_not_bios_key(self):
         kbd = KeyboardController()
         kbd.inject_scan_code(0x1E)  # 'a' make
         assert kbd.read_data() == ord('a')
         kbd.inject_scan_code(0x9E)  # 'a' break (0x1E | 0x80)
+        assert kbd.has_data() is True
+        assert kbd.read_port_data() == 0x9E
         assert kbd.has_data() is False
 
     def test_unknown_scan_code_is_non_ascii(self):
@@ -517,7 +518,13 @@ class TestPortIO:
     def test_enable_irq(self):
         kbd = KeyboardController()
         kbd.write_command(0xAE)  # Enable keyboard IRQ
-        # Should not crash
+        assert not (kbd.read_status() & 0x02)
+
+    @pytest.mark.parametrize('command', [0xAA, 0xAD, 0xAE, 0xD0, 0x20])
+    def test_completed_command_clears_input_buffer_full(self, command):
+        kbd = KeyboardController()
+        kbd.write_command(command)
+        assert not (kbd.read_status() & 0x02)
 
     def test_read_input_port(self):
         kbd = KeyboardController()
@@ -573,19 +580,47 @@ class TestIRQGeneration:
         kbd.read_data()
         assert kbd.irq_pending is False
 
-    def test_irq_not_set_on_break(self):
-        """Break codes should not set IRQ."""
+    def test_irq_set_on_break(self):
         kbd = KeyboardController()
         kbd.inject_scan_code(0x1E)  # Make
         kbd.read_data()  # Clear
         kbd.inject_scan_code(0x9E)  # Break
-        assert kbd.irq_pending is False
+        assert kbd.irq_pending is True
 
-    def test_irq_not_set_on_modifier(self):
-        """Modifier make codes should not set IRQ."""
+    def test_irq_set_on_modifier(self):
         kbd = KeyboardController()
         kbd.inject_scan_code(0x2A)  # Shift make
-        assert kbd.irq_pending is False
+        assert kbd.irq_pending is True
+
+    def test_standalone_alt_make_and_break_reach_data_port(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x38)
+        assert kbd.read_port_data() == 0x38
+        kbd.inject_scan_code(0xB8)
+        assert kbd.read_port_data() == 0xB8
+
+    def test_e0_prefix_is_its_own_irq_event(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x38)
+
+        assert kbd.read_port_data() == 0xE0
+        assert kbd.read_port_data() == 0x38
+
+    def test_chained_bios_handler_reuses_irq_port_byte(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x38)  # Left Alt make
+        kbd.inject_scan_code(0x21)  # F make
+
+        kbd.begin_irq()
+        assert kbd.read_port_data() == 0x38
+        event = kbd.read_bios_event(replay_port=True)
+        assert event[:3] == (0x38, 0, False)
+        assert event[3] & 0x08
+
+        # Replaying the IRQ-latched byte must not consume the next key.
+        kbd.begin_irq()
+        assert kbd.read_port_data() == 0x21
 
 
 class TestExtendedScanCodes:
@@ -634,4 +669,5 @@ class TestMultipleKeys:
         kbd.inject_scan_code(0x9F)  # 's' break
         assert kbd.read_data() == ord('a')
         assert kbd.read_data() == ord('s')
+        assert kbd.read_key_event() == (None, 0)
         assert kbd.has_data() is False

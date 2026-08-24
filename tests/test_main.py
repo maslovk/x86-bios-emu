@@ -140,6 +140,32 @@ class TestEmulatorIntegration:
         assert emu.cpu.halted is False
         assert emu.mem.read_dword(0x046C) == (before + 1) & 0xFFFFFFFF
 
+    def test_timer_request_does_not_swallow_keyboard_irq(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        emu.pic.initialize()
+        emu.cpu.if_flag = True
+
+        emu.pic.raise_irq(0)
+        emu.kbd_ctrl.inject_scan_code(0x38)  # Left Alt make
+
+        assert emu._schedule_keyboard_irq() is True
+        assert emu.pic.irr & 0x03 == 0x03
+        assert emu.pic.ims == 0
+
+        assert emu._check_and_dispatch_irq() is True
+        assert emu.pic.is_irq_pending(0) is False
+        assert emu.pic.is_irq_pending(1) is True
+
+        assert emu._check_and_dispatch_irq() is True
+        assert emu.mem.read_byte(0x00417) & 0x08
+
+        emu.kbd_ctrl.inject_scan_code(0xB8)  # Left Alt break
+        assert emu._schedule_keyboard_irq() is True
+        assert emu._check_and_dispatch_irq() is True
+        assert not (emu.mem.read_byte(0x00417) & 0x08)
+
     def test_irq_dispatch_preserves_handler_updated_flags(self):
         from main import Emulator
         emu = Emulator()

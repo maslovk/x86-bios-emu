@@ -134,7 +134,8 @@ x86-bios-emu/
 - Scan code set 1 (AT) with E0 extended prefix support
 - Left/right Shift/Ctrl/Alt and CapsLock/NumLock/ScrollLock state tracking
 - Scan code → ASCII translation with modifier application
-- IRQ 1 generation on character available
+- IRQ 1 generation for make, break, modifier, and E0-prefix bytes
+- BIOS keyboard flags mirrored at `0040:0017`, `0040:0018`, and `0040:0096`
 - FIFO output buffer (multiple keys queued)
 - LED control via 0xED command
 - Self-test (0xAA), input port read (0xD0), command byte (0x20)

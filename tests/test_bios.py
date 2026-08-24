@@ -434,10 +434,49 @@ class TestINT16h:
         kbd_ctrl.inject_scan_code(0xE0)
         kbd_ctrl.inject_scan_code(0x38)  # Right Alt
         kbd_ctrl.inject_scan_code(0x3A)  # Caps Lock pressed/on
+        while kbd_ctrl.has_data():
+            bios.handlers[0x09](FakeCPU())
         cpu = FakeCPU(ax=0x1200)
         bios.handlers[0x16](cpu)
         assert cpu.al == 0x6E  # Left Shift, Ctrl, Alt, Num/Caps Lock
         assert cpu.ah == 0x49  # Left Ctrl, Right Alt, Caps pressed
+
+    def test_modifier_irq_does_not_enter_bios_typeahead_buffer(self):
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        kbd_ctrl.inject_scan_code(0x38)  # Alt make
+        cpu = FakeCPU()
+
+        bios.handlers[0x09](cpu)
+
+        assert kbd_ctrl.alt is True
+        assert bios.mem.read_byte(0x00417) & 0x08
+        assert bios.mem.read_byte(0x00418) & 0x02
+        assert not bios.kbd.key_pressed()
+
+    def test_queued_alt_transitions_preserve_each_bda_state(self):
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        kbd_ctrl.inject_scan_code(0x38)  # Alt make
+        kbd_ctrl.inject_scan_code(0xB8)  # Alt break before first IRQ runs
+        assert kbd_ctrl.alt is False
+
+        bios.handlers[0x09](FakeCPU())
+        assert bios.mem.read_byte(0x00417) & 0x08
+        assert bios.mem.read_byte(0x00418) & 0x02
+
+        bios.handlers[0x09](FakeCPU())
+        assert not (bios.mem.read_byte(0x00417) & 0x08)
+        assert not (bios.mem.read_byte(0x00418) & 0x02)
+
+    def test_bda_reports_enhanced_keyboard_and_right_alt(self):
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        assert bios.mem.read_byte(0x00496) == 0x10
+        kbd_ctrl.inject_scan_code(0xE0)
+        kbd_ctrl.inject_scan_code(0x38)
+
+        bios.handlers[0x09](FakeCPU())  # E0 prefix
+        assert bios.mem.read_byte(0x00496) & 0x02
+        bios.handlers[0x09](FakeCPU())  # Right Alt make
+        assert bios.mem.read_byte(0x00496) & 0x08
 
     def test_check_key_empty(self, bios_env):
         bios_env.initialize()
@@ -485,6 +524,21 @@ class TestINT16h:
         cpu2 = FakeCPU(ax=0x0000)
         bios.handlers[0x16](cpu2)
         assert (cpu2.ax & 0xFF) == ord('Y')
+
+    def test_int16_reads_guest_irq_key_from_bda_ring(self):
+        bios, _ = self._make_bios_with_kbd_ctrl()
+        bios.mem.write_word(0x0041E, 0x1C0D)  # Enter: scan 1Ch, ASCII CR
+        bios.mem.write_word(0x0041C, 0x0020)  # Advance tail
+
+        peek = FakeCPU(ax=0x0100)
+        bios.handlers[0x16](peek)
+        assert peek.ax == 0x1C0D
+        assert bios.mem.read_word(0x0041A) == 0x001E
+
+        take = FakeCPU(ax=0x0000)
+        bios.handlers[0x16](take)
+        assert take.ax == 0x1C0D
+        assert bios.mem.read_word(0x0041A) == 0x0020
 
     def test_check_key_still_empty_after_drain(self):
         # When kbd_ctrl has nothing, AH=01 must set ZF=1 (no key).

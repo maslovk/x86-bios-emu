@@ -613,6 +613,9 @@ class TestOpcodes:
                 break
         assert cpu.insn_count >= cpu.max_insns
 
+    def test_cpu_has_no_default_instruction_limit(self, cpu):
+        assert cpu.max_insns == float('inf')
+
 
 class TestModRM:
     CODE = 0x7C00

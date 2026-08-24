@@ -25,7 +25,10 @@ class CPU:
         self.halted = False
         self.int_no_return = False  # True when INT handler takes over (e.g., boot)
         self.insn_count = 0
-        self.max_insns = 50_000_000
+        # The CPU core has no implicit lifetime limit. Embedders may assign a
+        # finite value for bounded tests; the emulator applies its separate
+        # --max-instructions policy only to noninteractive sessions.
+        self.max_insns = float('inf')
         self.debug = False
         self.step_mode = False  # Print mnemonic + regs each instruction
 

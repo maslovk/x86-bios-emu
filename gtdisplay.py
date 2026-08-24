@@ -306,6 +306,29 @@ class GtkDisplay:
             self._toggle_fullscreen()
             return True
 
+        # Keypad keys must retain their physical scan codes. Treating KP_1 as
+        # top-row '1' loses Num Lock and navigation semantics in DOS editors.
+        keypad_keys = {
+            Gdk.KEY_KP_7: (0x47,), Gdk.KEY_KP_8: (0x48,),
+            Gdk.KEY_KP_9: (0x49,), Gdk.KEY_KP_Subtract: (0x4A,),
+            Gdk.KEY_KP_4: (0x4B,), Gdk.KEY_KP_5: (0x4C,),
+            Gdk.KEY_KP_6: (0x4D,), Gdk.KEY_KP_Add: (0x4E,),
+            Gdk.KEY_KP_1: (0x4F,), Gdk.KEY_KP_2: (0x50,),
+            Gdk.KEY_KP_3: (0x51,), Gdk.KEY_KP_0: (0x52,),
+            Gdk.KEY_KP_Decimal: (0x53,), Gdk.KEY_KP_Multiply: (0x37,),
+            Gdk.KEY_KP_Divide: (0xE0, 0x35),
+            Gdk.KEY_KP_Enter: (0xE0, 0x1C),
+        }
+        keypad_sequence = keypad_keys.get(keyval)
+        if keypad_sequence is not None:
+            make = keypad_sequence
+            if make[0] == 0xE0:
+                release = (0xE0, make[1] | 0x80)
+            else:
+                release = (make[0] | 0x80,)
+            self._emit_scan_sequence(make + release)
+            return True
+
         # Printable ASCII -> inject directly.  This is the path DOS's
         # DATE/TIME prompts use; injecting the ASCII byte (not a scan code)
         # keeps INT 16h AH=00 returning the exact typed character.
@@ -357,6 +380,16 @@ class GtkDisplay:
             Gdk.KEY_Page_Down: 0x51,
             Gdk.KEY_Insert: 0x52,
             Gdk.KEY_Delete: 0x53,
+            Gdk.KEY_KP_Up: 0x48,
+            Gdk.KEY_KP_Down: 0x50,
+            Gdk.KEY_KP_Left: 0x4B,
+            Gdk.KEY_KP_Right: 0x4D,
+            Gdk.KEY_KP_Home: 0x47,
+            Gdk.KEY_KP_End: 0x4F,
+            Gdk.KEY_KP_Page_Up: 0x49,
+            Gdk.KEY_KP_Page_Down: 0x51,
+            Gdk.KEY_KP_Insert: 0x52,
+            Gdk.KEY_KP_Delete: 0x53,
         }
         scan_code = extended_keys.get(keyval)
         if scan_code is not None:

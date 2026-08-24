@@ -33,6 +33,11 @@ _SCANCODE_MAP = {
     0x2F: ('v', 'V'), 0x30: ('b', 'B'), 0x31: ('n', 'N'),
     0x32: ('m', 'M'), 0x33: (',', '<'), 0x34: ('.', '>'),
     0x35: ('/', '?'), 0x37: ('*', '*'), 0x39: (' ', ' '),
+    0x47: ('7', '7'), 0x48: ('8', '8'), 0x49: ('9', '9'),
+    0x4A: ('-', '-'), 0x4B: ('4', '4'), 0x4C: ('5', '5'),
+    0x4D: ('6', '6'), 0x4E: ('+', '+'), 0x4F: ('1', '1'),
+    0x50: ('2', '2'), 0x51: ('3', '3'), 0x52: ('0', '0'),
+    0x53: ('.', '.'),
 }
 
 _E0_MAP = {
@@ -45,6 +50,7 @@ _E0_MAP = {
 
 _FUNCTION_KEYS = set(range(0x3B, 0x45)) | {0x57, 0x58}
 _MOD_KEYS = {0x2A, 0x36, 0x1D, 0x38, 0x3A, 0x45, 0x46}
+_KEYPAD_DIGIT_KEYS = set(range(0x47, 0x54)) - {0x4A, 0x4E}
 
 
 class KeyboardController:
@@ -310,6 +316,9 @@ class KeyboardController:
                 0x0C: 0x1F,  # minus/underscore key -> US
             }
             return ctrl_chars.get(scan_code, 0)
+        if scan_code in _KEYPAD_DIGIT_KEYS:
+            # Shift temporarily reverses Num Lock, matching the PC BIOS.
+            return lower if self.num_lock != self.shift else 0
         if self.shift and scan_code == 0x0F:  # Shift+Tab is an extended key
             return 0
         is_alpha = (0x61 <= lower <= 0x7A) or (0x41 <= lower <= 0x5A)

@@ -304,6 +304,44 @@ class TestNumLock:
         kbd.inject_scan_code(0x45)  # Toggle on
         assert kbd.num_lock is True
 
+    @pytest.mark.parametrize('scan,ascii_value', [
+        (0x47, ord('7')), (0x48, ord('8')), (0x49, ord('9')),
+        (0x4B, ord('4')), (0x4C, ord('5')), (0x4D, ord('6')),
+        (0x4F, ord('1')), (0x50, ord('2')), (0x51, ord('3')),
+        (0x52, ord('0')), (0x53, ord('.')),
+    ])
+    def test_num_lock_on_returns_keypad_digits(self, scan, ascii_value):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(scan)
+        assert kbd.read_key_event() == (scan, ascii_value)
+
+    def test_num_lock_off_returns_navigation_event(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x45)
+        kbd.inject_scan_code(0x4B)  # Keypad Left/4
+        assert kbd.read_key_event() == (0x4B, 0)
+
+    def test_shift_temporarily_reverses_num_lock(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x2A)
+        kbd.inject_scan_code(0x4B)
+        assert kbd.read_key_event() == (0x4B, 0)
+
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x45)  # Num Lock off
+        kbd.inject_scan_code(0x2A)
+        kbd.inject_scan_code(0x4B)
+        assert kbd.read_key_event() == (0x4B, ord('4'))
+
+    @pytest.mark.parametrize('scan,ascii_value', [
+        (0x4A, ord('-')), (0x4E, ord('+')), (0x37, ord('*')),
+    ])
+    def test_keypad_operators_ignore_num_lock(self, scan, ascii_value):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x45)
+        kbd.inject_scan_code(scan)
+        assert kbd.read_key_event() == (scan, ascii_value)
+
 
 class TestScrollLock:
     """Scroll Lock toggle."""

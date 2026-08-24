@@ -110,3 +110,33 @@ def test_shift_tab_uses_scan_event_instead_of_plain_tab():
                     display._Gdk.ModifierType.SHIFT_MASK))
 
     assert scans == [0x0F, 0x8F]
+
+
+def test_keypad_digit_retains_keypad_scan_code():
+    display = make_display()
+    scans = []
+    display.on_scan_code = scans.append
+
+    display._on_key_press(None, event(display._Gdk.KEY_KP_1))
+
+    assert scans == [0x4F, 0xCF]
+
+
+def test_keypad_divide_retains_e0_prefix():
+    display = make_display()
+    scans = []
+    display.on_scan_code = scans.append
+
+    display._on_key_press(None, event(display._Gdk.KEY_KP_Divide))
+
+    assert scans == [0xE0, 0x35, 0xE0, 0xB5]
+
+
+def test_num_lock_off_keypad_navigation_uses_enhanced_path():
+    display = make_display()
+    scans = []
+    display.on_extended_key = scans.append
+
+    display._on_key_press(None, event(display._Gdk.KEY_KP_Left))
+
+    assert scans == [0x4B]

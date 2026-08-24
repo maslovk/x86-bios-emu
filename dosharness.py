@@ -10,6 +10,7 @@ of host time, so read-only test suites should reuse one harness via the
 module-scoped ``dos`` fixture in ``tests/tools/conftest.py``.
 """
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -431,7 +432,9 @@ class DOSHarness:
         lines = [l for l in self.vga_text() if l.strip()]
         if not lines:
             return False
-        if not lines[-1].rstrip().endswith(('A>', 'B>', 'C>')):
+        last = lines[-1].rstrip()
+        if (not last.endswith(('A>', 'B>', 'C>')) and
+                re.search(r'[A-C]:\\[^>]*>$', last) is None):
             return False
         return self.vga_str() != prev_screen
 

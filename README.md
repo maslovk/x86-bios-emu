@@ -310,6 +310,25 @@ python3 main.py --boot dos3.3.img         # Load DOS 3.3 boot sector
 python3 main.py --boot dos3.3.img --step  # Step through DOS 3.3 boot
 ```
 
+### Automated MS-DOS 6.22 installation
+
+With the retail `Disk1.img`, `Disk2.img`, and `Disk3.img` files under
+`DOS6_22/`, create and verify a new bootable 20.4 MiB FAT16 hard-disk image:
+
+```bash
+python3 install_dos622.py dos622-new.hdd
+python3 main.py --floppy DOS6_22/Disk1.img \
+  --hard-disk dos622-new.hdd --boot-hard-disk --gtk
+```
+
+The automation boots the real Microsoft Setup program, answers its dialogs,
+restarts when requested, and swaps Setup Disks 2 and 3 in drive A. Setup itself
+partitions and formats the hard disk, expands the distribution, and writes the
+startup configuration—exactly as an interactive floppy installation would.
+Work happens on a private temporary image and is published atomically only after
+FAT16 validation and a hard-disk boot where `VER` must report MS-DOS 6.22.
+Source floppy images are authenticated, hashed again afterward, and never written.
+
 ### Options
 | Flag | Description |
 |------|-------------|

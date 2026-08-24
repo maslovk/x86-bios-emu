@@ -429,12 +429,15 @@ class TestINT16h:
 
     def test_extended_shift_state_12h(self):
         bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
-        kbd_ctrl.caps_lock = True
-        kbd_ctrl.num_lock = True
+        kbd_ctrl.inject_scan_code(0x2A)  # Left Shift
+        kbd_ctrl.inject_scan_code(0x1D)  # Left Ctrl
+        kbd_ctrl.inject_scan_code(0xE0)
+        kbd_ctrl.inject_scan_code(0x38)  # Right Alt
+        kbd_ctrl.inject_scan_code(0x3A)  # Caps Lock pressed/on
         cpu = FakeCPU(ax=0x1200)
         bios.handlers[0x16](cpu)
-        assert cpu.ah & 0x60 == 0x60
-        assert cpu.al & 0x60 == 0x60
+        assert cpu.al == 0x6E  # Left Shift, Ctrl, Alt, Num/Caps Lock
+        assert cpu.ah == 0x49  # Left Ctrl, Right Alt, Caps pressed
 
     def test_check_key_empty(self, bios_env):
         bios_env.initialize()

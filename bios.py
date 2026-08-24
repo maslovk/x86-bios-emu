@@ -1017,12 +1017,14 @@ class BIOS:
                 cpu.ax = 0
         elif ah == 0x12:  # Extended shift/toggle state
             # Enhanced keyboard callers (including DOS Setup) use AH=12h to
-            # query the left/right modifier and lock state after probing
-            # extended INT 16h support.  This emulator tracks the compatible
-            # aggregate state, which is sufficient for menu navigation.
-            state = self.kbd_ctrl.shift_state if self.kbd_ctrl else 0
-            cpu.ah = state
-            cpu.al = state & 0x70
+            # query left/right modifier state. AL is the same legacy flag
+            # byte returned by AH=02h; AH distinguishes left/right Ctrl/Alt
+            # and reports whether each lock key is physically depressed.
+            if self.kbd_ctrl:
+                cpu.al = self.kbd_ctrl.shift_state
+                cpu.ah = self.kbd_ctrl.extended_shift_state
+            else:
+                cpu.ax = 0
         elif ah == 0x92:
             # DOS KEYB/Setup probes extended-keyboard support by invoking the
             # intentionally undocumented AH=92h function.  IBM-compatible

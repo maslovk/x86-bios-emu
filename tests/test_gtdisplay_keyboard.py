@@ -47,6 +47,8 @@ def test_alt_f_reaches_bios_as_alt_key_event():
     assert display._on_key_press(None, event(gdk.KEY_Alt_L))
     assert display._on_key_press(
         None, event(gdk.KEY_f, gdk.ModifierType.MOD1_MASK))
+    assert display._on_key_release(
+        None, event(gdk.KEY_f, gdk.ModifierType.MOD1_MASK))
     assert display._on_key_release(None, event(gdk.KEY_Alt_L))
 
     assert controller.read_key_event() == (0x21, 0)
@@ -59,6 +61,7 @@ def test_f5_is_a_function_key_not_a_text_macro():
     display.on_scan_code = scans.append
 
     assert display._on_key_press(None, event(display._Gdk.KEY_F5))
+    assert display._on_key_release(None, event(display._Gdk.KEY_F5))
 
     assert scans == [0x3F, 0xBF]
 
@@ -71,6 +74,8 @@ def test_ctrl_c_is_delivered_to_dos():
 
     display._on_key_press(None, event(gdk.KEY_Control_L))
     display._on_key_press(
+        None, event(gdk.KEY_c, gdk.ModifierType.CONTROL_MASK))
+    display._on_key_release(
         None, event(gdk.KEY_c, gdk.ModifierType.CONTROL_MASK))
     display._on_key_release(None, event(gdk.KEY_Control_L))
 
@@ -108,6 +113,9 @@ def test_shift_tab_uses_scan_event_instead_of_plain_tab():
     display._on_key_press(
         None, event(display._Gdk.KEY_ISO_Left_Tab,
                     display._Gdk.ModifierType.SHIFT_MASK))
+    display._on_key_release(
+        None, event(display._Gdk.KEY_ISO_Left_Tab,
+                    display._Gdk.ModifierType.SHIFT_MASK))
 
     assert scans == [0x0F, 0x8F]
 
@@ -118,6 +126,7 @@ def test_keypad_digit_retains_keypad_scan_code():
     display.on_scan_code = scans.append
 
     display._on_key_press(None, event(display._Gdk.KEY_KP_1))
+    display._on_key_release(None, event(display._Gdk.KEY_KP_1))
 
     assert scans == [0x4F, 0xCF]
 
@@ -128,8 +137,41 @@ def test_keypad_divide_retains_e0_prefix():
     display.on_scan_code = scans.append
 
     display._on_key_press(None, event(display._Gdk.KEY_KP_Divide))
+    display._on_key_release(None, event(display._Gdk.KEY_KP_Divide))
 
     assert scans == [0xE0, 0x35, 0xE0, 0xB5]
+
+
+def test_printable_key_uses_8042_make_and_break_path():
+    display = make_display()
+    direct_ascii = []
+    scans = []
+    display.on_key = direct_ascii.append
+    display.on_scan_code = scans.append
+
+    assert display._on_key_press(None, event(display._Gdk.KEY_a))
+    assert display._on_key_release(None, event(display._Gdk.KEY_a))
+
+    assert direct_ascii == []
+    assert scans == [0x1E, 0x9E]
+
+
+def test_shifted_printable_is_translated_by_keyboard_controller():
+    display = make_display()
+    controller = KeyboardController()
+    display.on_scan_code = controller.inject_scan_code
+    gdk = display._Gdk
+
+    display._on_key_press(None, event(gdk.KEY_Shift_L))
+    display._on_key_press(
+        None, event(gdk.KEY_A, gdk.ModifierType.SHIFT_MASK))
+
+    assert controller.read_key_event() == (0x1E, ord('A'))
+
+    display._on_key_release(
+        None, event(gdk.KEY_A, gdk.ModifierType.SHIFT_MASK))
+    display._on_key_release(None, event(gdk.KEY_Shift_L))
+    assert controller.shift is False
 
 
 def test_num_lock_off_keypad_navigation_uses_enhanced_path():

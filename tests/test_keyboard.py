@@ -155,8 +155,21 @@ class TestShiftModifier:
         kbd = KeyboardController()
         kbd.inject_scan_code(0x2A)  # Shift make
         state = kbd.shift_state
-        assert state & 0x02  # Shift bit set
+        assert state & 0x02  # Left Shift bit set
         assert state & 0x20  # Num lock bit set (default)
+
+    def test_releasing_one_shift_keeps_the_other_active(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x2A)  # Left Shift make
+        kbd.inject_scan_code(0x36)  # Right Shift make
+        assert kbd.shift_state & 0x03 == 0x03
+
+        kbd.inject_scan_code(0xAA)  # Left Shift break
+        assert kbd.shift is True
+        assert kbd.shift_state & 0x03 == 0x01
+
+        kbd.inject_scan_code(0xB6)  # Right Shift break
+        assert kbd.shift is False
 
     def test_shift_tab_returns_bios_extended_event(self):
         kbd = KeyboardController()
@@ -227,6 +240,17 @@ class TestCtrlModifier:
         kbd.inject_scan_code(0x9D)
         assert kbd.ctrl is False
 
+    def test_releasing_left_ctrl_keeps_right_ctrl_active(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x1D)
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x1D)
+        kbd.inject_scan_code(0x9D)
+
+        assert kbd.ctrl is True
+        assert kbd.left_ctrl is False
+        assert kbd.right_ctrl is True
+
 
 class TestAltModifier:
     """Alt key state tracking and BIOS Alt-key events."""
@@ -260,6 +284,18 @@ class TestAltModifier:
         kbd.inject_scan_code(0xB8)
         assert kbd.alt is False
 
+    def test_releasing_right_alt_keeps_left_alt_active(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x38)
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x38)
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0xB8)
+
+        assert kbd.alt is True
+        assert kbd.left_alt is True
+        assert kbd.right_alt is False
+
 
 class TestCapsLock:
     """Caps Lock toggle behavior."""
@@ -269,8 +305,17 @@ class TestCapsLock:
         assert kbd.caps_lock is False
         kbd.inject_scan_code(0x3A)  # Caps Lock make
         assert kbd.caps_lock is True
+        kbd.inject_scan_code(0xBA)  # Caps Lock break
         kbd.inject_scan_code(0x3A)  # Toggle off
         assert kbd.caps_lock is False
+
+    def test_repeated_caps_lock_make_does_not_retoggle(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x3A)
+        kbd.inject_scan_code(0x3A)
+
+        assert kbd.caps_lock is True
+        assert kbd.caps_pressed is True
 
     def test_caps_lock_letter(self):
         kbd = KeyboardController()
@@ -301,6 +346,7 @@ class TestNumLock:
         assert kbd.num_lock is True
         kbd.inject_scan_code(0x45)  # Num Lock make
         assert kbd.num_lock is False
+        kbd.inject_scan_code(0xC5)  # Num Lock break
         kbd.inject_scan_code(0x45)  # Toggle on
         assert kbd.num_lock is True
 
@@ -351,8 +397,39 @@ class TestScrollLock:
         assert kbd.scroll_lock is False
         kbd.inject_scan_code(0x46)  # Scroll Lock make
         assert kbd.scroll_lock is True
+        kbd.inject_scan_code(0xC6)  # Scroll Lock break
         kbd.inject_scan_code(0x46)  # Toggle off
         assert kbd.scroll_lock is False
+
+
+class TestExtendedShiftState:
+    """IBM enhanced-keyboard state returned by INT 16h AH=12h."""
+
+    def test_distinguishes_left_and_right_ctrl_alt(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x1D)        # Left Ctrl
+        kbd.inject_scan_code(0x38)        # Left Alt
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x1D)        # Right Ctrl
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x38)        # Right Alt
+
+        assert kbd.extended_shift_state & 0x0F == 0x0F
+
+    def test_lock_bits_mean_physically_pressed_not_toggled_on(self):
+        kbd = KeyboardController()
+        assert kbd.num_lock is True
+        assert kbd.extended_shift_state & 0x70 == 0
+
+        kbd.inject_scan_code(0x3A)
+        kbd.inject_scan_code(0x45)
+        kbd.inject_scan_code(0x46)
+        assert kbd.extended_shift_state & 0x70 == 0x70
+
+        kbd.inject_scan_code(0xBA)
+        kbd.inject_scan_code(0xC5)
+        kbd.inject_scan_code(0xC6)
+        assert kbd.extended_shift_state & 0x70 == 0
 
 
 class TestASCIIInjection:

@@ -132,7 +132,7 @@ x86-bios-emu/
 - Port 0x60: Data port (read/write scan codes and ASCII)
 - Port 0x64: Status/command port (OBF, IBF, IRQ pending flags)
 - Scan code set 1 (AT) with E0 extended prefix support
-- Shift/Ctrl/Alt/CapsLock/NumLock/ScrollLock state tracking
+- Left/right Shift/Ctrl/Alt and CapsLock/NumLock/ScrollLock state tracking
 - Scan code → ASCII translation with modifier application
 - IRQ 1 generation on character available
 - FIFO output buffer (multiple keys queued)
@@ -399,7 +399,8 @@ The emulator supports two VGA output paths:
   Alt shortcuts, Enter, and Backspace are translated to DOS BIOS key events.
 - **GTK** (`--gtk` / `-g`) — opens a real `Gtk.DrawingArea` window, paints
   each cell's CGA background + foreground colour, and captures key presses
-  directly (injecting ASCII bytes into the keyboard controller).  This is
+  as physical set-1 make/break scan codes through the keyboard controller.
+  Clipboard paste remains an intentional direct-text convenience. This is
   paired with Reset (full guest reboot), Refresh B: (host-folder reload), Paste/Copy (host clipboard text), Fullscreen, and a resizable
   A:/B:/C: media-status bar. Ctrl+Shift+C/R/V provide host copy/stop, reset,
   and paste shortcuts; Ctrl+Shift+F11 toggles fullscreen. Unshifted Ctrl

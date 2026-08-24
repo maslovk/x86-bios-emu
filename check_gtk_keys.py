@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Verify GtkDisplay's key-press handler injects the correct ASCII byte
-into the keyboard controller (no scan-code remap), and that Enter yields
-0x0D (CR), not 0x0A (LF).  This is the bug we just hit in terminal mode.
-"""
+"""Verify GtkDisplay routes real set-1 key transitions through the 8042."""
 import sys, time
 sys.path.insert(0, '.')
 
@@ -26,41 +23,45 @@ for _ in range(20):
     while Gtk.events_pending(): Gtk.main_iteration_do(False)
     time.sleep(0.005)
 
-def synthesize_key(keyval, state=0):
-    """Build a Gdk.EventKey and dispatch it as a key-press."""
-    ev = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
+def synthesize_key(event_type, signal, keyval, state=0):
+    """Build a Gdk.EventKey and dispatch it to the GTK window."""
+    ev = Gdk.Event.new(event_type)
     ev.keyval = keyval
     ev.state = state
     ev.window = gd.window.get_window()
     ev.time = 0
-    gd.window.emit('key-press-event', ev)
+    gd.window.emit(signal, ev)
 
-# Inject '1'..'0' + Enter and verify the bytes that landed in kbd_ctrl.
-import time as _t
-received = []
-orig_inject = emu.kbd_ctrl.inject_key
-def captured_inject(b):
-    received.append(b)
-    orig_inject(b)
-emu.kbd_ctrl.inject_key = captured_inject
-
-# Re-bind the on_key callback to use the patched inject.
-gd.on_key = lambda b: emu.kbd_ctrl.inject_key(b)
+# Capture the physical scan bytes while still passing them to the controller.
+received_scans = []
+orig_inject = emu.kbd_ctrl.inject_scan_code
+def captured_inject(scan):
+    received_scans.append(scan)
+    orig_inject(scan)
+emu.kbd_ctrl.inject_scan_code = captured_inject
 
 # Press 1234567890 + Enter
 keyvals = [ord('1'), ord('2'), ord('3'), ord('4'), ord('5'),
            ord('6'), ord('7'), ord('8'), ord('9'), ord('0'),
            Gdk.KEY_Return]
 for kv in keyvals:
-    synthesize_key(kv)
+    synthesize_key(Gdk.EventType.KEY_PRESS, 'key-press-event', kv)
+    synthesize_key(Gdk.EventType.KEY_RELEASE, 'key-release-event', kv)
     while Gtk.events_pending(): Gtk.main_iteration_do(False)
 
-expected = [ord('1'), ord('2'), ord('3'), ord('4'), ord('5'),
-            ord('6'), ord('7'), ord('8'), ord('9'), ord('0'),
-            0x0D]
-result = received == expected
+make_scans = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+              0x08, 0x09, 0x0A, 0x0B, 0x1C]
+expected_scans = [scan for make in make_scans
+                  for scan in (make, make | 0x80)]
+expected_ascii = [ord(ch) for ch in '1234567890'] + [0x0D]
+received_ascii = []
+while emu.kbd_ctrl.has_data():
+    _scan, ascii_value = emu.kbd_ctrl.read_key_event()
+    received_ascii.append(ascii_value)
+result = (received_scans == expected_scans
+          and received_ascii == expected_ascii)
 gd.close()
-print(f'received = {[hex(b) for b in received]}')
-print(f'expected = {[hex(b) for b in expected]}')
+print(f'scans = {[hex(b) for b in received_scans]}')
+print(f'ascii = {[hex(b) for b in received_ascii]}')
 print(f'RESULT: {"PASS" if result else "FAIL"}')
 sys.exit(0 if result else 1)

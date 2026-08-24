@@ -359,9 +359,9 @@ class Emulator:
 
         # GTK display (optional).  When enabled, it takes over rendering and
         # keyboard input: the emulator loop pumps Gtk events between
-        # instruction batches, and key-press callbacks inject ASCII bytes or
-        # set-1 scan codes directly into the keyboard controller (no cbreak
-        # / scan-code dance for ordinary text input).
+        # instruction batches, and key callbacks inject physical set-1 scan
+        # codes into the keyboard controller. Direct ASCII injection remains
+        # available only for host clipboard paste.
         self.gtk = gtk
         self.gtk_display = None
         if gtk:

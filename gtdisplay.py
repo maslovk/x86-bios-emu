@@ -15,8 +15,8 @@ instructions it calls ``GtkDisplay.pump()``, which:
      (``Gtk.events_pending()`` + ``Gtk.main_iteration_do(False)``).
 
 Because everything runs in the main thread, there is no GIL dance, no
-locks, and key-press callbacks inject bytes directly into the keyboard
-controller with no marshalling.
+locks, and key callbacks inject physical set-1 make/break sequences directly
+into the keyboard controller with no marshalling.
 
 Rendering uses the canonical Pango + PangoCairo path so font fallback to
 monospace works across platforms; the CGA 16-colour palette is replicated
@@ -92,8 +92,8 @@ class GtkDisplay:
         before each redraw so the displayed grid reflects whatever DOS has
         written into 0xB8000.
     on_key : callable(int) | None
-        Callback invoked once per printable/control keypress with the ASCII
-        byte to inject. Pass ``None`` to ignore those keys.
+        Callback used for direct text injection such as host clipboard paste.
+        Physical keypresses use ``on_scan_code`` instead.
     on_extended_key : callable(int) | None
         Callback invoked for enhanced keys such as the arrow keys with their
         IBM PC/AT set-1 scan code. Pass ``None`` to ignore enhanced keys.
@@ -269,10 +269,59 @@ class GtkDisplay:
             except Exception:
                 pass
 
+    def _physical_scan_for_key(self, keyval):
+        """Return the set-1 make sequence for a host key, if representable."""
+        Gdk = self._Gdk
+        keypad_keys = {
+            Gdk.KEY_KP_7: (0x47,), Gdk.KEY_KP_8: (0x48,),
+            Gdk.KEY_KP_9: (0x49,), Gdk.KEY_KP_Subtract: (0x4A,),
+            Gdk.KEY_KP_4: (0x4B,), Gdk.KEY_KP_5: (0x4C,),
+            Gdk.KEY_KP_6: (0x4D,), Gdk.KEY_KP_Add: (0x4E,),
+            Gdk.KEY_KP_1: (0x4F,), Gdk.KEY_KP_2: (0x50,),
+            Gdk.KEY_KP_3: (0x51,), Gdk.KEY_KP_0: (0x52,),
+            Gdk.KEY_KP_Decimal: (0x53,), Gdk.KEY_KP_Multiply: (0x37,),
+            Gdk.KEY_KP_Divide: (0xE0, 0x35),
+            Gdk.KEY_KP_Enter: (0xE0, 0x1C),
+        }
+        sequence = keypad_keys.get(keyval)
+        if sequence is not None:
+            return sequence
+
+        special_keys = {
+            Gdk.KEY_Return: (0x1C,), Gdk.KEY_BackSpace: (0x0E,),
+            Gdk.KEY_Escape: (0x01,), Gdk.KEY_Tab: (0x0F,),
+            Gdk.KEY_ISO_Left_Tab: (0x0F,),
+        }
+        sequence = special_keys.get(keyval)
+        if sequence is not None:
+            return sequence
+
+        function_keys = {
+            Gdk.KEY_F1: 1, Gdk.KEY_F2: 2, Gdk.KEY_F3: 3,
+            Gdk.KEY_F4: 4, Gdk.KEY_F5: 5, Gdk.KEY_F6: 6,
+            Gdk.KEY_F7: 7, Gdk.KEY_F8: 8, Gdk.KEY_F9: 9,
+            Gdk.KEY_F10: 10, Gdk.KEY_F11: 11, Gdk.KEY_F12: 12,
+        }
+        function_number = function_keys.get(keyval)
+        if function_number is not None:
+            return (_FUNCTION_KEY_SCANS[function_number],)
+
+        ch = Gdk.keyval_to_unicode(keyval)
+        if 0x20 <= ch <= 0x7E:
+            scan_code = _set1_scan_for_char(chr(ch))
+            if scan_code is not None:
+                return (scan_code,)
+        return None
+
+    @staticmethod
+    def _break_sequence(make_sequence):
+        if make_sequence[0] == 0xE0:
+            return 0xE0, make_sequence[1] | 0x80
+        return (make_sequence[0] | 0x80,)
+
     def _on_key_press(self, _widget, event):
         Gdk = self._Gdk
         keyval = event.keyval
-        ch = Gdk.keyval_to_unicode(keyval)
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
         alt = bool(event.state & Gdk.ModifierType.MOD1_MASK)
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
@@ -306,64 +355,12 @@ class GtkDisplay:
             self._toggle_fullscreen()
             return True
 
-        # Keypad keys must retain their physical scan codes. Treating KP_1 as
-        # top-row '1' loses Num Lock and navigation semantics in DOS editors.
-        keypad_keys = {
-            Gdk.KEY_KP_7: (0x47,), Gdk.KEY_KP_8: (0x48,),
-            Gdk.KEY_KP_9: (0x49,), Gdk.KEY_KP_Subtract: (0x4A,),
-            Gdk.KEY_KP_4: (0x4B,), Gdk.KEY_KP_5: (0x4C,),
-            Gdk.KEY_KP_6: (0x4D,), Gdk.KEY_KP_Add: (0x4E,),
-            Gdk.KEY_KP_1: (0x4F,), Gdk.KEY_KP_2: (0x50,),
-            Gdk.KEY_KP_3: (0x51,), Gdk.KEY_KP_0: (0x52,),
-            Gdk.KEY_KP_Decimal: (0x53,), Gdk.KEY_KP_Multiply: (0x37,),
-            Gdk.KEY_KP_Divide: (0xE0, 0x35),
-            Gdk.KEY_KP_Enter: (0xE0, 0x1C),
-        }
-        keypad_sequence = keypad_keys.get(keyval)
-        if keypad_sequence is not None:
-            make = keypad_sequence
-            if make[0] == 0xE0:
-                release = (0xE0, make[1] | 0x80)
-            else:
-                release = (make[0] | 0x80,)
-            self._emit_scan_sequence(make + release)
-            return True
-
-        # Printable ASCII -> inject directly.  This is the path DOS's
-        # DATE/TIME prompts use; injecting the ASCII byte (not a scan code)
-        # keeps INT 16h AH=00 returning the exact typed character.
-        if 0x20 <= ch <= 0x7E and not (ctrl or alt):
-            self._emit(ch)
-            return True
-
-        # Ctrl/Alt printable chords need a physical key event.  The keyboard
-        # controller converts Ctrl+letter to a control byte and Alt+letter to
-        # the BIOS (scan, ASCII=0) form used by QBASIC menus.
-        if 0x20 <= ch <= 0x7E and (ctrl or alt):
-            scan_code = _set1_scan_for_char(chr(ch))
-            if scan_code is not None:
-                self._emit_scan_sequence((scan_code, scan_code | 0x80))
-                return True
-        # Special keys that map to control characters DOS understands.
-        specials = {
-            Gdk.KEY_Return: 0x0D,
-            Gdk.KEY_KP_Enter: 0x0D,
-            Gdk.KEY_BackSpace: 0x08,
-            Gdk.KEY_Escape: 0x1B,
-            Gdk.KEY_Tab: 0x09,
-            Gdk.KEY_ISO_Left_Tab: 0x09,
-        }
-        if keyval in specials:
-            special_scans = {
-                Gdk.KEY_Return: 0x1C, Gdk.KEY_KP_Enter: 0x1C,
-                Gdk.KEY_BackSpace: 0x0E, Gdk.KEY_Escape: 0x01,
-                Gdk.KEY_Tab: 0x0F, Gdk.KEY_ISO_Left_Tab: 0x0F,
-            }
-            if ctrl or alt or keyval == Gdk.KEY_ISO_Left_Tab:
-                scan_code = special_scans[keyval]
-                self._emit_scan_sequence((scan_code, scan_code | 0x80))
-                return True
-            self._emit(specials[keyval])
+        # Representable PC keys travel through the same set-1 make/break and
+        # 8042 translation path as a physical keyboard. Paste deliberately
+        # remains direct text injection because it is a host convenience.
+        make_sequence = self._physical_scan_for_key(keyval)
+        if make_sequence is not None:
+            self._emit_scan_sequence(make_sequence)
             return True
         # Enhanced keys are delivered to DOS as scan codes with an ASCII
         # value of zero.  Setup's menus use the Up/Down arrows to select
@@ -409,17 +406,6 @@ class GtkDisplay:
                 scan_code = ctrl_navigation[scan_code]
             self._emit_extended(scan_code)
             return True
-        function_keys = {
-            Gdk.KEY_F1: 1, Gdk.KEY_F2: 2, Gdk.KEY_F3: 3,
-            Gdk.KEY_F4: 4, Gdk.KEY_F5: 5, Gdk.KEY_F6: 6,
-            Gdk.KEY_F7: 7, Gdk.KEY_F8: 8, Gdk.KEY_F9: 9,
-            Gdk.KEY_F10: 10, Gdk.KEY_F11: 11, Gdk.KEY_F12: 12,
-        }
-        function_number = function_keys.get(keyval)
-        if function_number is not None:
-            scan_code = _FUNCTION_KEY_SCANS[function_number]
-            self._emit_scan_sequence((scan_code, scan_code | 0x80))
-            return True
         return False
 
     def _on_key_release(self, _widget, event):
@@ -433,10 +419,15 @@ class GtkDisplay:
             Gdk.KEY_Scroll_Lock: (0xC6,),
         }
         sequence = modifier_breaks.get(event.keyval)
-        if sequence is None:
-            return False
-        self._emit_scan_sequence(sequence)
-        return True
+        if sequence is not None:
+            self._emit_scan_sequence(sequence)
+            return True
+
+        make_sequence = self._physical_scan_for_key(event.keyval)
+        if make_sequence is not None:
+            self._emit_scan_sequence(self._break_sequence(make_sequence))
+            return True
+        return False
 
     def _cell_at(self, x, y):
         allocation = self.drawing_area.get_allocation()

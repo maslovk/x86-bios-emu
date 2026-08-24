@@ -73,13 +73,21 @@ class KeyboardController:
         self._in_full = False
         self._scan_fifo = []
 
-        # Modifier state
-        self.shift = False
-        self.ctrl = False
-        self.alt = False
+        # Physical modifier state. Keep the left/right keys separate: if
+        # both are held, releasing one must not release the aggregate DOS
+        # modifier state reported through INT 16h.
+        self.left_shift = False
+        self.right_shift = False
+        self.left_ctrl = False
+        self.right_ctrl = False
+        self.left_alt = False
+        self.right_alt = False
         self.caps_lock = False
         self.num_lock = True
         self.scroll_lock = False
+        self.caps_pressed = False
+        self.num_pressed = False
+        self.scroll_pressed = False
 
         self._ext_prefix = False
         self.irq_pending = False
@@ -330,26 +338,54 @@ class KeyboardController:
             return lower
 
     def _handle_modifier_make(self, code, extended=False):
-        if code in (0x2A, 0x36) and not extended:
-            self.shift = True
+        if code == 0x2A and not extended:
+            self.left_shift = True
+        elif code == 0x36 and not extended:
+            self.right_shift = True
         elif code == 0x1D:
-            self.ctrl = True
+            if extended:
+                self.right_ctrl = True
+            else:
+                self.left_ctrl = True
         elif code == 0x38:
-            self.alt = True
+            if extended:
+                self.right_alt = True
+            else:
+                self.left_alt = True
         elif code == 0x3A and not extended:
-            self.caps_lock = not self.caps_lock
+            if not self.caps_pressed:
+                self.caps_lock = not self.caps_lock
+            self.caps_pressed = True
         elif code == 0x45 and not extended:
-            self.num_lock = not self.num_lock
+            if not self.num_pressed:
+                self.num_lock = not self.num_lock
+            self.num_pressed = True
         elif code == 0x46 and not extended:
-            self.scroll_lock = not self.scroll_lock
+            if not self.scroll_pressed:
+                self.scroll_lock = not self.scroll_lock
+            self.scroll_pressed = True
 
     def _handle_modifier_release(self, code, extended=False):
-        if code in (0x2A, 0x36) and not extended:
-            self.shift = False
+        if code == 0x2A and not extended:
+            self.left_shift = False
+        elif code == 0x36 and not extended:
+            self.right_shift = False
         elif code == 0x1D:
-            self.ctrl = False
+            if extended:
+                self.right_ctrl = False
+            else:
+                self.left_ctrl = False
         elif code == 0x38:
-            self.alt = False
+            if extended:
+                self.right_alt = False
+            else:
+                self.left_alt = False
+        elif code == 0x3A and not extended:
+            self.caps_pressed = False
+        elif code == 0x45 and not extended:
+            self.num_pressed = False
+        elif code == 0x46 and not extended:
+            self.scroll_pressed = False
 
     def feed_string(self, s):
         """Feed a string of ASCII characters."""
@@ -362,10 +398,24 @@ class KeyboardController:
         return len(self._out_buffer) > 0
 
     @property
+    def shift(self):
+        return self.left_shift or self.right_shift
+
+    @property
+    def ctrl(self):
+        return self.left_ctrl or self.right_ctrl
+
+    @property
+    def alt(self):
+        return self.left_alt or self.right_alt
+
+    @property
     def shift_state(self):
         """Shift state byte for INT 16h AH=02h."""
         state = 0
-        if self.shift:
+        if self.right_shift:
+            state |= 0x01
+        if self.left_shift:
             state |= 0x02
         if self.ctrl:
             state |= 0x04
@@ -376,6 +426,26 @@ class KeyboardController:
         if self.num_lock:
             state |= 0x20
         if self.caps_lock:
+            state |= 0x40
+        return state
+
+    @property
+    def extended_shift_state(self):
+        """Extended shift-state byte returned in AH by INT 16h AH=12h."""
+        state = 0
+        if self.left_ctrl:
+            state |= 0x01
+        if self.left_alt:
+            state |= 0x02
+        if self.right_ctrl:
+            state |= 0x04
+        if self.right_alt:
+            state |= 0x08
+        if self.scroll_pressed:
+            state |= 0x10
+        if self.num_pressed:
+            state |= 0x20
+        if self.caps_pressed:
             state |= 0x40
         return state
 

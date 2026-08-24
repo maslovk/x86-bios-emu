@@ -21,6 +21,7 @@ HEADS, SECTORS_PER_TRACK, PARTITION_START = 4, 17, 17
 WELCOME_MARKER = "F7=Install to a Floppy Disk"
 REPLACE_MARKER = "Continue Setup and replace your current version of DOS."
 RESTART_MARKER = "Setup will restart your computer now"
+REMOVE_DISKS_MARKER = "Remove disks from all floppy disk drives"
 EXPECTED_MEDIA_SHA256 = {
     "Disk1.img": "b88030401122d234ea6aafba3cfed7de2b7b1782700a67be5498edca6f9fec5d",
     "Disk2.img": "e1d48a415495a17d65316d5328a91d7df0910fb1e42b0b07e7dbf8a4b4df305a",
@@ -91,14 +92,15 @@ def choose_backend(requested="auto"):
 
 
 def classify_screen(screen):
-    if RESTART_MARKER in screen:
-        return SetupAction("restart", RESTART_MARKER)
+    for marker in (RESTART_MARKER, REMOVE_DISKS_MARKER):
+        if marker in screen:
+            return SetupAction("restart", marker)
     if REPLACE_MARKER in screen:
         return SetupAction("replace", REPLACE_MARKER)
     for number in (2, 3):
-        marker = f"Setup Disk {number}"
-        if marker in screen and "drive A" in screen:
-            return SetupAction("swap", marker, number)
+        for marker in (f"Setup Disk {number}", f"Setup Disk #{number}"):
+            if marker in screen and "drive A" in screen:
+                return SetupAction("swap", marker, number)
     for marker in ("Setup is complete", "MS-DOS 6.22 is now installed"):
         if marker in screen:
             return SetupAction("complete", marker)

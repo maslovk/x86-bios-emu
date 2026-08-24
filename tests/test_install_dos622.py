@@ -56,8 +56,12 @@ def test_resolve_media_rejects_wrong_image_size(tmp_path, monkeypatch):
     ("Setup will place your MS-DOS files in C:\\DOS", "enter", 0),
     ("Setup will use the following system settings", "enter", 0),
     ("Insert Setup Disk 2 in drive A", "swap", 2),
+    ("Please insert Setup Disk #2 in drive A", "swap", 2),
     ("Insert Setup Disk 3 in drive A", "swap", 3),
+    ("Please insert Setup Disk #3 in drive A", "swap", 3),
     ("Setup will restart your computer now", "restart", 0),
+    ("Remove disks from all floppy disk drives, and then press ENTER.",
+     "restart", 0),
     ("MS-DOS 6.22 is now installed", "complete", 0),
 ])
 def test_classify_setup_screens(screen, name, disk):

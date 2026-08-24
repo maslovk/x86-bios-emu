@@ -645,6 +645,35 @@ class BIOS:
         lba = (cyl * nheads + head) * spt + (sector - 1)
         return lba, count
 
+    def _write_segment_buffer(self, segment, offset, data):
+        """Bulk-copy bytes into segment:offset with real-mode wrapping."""
+        ram = self.mem.ram
+        source = memoryview(data)
+        position = 0
+        offset &= 0xFFFF
+        while position < len(source):
+            physical = ((segment << 4) + offset) & 0xFFFFF
+            count = min(len(source) - position, 0x10000 - offset,
+                        len(ram) - physical)
+            ram[physical:physical + count] = source[position:position + count]
+            position += count
+            offset = (offset + count) & 0xFFFF
+
+    def _read_segment_buffer(self, segment, offset, size):
+        """Bulk-copy bytes from segment:offset with real-mode wrapping."""
+        ram = self.mem.ram
+        result = bytearray(size)
+        position = 0
+        offset &= 0xFFFF
+        while position < size:
+            physical = ((segment << 4) + offset) & 0xFFFFF
+            count = min(size - position, 0x10000 - offset,
+                        len(ram) - physical)
+            result[position:position + count] = ram[physical:physical + count]
+            position += count
+            offset = (offset + count) & 0xFFFF
+        return result
+
     def _int13h(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
         dl = cpu.dl
@@ -678,8 +707,7 @@ class BIOS:
                     break
                 # Write each sector immediately to ES:BX + s*512, wrapping
                 # the offset modulo 64K (real INT 13h wraps at the segment).
-                for i in range(512):
-                    self.mem.write_byte((es << 4) + ((bx + s * 512 + i) & 0xFFFF), buf[i])
+                self._write_segment_buffer(es, bx + s * 512, buf)
             if not ok:
                 cpu.ax = 0x0004
                 cpu.flags |= 0x01
@@ -709,8 +737,7 @@ class BIOS:
             for s in range(sectors):
                 # Read each sector's worth of guest memory from ES:BX,
                 # wrapping the offset modulo 64K, then write it to disk.
-                for i in range(512):
-                    buf[i] = self.mem.read_byte((es << 4) + ((bx + s * 512 + i) & 0xFFFF))
+                buf[:] = self._read_segment_buffer(es, bx + s * 512, 512)
                 if not disk.write_sector(lba + s, buf):
                     ok = False
                     break
@@ -871,8 +898,7 @@ class BIOS:
                     ok = False
                     break
                 # Write each sector immediately to buf_seg:buf_off + s*512, wrapping offset modulo 64K
-                for i in range(512):
-                    self.mem.write_byte((buf_seg << 4) + ((buf_off + s * 512 + i) & 0xFFFF), buf[i])
+                self._write_segment_buffer(buf_seg, buf_off + s * 512, buf)
 
             if ok:
                 cpu.ax = 0x0001  # Success, sectors transferred

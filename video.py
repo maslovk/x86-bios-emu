@@ -448,8 +448,9 @@ class Disk:
     def read_sector(self, lba, buf):
         if not 0 <= lba < len(self.sectors):
             return False
-        for i in range(512):
-            buf[i] = self.sectors[lba][i]
+        if len(buf) < 512:
+            raise IndexError('sector buffer must contain at least 512 bytes')
+        buf[:512] = self.sectors[lba]
         return True
 
     def write_sector(self, lba, buf):
@@ -457,8 +458,9 @@ class Disk:
             return False
         if not 0 <= lba < len(self.sectors):
             return False
-        for i in range(512):
-            self.sectors[lba][i] = buf[i]
+        if len(buf) < 512:
+            raise IndexError('sector buffer must contain at least 512 bytes')
+        self.sectors[lba][:] = buf[:512]
         self.dirty = True
         return True
 

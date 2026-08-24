@@ -88,6 +88,44 @@ def test_ah03_write_then_ah02_read(memory, video, kbd, disk):
         assert memory.read_byte(dst + i) == (i * 7 + 3) & 0xFF
 
 
+def test_ah02_and_ah03_bulk_transfer_wraps_es_bx_at_64k(
+        memory, video, kbd, disk):
+    b = _bios(memory, video, kbd, disk)
+    pattern = bytes((i * 11 + 5) & 0xFF for i in range(512))
+    disk.write_sector(55, pattern)
+
+    cpu = FakeCPU(
+        ax=0x0201, cx=_CX_12, dx=_DX_H1, es=0x2000, bx=0xFF00)
+    b.handlers[0x13](cpu)
+
+    assert cpu.ax == 0x0001 and not (cpu.flags & 0x01)
+    assert memory.ram[0x2FF00:0x30000] == pattern[:256]
+    assert memory.ram[0x20000:0x20100] == pattern[256:]
+
+    replacement = bytes((255 - i) & 0xFF for i in range(512))
+    memory.ram[0x2FF00:0x30000] = replacement[:256]
+    memory.ram[0x20000:0x20100] = replacement[256:]
+    cpu = FakeCPU(
+        ax=0x0301, cx=_CX_12, dx=_DX_H1, es=0x2000, bx=0xFF00)
+    b.handlers[0x13](cpu)
+
+    result = bytearray(512)
+    assert disk.read_sector(55, result)
+    assert result == replacement
+
+
+def test_bulk_segment_transfer_wraps_at_20_bit_address_space(
+        memory, video, kbd, disk):
+    b = _bios(memory, video, kbd, disk)
+    pattern = bytes(range(32))
+
+    b._write_segment_buffer(0xFFFF, 0x0008, pattern)
+
+    assert memory.ram[0xFFFF8:0x100000] == pattern[:8]
+    assert memory.ram[:24] == pattern[8:]
+    assert b._read_segment_buffer(0xFFFF, 0x0008, len(pattern)) == pattern
+
+
 def test_ah03_out_of_range_sets_carry(memory, video, kbd, disk):
     b = _bios(memory, video, kbd, disk)
     # sector 30 > spt 18 (1.44MB) -> invalid

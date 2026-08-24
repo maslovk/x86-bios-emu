@@ -23,6 +23,16 @@ def decode_vga_char(ch):
 class Video:
     """VGA text mode 0xB8000, 80x25, 16 colors."""
 
+    # IBM VGA mode-3 defaults for CRTC registers 00h-18h.  The renderer only
+    # needs the text geometry, but DOS applications also probe these ports to
+    # identify the adapter and save/restore cursor state.
+    _MODE3_CRTC = (
+        0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F,
+        0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x00,
+        0x9C, 0x8E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3,
+        0xFF,
+    )
+
     ATTR_NORMAL = 0x07
     ATTR_WHITE  = 0x0F
     ATTR_GREEN  = 0x09
@@ -40,11 +50,50 @@ class Video:
         self.mode = 3
         self.mem = None
         self.text_base = 0xB8000
+        self.crtc_index = 0
+        self.crtc_registers = list(self._MODE3_CRTC) + [0] * 7
+        self._status_reads = 0
         # Optional callback invoked with a stripped text line each time a row
         # scrolls off the top of the visible 80x25 window.  Harnesses use it to
         # accumulate a full scrollback transcript, since output longer than 25
         # rows is otherwise lost (only the final visible screen survives).
         self.on_scroll_line = None
+
+    def read_crtc(self):
+        """Read the currently selected color CRTC register."""
+        index = self.crtc_index & 0x1F
+        if index in (0x0E, 0x0F):
+            cursor = self.cur_y * self.width + self.cur_x
+            self.crtc_registers[0x0E] = (cursor >> 8) & 0xFF
+            self.crtc_registers[0x0F] = cursor & 0xFF
+        return self.crtc_registers[index]
+
+    def write_crtc(self, value):
+        """Write the selected CRTC register and apply a visible cursor move."""
+        index = self.crtc_index & 0x1F
+        if index in (0x0E, 0x0F):
+            cursor = self.cur_y * self.width + self.cur_x
+            self.crtc_registers[0x0E] = (cursor >> 8) & 0xFF
+            self.crtc_registers[0x0F] = cursor & 0xFF
+        self.crtc_registers[index] = value & 0xFF
+        if index in (0x0E, 0x0F):
+            cursor = ((self.crtc_registers[0x0E] << 8)
+                      | self.crtc_registers[0x0F])
+            if cursor < self.width * self.height:
+                self.cur_y, self.cur_x = divmod(cursor, self.width)
+
+    def input_status_1(self):
+        """Return deterministic VGA display-enable/retrace timing signals.
+
+        Guest timing loops care about transitions rather than wall-clock
+        accuracy.  Advancing on every read keeps those loops deterministic
+        and allows fast native instruction batches to make progress.
+        """
+        self._status_reads = (self._status_reads + 1) % 8192
+        phase = self._status_reads
+        display_enable = 0x01 if phase % 64 < 48 else 0x00
+        vertical_retrace = 0x08 if phase >= 7680 else 0x00
+        return display_enable | vertical_retrace
 
     def attach_memory(self, mem):
         self.mem = mem
@@ -303,6 +352,15 @@ class IO:
         if port == 0x92:  # Soft config
             return 0x00
 
+        # VGA color CRTC and Input Status Register 1.  Both CPU backends route
+        # port instructions through this IO object.
+        if port == 0x3D4:
+            return self.video.crtc_index
+        if port == 0x3D5:
+            return self.video.read_crtc()
+        if port == 0x3DA:
+            return self.video.input_status_1()
+
         # PIT counters (0x40-0x42)
         if self.pit and 0x40 <= port <= 0x42:
             return self.pit.read_counter(port - 0x40)
@@ -347,6 +405,13 @@ class IO:
             return
         if port == 0x80:  # Diagnostic port
             pass
+
+        if port == 0x3D4:
+            self.video.crtc_index = val & 0x1F
+            return
+        if port == 0x3D5:
+            self.video.write_crtc(val)
+            return
 
         # PIT counters (0x40-0x42)
         if self.pit and 0x40 <= port <= 0x42:

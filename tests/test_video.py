@@ -378,6 +378,39 @@ class TestDisk:
 # ── IO Ports ────────────────────────────────────────────────────
 
 class TestIO:
+    def test_vga_crtc_register_round_trip(self, io_ports):
+        io_ports.outb(0x3D4, 0x12)
+        io_ports.outb(0x3D5, 0xA5)
+
+        assert io_ports.inb(0x3D4) == 0x12
+        assert io_ports.inb(0x3D5) == 0xA5
+        assert 0x3D4 not in io_ports.unhandled_ports
+        assert 0x3D5 not in io_ports.unhandled_ports
+
+    def test_vga_crtc_cursor_registers_follow_video_cursor(self, io_ports):
+        io_ports.video.cur_y = 10
+        io_ports.video.cur_x = 20
+        cursor = 10 * 80 + 20
+
+        io_ports.outb(0x3D4, 0x0E)
+        assert io_ports.inb(0x3D5) == cursor >> 8
+        io_ports.outb(0x3D4, 0x0F)
+        assert io_ports.inb(0x3D5) == cursor & 0xFF
+
+        new_cursor = 5 * 80 + 7
+        io_ports.outb(0x3D4, 0x0E)
+        io_ports.outb(0x3D5, new_cursor >> 8)
+        io_ports.outb(0x3D4, 0x0F)
+        io_ports.outb(0x3D5, new_cursor & 0xFF)
+        assert (io_ports.video.cur_y, io_ports.video.cur_x) == (5, 7)
+
+    def test_vga_status_bits_transition(self, io_ports):
+        values = [io_ports.inb(0x3DA) for _ in range(8192)]
+
+        assert {value & 0x01 for value in values} == {0x00, 0x01}
+        assert {value & 0x08 for value in values} == {0x00, 0x08}
+        assert 0x3DA not in io_ports.unhandled_ports
+
     def test_keyboard_data_port(self, io_ports):
         io_ports.kbd.feed_string("X")
         val = io_ports.inb(0x60)

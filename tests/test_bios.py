@@ -684,6 +684,35 @@ class TestINT13hMultiSector:
         assert cpu.flags & 0x01
 
 
+class TestINT33h:
+    def test_reset_reports_two_button_mouse(self, bios_env):
+        bios_env.initialize()
+        cpu = FakeCPU(ax=0x0000, bx=0x1234)
+
+        bios_env.handlers[0x33](cpu)
+
+        assert cpu.ax == 0xFFFF
+        assert cpu.bx == 2
+
+    def test_get_position_uses_full_ax_function_number(self, bios_env):
+        bios_env.initialize()
+        cpu = FakeCPU(ax=0x0003, bx=0x1234, cx=0x5678, dx=0x9ABC)
+
+        bios_env.handlers[0x33](cpu)
+
+        assert cpu.bx == 0
+        assert cpu.cx == 0
+        assert cpu.dx == 0
+
+    def test_unknown_function_preserves_registers(self, bios_env):
+        bios_env.initialize()
+        cpu = FakeCPU(ax=0x0004, bx=1, cx=2, dx=3)
+
+        bios_env.handlers[0x33](cpu)
+
+        assert (cpu.ax, cpu.bx, cpu.cx, cpu.dx) == (0x0004, 1, 2, 3)
+
+
 class TestINT15h:
     """Test INT 15h extended functions."""
 

@@ -1145,16 +1145,14 @@ class BIOS:
     # ── INT 33h: Mouse ─────────────────────────────────────────
 
     def _int33h(self, cpu):
-        ah = (cpu.ax >> 8) & 0xFF
-        if ah == 0x00:
-            cpu.ax = 0x0001  # Mouse present
-        elif ah == 0x03:
-            cpu.ax = 0x0001
+        function = cpu.ax
+        if function == 0x0000:  # Reset driver and report installed
+            cpu.ax = 0xFFFF
+            cpu.bx = 2          # Two-button mouse
+        elif function == 0x0003:  # Get button state and cursor position
+            cpu.bx = 0
             cpu.cx = 0
             cpu.dx = 0
-            cpu.bx = 0
-        else:
-            cpu.ax = 0x0001
 
     # ── INT 4Fh: VBE ──────────────────────────────────────────
 

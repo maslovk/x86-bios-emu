@@ -394,7 +394,9 @@ The emulator supports two VGA output paths:
 
 - **Terminal** (default) — renders the 80x25 grid as an aligned box-drawing
   frame with batched ANSI colour escapes.  ANSI is auto-disabled when stdout
-  isn't a TTY so output stays readable in pipes/logs.  No keyboard capture.
+  isn't a TTY so output stays readable in pipes/logs.  With `--interactive`,
+  xterm-compatible arrows, navigation keys, F1-F12, Shift+Tab, modified keys,
+  Alt shortcuts, Enter, and Backspace are translated to DOS BIOS key events.
 - **GTK** (`--gtk` / `-g`) — opens a real `Gtk.DrawingArea` window, paints
   each cell's CGA background + foreground colour, and captures key presses
   directly (injecting ASCII bytes into the keyboard controller).  This is
@@ -485,9 +487,10 @@ python3 main.py --floppy DOS3_3_525/DISK01.IMG --gtk
 # and press Enter; same for 'Enter new time'.  The DOS A> prompt follows.
 ```
 
-The terminal `--interactive` path also works but needs a real TTY (it puts
-the terminal into cbreak mode); piped input has timing issues because the
-keys arrive before COMMAND.COM's prompt is up.
+The terminal `--interactive` path also works and puts a real TTY into cbreak
+mode. It decodes common xterm escape sequences for navigation, function, and
+Alt keys; piped input can still have timing issues because the keys may arrive
+before COMMAND.COM's prompt is up.
 
 This was unblocked by five CPU-emulation bugs found via a Unicorn (QEMU-based)
 differential single-step trace against memory snapshots captured at the

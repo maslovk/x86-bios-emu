@@ -18,6 +18,7 @@ from fat12 import FAT12, FAT12Error
 from hostbridge import (audit_host_directory_deletions,
                         build_host_directory_disk, delete_missing_host_files,
                         snapshot_host_directory, sync_host_directory_disk)
+from terminal_keyboard import ASCII, TerminalKeyDecoder
 import video as video_mod
 
 
@@ -897,6 +898,7 @@ class Emulator:
             else:
                 self.kbd.feed_string(" ")
 
+        terminal_keyboard = None
         if self.interactive and not self.gtk:
             print("[Interactive mode: type keys, Ctrl+C to stop]", file=sys.stderr)
             import select
@@ -912,6 +914,7 @@ class Emulator:
             # is piped (e.g. `printf ... | main.py -i`) we just read bytes.
             self._term_fd = sys.stdin.fileno()
             self._term_old = None
+            terminal_keyboard = TerminalKeyDecoder()
             if sys.stdin.isatty():
                 self._term_old = termios.tcgetattr(self._term_fd)
                 tty.setcbreak(self._term_fd)
@@ -968,7 +971,8 @@ class Emulator:
                 #     key-press, and window-close events).  Key presses
                 #     are injected into kbd_ctrl via the on_key callback set
                 #     up in __init__, so we only need to pump here.
-                #   - terminal mode: cbreak stdin read.
+                #   - terminal mode: decode xterm escape sequences and inject
+                #     their corresponding BIOS key events.
                 if self.gtk:
                     # Drawing the complete 80x25 Pango grid after every guest
                     # instruction starves DOS during boot.  Check the clock in
@@ -988,14 +992,23 @@ class Emulator:
                             self.gtk_display.set_media_status(self._media_status())
                 elif self.interactive:
                     try:
+                        now = time.monotonic()
+                        key_events = []
                         if select.select([sys.stdin], [], [], 0)[0]:
-                            b = _os.read(0, 1)
-                            if b:
-                                key = b[0]
+                            data = _os.read(self._term_fd, 64)
+                            key_events.extend(
+                                terminal_keyboard.feed(data, now))
+                        key_events.extend(terminal_keyboard.flush(now))
+                        for kind, value in key_events:
+                            if kind == ASCII:
                                 if self.kbd_ctrl:
-                                    self.kbd_ctrl.inject_key(key)
+                                    self.kbd_ctrl.inject_key(value)
                                 else:
-                                    self.kbd.buffer.append(key)
+                                    self.kbd.buffer.append(value)
+                            elif self.kbd_ctrl:
+                                self.kbd_ctrl.inject_extended_key(value)
+                            else:
+                                self.kbd.buffer.append((value, 0))
                     except (OSError, ValueError):
                         pass
 

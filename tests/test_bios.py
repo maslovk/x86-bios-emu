@@ -510,6 +510,33 @@ class TestINT16h:
         assert not (cpu.flags & 0x40), "ZF must be clear: a key is available"
         assert (cpu.ax & 0xFF) == ord('X'), "AL must hold the ASCII key"
 
+    def test_check_key_leaves_controller_bytes_for_guest_irq_handler(self):
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        bios.mem.write_word(0x09 * 4, 0x5678)
+        bios.mem.write_word(0x09 * 4 + 2, 0x1234)
+        kbd_ctrl.inject_scan_code(0xE0)
+        kbd_ctrl.inject_scan_code(0x50)
+
+        cpu = FakeCPU(ax=0x1100)
+        bios.handlers[0x16](cpu)
+
+        assert cpu.flags & 0x40
+        assert kbd_ctrl.read_port_data() == 0xE0
+        assert kbd_ctrl.read_port_data() == 0x50
+
+    def test_check_key_can_drain_host_direct_key_with_guest_irq_hook(self):
+        bios, kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        bios.mem.write_word(0x09 * 4, 0x5678)
+        bios.mem.write_word(0x09 * 4 + 2, 0x1234)
+        kbd_ctrl.inject_key(ord('X'))
+
+        cpu = FakeCPU(ax=0x1100)
+        bios.handlers[0x16](cpu)
+
+        assert not (cpu.flags & 0x40)
+        assert cpu.al == ord('X')
+        assert not kbd_ctrl.has_data()
+
     def test_check_key_peeks_does_not_consume(self):
         # AH=01 must NOT remove the key from the buffer; the subsequent
         # AH=00 (wait for key) must still be able to return it.

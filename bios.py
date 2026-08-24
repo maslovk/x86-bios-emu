@@ -965,6 +965,15 @@ class BIOS:
 
     # ── INT 16h: Keyboard ──────────────────────────────────────
 
+    def _keyboard_irq_is_hooked(self):
+        """Return whether the guest replaced the BIOS IRQ 1 vector."""
+        stub = self.ivt_stubs.get(0x09)
+        if stub is None:
+            return False
+        ip = self.mem.read_word(0x09 * 4)
+        cs = self.mem.read_word(0x09 * 4 + 2)
+        return (cs, ip) != stub
+
     def _int16h(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
         # Set-1 scan codes for the printable ASCII range 0x20–0x7E, used to
@@ -987,20 +996,34 @@ class BIOS:
             0x74: 0x14, 0x75: 0x16, 0x76: 0x2F, 0x77: 0x11, 0x78: 0x2D,
             0x79: 0x15, 0x7A: 0x2C,
         }
+
+        def _drain_unserviced_controller_data():
+            # Direct draining is a compatibility path for hosts/tests that
+            # call INT 16h without running the hardware IRQ pump.  Once a DOS
+            # program owns IRQ 1, every physical byte must instead pass
+            # through that handler.  Consuming its queued bytes here leaves
+            # stale PIC requests that later deliver phantom port-60 zeros and
+            # makes menu input arrive one key behind.
+            if not self.kbd_ctrl or not self.kbd_ctrl.has_data():
+                return
+            if (self._keyboard_irq_is_hooked()
+                    and self.kbd_ctrl.has_physical_data()):
+                return
+            while self.kbd_ctrl.has_data():
+                (scan, ch, bufferable, shift_state, extended_state,
+                 flags_3) = self.kbd_ctrl.read_bios_event()
+                self._sync_keyboard_bda(
+                    shift_state, extended_state, flags_3)
+                if bufferable:
+                    self.kbd.buffer.append(
+                        (scan, ch) if scan is not None else ch)
+
         if ah in (0x00, 0x10):  # Wait for key (blocking); 0x10 = enhanced
             # Drain keyboard controller output into kbd buffer first. Keys
             # arrive here as ASCII bytes (kbd_ctrl.inject_key bypasses scan
             # translation), so the buffer holds ASCII, NOT scan codes.
             def _take_key():
-                if self.kbd_ctrl and self.kbd_ctrl.has_data():
-                    while self.kbd_ctrl.has_data():
-                        (scan, ch, bufferable, shift_state, extended_state,
-                         flags_3) = self.kbd_ctrl.read_bios_event()
-                        self._sync_keyboard_bda(
-                            shift_state, extended_state, flags_3)
-                        if bufferable:
-                            self.kbd.buffer.append(
-                                (scan, ch) if scan is not None else ch)
+                _drain_unserviced_controller_data()
                 if self.kbd.key_pressed():
                     entry = self.kbd.read_key()
                     if isinstance(entry, tuple):
@@ -1022,16 +1045,9 @@ class BIOS:
                 return False
 
             if not _take_key():
-                # Real BIOS semantics: AH=00/AH=10h BLOCK until a key
-                # arrives.  Returning a phantom NUL key immediately (the
-                # old behaviour) breaks callers that use the blocking read
-                # as their only wait primitive -- MS-DOS 5 Setup polls
-                # AH=10h/AH=00 in a loop and treats each NUL as an input
-                # event that matches no filter, spinning forever.  Spin for
-                # a bounded budget (keys can be queued from the host at any
-                # time), then fall back to the NUL return so host run
-                # loops that only check the screen between guest steps
-                # still make progress.
+                # Real BIOS semantics block here. Keep polling for host input
+                # for a bounded period, then return NUL so the single-threaded
+                # emulator loop can continue pumping devices and host events.
                 for _ in range(self.KBD_WAIT_POLLS):
                     if _take_key():
                         return
@@ -1043,15 +1059,7 @@ class BIOS:
             # path used by the interactive main loop) are invisible to AH=01,
             # because the IRQ-1/INT-09h drain path is not guaranteed to have
             # fired.  DOS's idle loop polls AH=01, so this would deadlock.
-            if self.kbd_ctrl and self.kbd_ctrl.has_data():
-                while self.kbd_ctrl.has_data():
-                    (scan, ch, bufferable, shift_state, extended_state,
-                     flags_3) = self.kbd_ctrl.read_bios_event()
-                    self._sync_keyboard_bda(
-                        shift_state, extended_state, flags_3)
-                    if bufferable:
-                        self.kbd.buffer.append(
-                            (scan, ch) if scan is not None else ch)
+            _drain_unserviced_controller_data()
             if self.kbd.key_pressed():
                 # AH=01 peeks (returns the key in AX but leaves it in the
                 # buffer for AH=00 to consume).  Buffer holds ASCII; put it

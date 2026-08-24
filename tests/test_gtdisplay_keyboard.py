@@ -95,26 +95,43 @@ def test_ctrl_c_is_delivered_to_dos():
     assert display.stop is False
 
 
-def test_arrow_key_keeps_enhanced_bios_event_path():
+def test_arrow_key_emits_physical_enhanced_make_and_break():
     display = make_display()
     scans = []
-    display.on_extended_key = scans.append
+    display.on_scan_code = scans.append
 
     assert display._on_key_press(None, event(display._Gdk.KEY_Left))
+    assert display._on_key_release(None, event(display._Gdk.KEY_Left))
 
-    assert scans == [0x4B]
+    assert scans == [0xE0, 0x4B, 0xE0, 0xCB]
 
 
-def test_ctrl_left_uses_bios_word_navigation_scan():
+def test_arrow_auto_repeat_repeats_make_until_one_break():
     display = make_display()
     scans = []
-    display.on_extended_key = scans.append
+    display.on_scan_code = scans.append
+
+    display._on_key_press(None, event(display._Gdk.KEY_Down))
+    display._on_key_press(None, event(display._Gdk.KEY_Down))
+    display._on_key_release(None, event(display._Gdk.KEY_Down))
+
+    assert scans == [0xE0, 0x50, 0xE0, 0x50, 0xE0, 0xD0]
+
+
+def test_ctrl_left_uses_physical_modifier_and_navigation_scans():
+    display = make_display()
+    scans = []
+    display.on_scan_code = scans.append
     gdk = display._Gdk
 
+    display._on_key_press(None, event(gdk.KEY_Control_L))
     display._on_key_press(
         None, event(gdk.KEY_Left, gdk.ModifierType.CONTROL_MASK))
+    display._on_key_release(
+        None, event(gdk.KEY_Left, gdk.ModifierType.CONTROL_MASK))
+    display._on_key_release(None, event(gdk.KEY_Control_L))
 
-    assert scans == [0x73]
+    assert scans == [0x1D, 0xE0, 0x4B, 0xE0, 0xCB, 0x9D]
 
 
 def test_shift_tab_uses_scan_event_instead_of_plain_tab():
@@ -186,11 +203,12 @@ def test_shifted_printable_is_translated_by_keyboard_controller():
     assert controller.shift is False
 
 
-def test_num_lock_off_keypad_navigation_uses_enhanced_path():
+def test_num_lock_off_keypad_navigation_stays_on_keypad():
     display = make_display()
     scans = []
-    display.on_extended_key = scans.append
+    display.on_scan_code = scans.append
 
     display._on_key_press(None, event(display._Gdk.KEY_KP_Left))
+    display._on_key_release(None, event(display._Gdk.KEY_KP_Left))
 
-    assert scans == [0x4B]
+    assert scans == [0x4B, 0xCB]

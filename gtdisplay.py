@@ -282,6 +282,13 @@ class GtkDisplay:
             Gdk.KEY_KP_Decimal: (0x53,), Gdk.KEY_KP_Multiply: (0x37,),
             Gdk.KEY_KP_Divide: (0xE0, 0x35),
             Gdk.KEY_KP_Enter: (0xE0, 0x1C),
+            # GTK reports these names for the same physical keypad keys when
+            # Num Lock is off.  They are not the E0-prefixed cursor cluster.
+            Gdk.KEY_KP_Home: (0x47,), Gdk.KEY_KP_Up: (0x48,),
+            Gdk.KEY_KP_Page_Up: (0x49,), Gdk.KEY_KP_Left: (0x4B,),
+            Gdk.KEY_KP_Right: (0x4D,), Gdk.KEY_KP_End: (0x4F,),
+            Gdk.KEY_KP_Down: (0x50,), Gdk.KEY_KP_Page_Down: (0x51,),
+            Gdk.KEY_KP_Insert: (0x52,), Gdk.KEY_KP_Delete: (0x53,),
         }
         sequence = keypad_keys.get(keyval)
         if sequence is not None:
@@ -291,6 +298,15 @@ class GtkDisplay:
             Gdk.KEY_Return: (0x1C,), Gdk.KEY_BackSpace: (0x0E,),
             Gdk.KEY_Escape: (0x01,), Gdk.KEY_Tab: (0x0F,),
             Gdk.KEY_ISO_Left_Tab: (0x0F,),
+            # The dedicated enhanced-keyboard navigation cluster sends an E0
+            # prefix for both make and break.  Repeated GTK key-press events
+            # therefore model the keyboard's typematic repeated make codes.
+            Gdk.KEY_Home: (0xE0, 0x47), Gdk.KEY_Up: (0xE0, 0x48),
+            Gdk.KEY_Page_Up: (0xE0, 0x49), Gdk.KEY_Left: (0xE0, 0x4B),
+            Gdk.KEY_Right: (0xE0, 0x4D), Gdk.KEY_End: (0xE0, 0x4F),
+            Gdk.KEY_Down: (0xE0, 0x50),
+            Gdk.KEY_Page_Down: (0xE0, 0x51),
+            Gdk.KEY_Insert: (0xE0, 0x52), Gdk.KEY_Delete: (0xE0, 0x53),
         }
         sequence = special_keys.get(keyval)
         if sequence is not None:
@@ -323,7 +339,6 @@ class GtkDisplay:
         Gdk = self._Gdk
         keyval = event.keyval
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
-        alt = bool(event.state & Gdk.ModifierType.MOD1_MASK)
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
 
         modifier_scans = {
@@ -361,50 +376,6 @@ class GtkDisplay:
         make_sequence = self._physical_scan_for_key(keyval)
         if make_sequence is not None:
             self._emit_scan_sequence(make_sequence)
-            return True
-        # Enhanced keys are delivered to DOS as scan codes with an ASCII
-        # value of zero.  Setup's menus use the Up/Down arrows to select
-        # actions (for example, Exit versus allocating a disk); forwarding
-        # only an ASCII byte drops these keys before INT 16h can see them.
-        extended_keys = {
-            Gdk.KEY_Up: 0x48,
-            Gdk.KEY_Down: 0x50,
-            Gdk.KEY_Left: 0x4B,
-            Gdk.KEY_Right: 0x4D,
-            Gdk.KEY_Home: 0x47,
-            Gdk.KEY_End: 0x4F,
-            Gdk.KEY_Page_Up: 0x49,
-            Gdk.KEY_Page_Down: 0x51,
-            Gdk.KEY_Insert: 0x52,
-            Gdk.KEY_Delete: 0x53,
-            Gdk.KEY_KP_Up: 0x48,
-            Gdk.KEY_KP_Down: 0x50,
-            Gdk.KEY_KP_Left: 0x4B,
-            Gdk.KEY_KP_Right: 0x4D,
-            Gdk.KEY_KP_Home: 0x47,
-            Gdk.KEY_KP_End: 0x4F,
-            Gdk.KEY_KP_Page_Up: 0x49,
-            Gdk.KEY_KP_Page_Down: 0x51,
-            Gdk.KEY_KP_Insert: 0x52,
-            Gdk.KEY_KP_Delete: 0x53,
-        }
-        scan_code = extended_keys.get(keyval)
-        if scan_code is not None:
-            ctrl_navigation = {
-                0x47: 0x77, 0x48: 0x8D, 0x49: 0x84,
-                0x4B: 0x73, 0x4D: 0x74, 0x4F: 0x75,
-                0x50: 0x91, 0x51: 0x76, 0x52: 0x92, 0x53: 0x93,
-            }
-            alt_navigation = {
-                0x47: 0x97, 0x48: 0x98, 0x49: 0x99,
-                0x4B: 0x9B, 0x4D: 0x9D, 0x4F: 0x9F,
-                0x50: 0xA0, 0x51: 0xA1, 0x52: 0xA2, 0x53: 0xA3,
-            }
-            if alt:
-                scan_code = alt_navigation[scan_code]
-            elif ctrl:
-                scan_code = ctrl_navigation[scan_code]
-            self._emit_extended(scan_code)
             return True
         return False
 

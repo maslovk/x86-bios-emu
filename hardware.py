@@ -51,6 +51,16 @@ _E0_MAP = {
 _FUNCTION_KEYS = set(range(0x3B, 0x45)) | {0x57, 0x58}
 _MOD_KEYS = {0x2A, 0x36, 0x1D, 0x38, 0x3A, 0x45, 0x46}
 _KEYPAD_DIGIT_KEYS = set(range(0x47, 0x54)) - {0x4A, 0x4E}
+_CTRL_NAVIGATION_SCANS = {
+    0x47: 0x77, 0x48: 0x8D, 0x49: 0x84,
+    0x4B: 0x73, 0x4D: 0x74, 0x4F: 0x75,
+    0x50: 0x91, 0x51: 0x76, 0x52: 0x92, 0x53: 0x93,
+}
+_ALT_NAVIGATION_SCANS = {
+    0x47: 0x97, 0x48: 0x98, 0x49: 0x99,
+    0x4B: 0x9B, 0x4D: 0x9D, 0x4F: 0x9F,
+    0x50: 0xA0, 0x51: 0xA1, 0x52: 0xA2, 0x53: 0xA3,
+}
 
 
 class KeyboardController:
@@ -67,8 +77,10 @@ class KeyboardController:
 
     def __init__(self):
         self._out_buffer = []       # FIFO of controller output bytes/events
-        self._scan_buffer = []      # matching scan code (or None for ASCII)
+        self._scan_buffer = []      # BIOS scan code (or None for ASCII)
+        self._port_buffer = []      # physical byte exposed through port 60h
         self._raw_buffer = []       # host events exposed as raw port bytes
+        self._physical_buffer = []  # bytes injected as a set-1 scan stream
         self._bios_key_buffer = []  # True only for BIOS-bufferable key makes
         self._state_buffer = []     # modifier-state snapshot for each byte
         self._irq_port_event = None  # byte read by a guest IRQ 1 handler
@@ -145,7 +157,8 @@ class KeyboardController:
     def read_data(self):
         """Read translated ASCII from the controller (test/API helper)."""
         while self._out_buffer:
-            _scan, ascii_value, _raw, bios_key, _state = self._read_event()
+            _scan, ascii_value, _port, _raw, bios_key, _state = \
+                self._read_event()
             if bios_key is not False:
                 return ascii_value
         return 0x00
@@ -158,13 +171,13 @@ class KeyboardController:
         """
         event = self._read_event()
         self._irq_port_event = event
-        scan, ascii_value, raw, _bios_key, _state = event
+        _scan, ascii_value, port_value, raw, _bios_key, _state = event
         # Guest DOS IRQ handlers read the raw 8042 data port rather than
         # calling INT 16h. Enhanced keys have no ASCII byte, so expose their
         # set-1 scan code as real hardware does. Printable host injections
         # and translated scan codes retain the public ASCII behavior.
-        if raw and scan is not None:
-            return scan
+        if raw:
+            return port_value
         return ascii_value
 
     def read_key_event(self):
@@ -175,7 +188,7 @@ class KeyboardController:
         can distinguish modifier chords, arrows, and function keys.
         """
         while self._out_buffer:
-            scan, value, _raw, bios_key, _state = self._read_event()
+            scan, value, _port, _raw, bios_key, _state = self._read_event()
             if bios_key is not False:
                 return scan, value
         return None, 0x00
@@ -188,10 +201,10 @@ class KeyboardController:
         raise IRQ 1 but must not become characters returned by INT 16h.
         """
         if replay_port and self._irq_port_event is not None:
-            scan, value, _raw, bios_key, state = self._irq_port_event
+            scan, value, _port, _raw, bios_key, state = self._irq_port_event
             self._irq_port_event = None
         else:
-            scan, value, _raw, bios_key, state = self._read_event()
+            scan, value, _port, _raw, bios_key, state = self._read_event()
         return scan, value, bios_key is True, state[0], state[1], state[2]
 
     def begin_irq(self):
@@ -204,22 +217,30 @@ class KeyboardController:
         if self._out_buffer:
             val = self._out_buffer.pop(0)
             scan = self._scan_buffer.pop(0)
+            port_value = self._port_buffer.pop(0)
             raw = self._raw_buffer.pop(0)
+            self._physical_buffer.pop(0)
             bios_key = self._bios_key_buffer.pop(0)
             state = self._state_buffer.pop(0)
         else:
-            val, scan, raw, bios_key = 0x00, None, False, None
+            val, scan, port_value, raw, bios_key = \
+                0x00, None, 0x00, False, None
             state = (self.shift_state, self.extended_shift_state,
                      self.bios_flags_3)
         if not self._out_buffer:
             self._out_full = False
             self.irq_pending = False
-        return scan, val, raw, bios_key, state
+        return scan, val, port_value, raw, bios_key, state
 
-    def _queue_output(self, value, scan_code=None, raw=False, bios_key=None):
+    def _queue_output(self, value, scan_code=None, raw=False, bios_key=None,
+                      port_value=None, physical=False):
         self._out_buffer.append(value & 0xFF)
         self._scan_buffer.append(scan_code)
+        if port_value is None:
+            port_value = scan_code if raw and scan_code is not None else value
+        self._port_buffer.append(port_value & 0xFF)
         self._raw_buffer.append(bool(raw))
+        self._physical_buffer.append(bool(physical))
         self._bios_key_buffer.append(bios_key)
         self._state_buffer.append(
             (self.shift_state, self.extended_shift_state, self.bios_flags_3))
@@ -301,7 +322,8 @@ class KeyboardController:
 
             if code == 0xE0:
                 self._ext_prefix = True
-                self._queue_output(0, 0xE0, raw=True, bios_key=False)
+                self._queue_output(
+                    0, 0xE0, raw=True, bios_key=False, physical=True)
                 self.irq_pending = True
                 return
 
@@ -310,13 +332,15 @@ class KeyboardController:
 
             if code & 0x80:
                 self._handle_modifier_release(code & 0x7F, extended)
-                self._queue_output(0, code, raw=True, bios_key=False)
+                self._queue_output(
+                    0, code, raw=True, bios_key=False, physical=True)
                 self.irq_pending = True
                 return
 
             if code in _MOD_KEYS:
                 self._handle_modifier_make(code, extended)
-                self._queue_output(0, code, raw=True, bios_key=False)
+                self._queue_output(
+                    0, code, raw=True, bios_key=False, physical=True)
                 self.irq_pending = True
                 return
 
@@ -335,7 +359,8 @@ class KeyboardController:
                     scan_code = 0x89 + (code - 0x57)
                 elif self.shift:
                     scan_code = 0x87 + (code - 0x57)
-                self._queue_output(0, scan_code, raw=True, bios_key=True)
+                self._queue_output(0, scan_code, raw=True, bios_key=True,
+                                   port_value=code, physical=True)
                 self.irq_pending = True
                 return
 
@@ -349,11 +374,20 @@ class KeyboardController:
                 lo_c = lo if isinstance(lo, int) else ord(lo)
                 hi_c = hi if isinstance(hi, int) else ord(hi)
                 ascii_val = self._apply_modifiers(lo_c, hi_c, code)
-                self._queue_output(ascii_val, code, raw=True, bios_key=True)
+                bios_scan = code
+                if code in _CTRL_NAVIGATION_SCANS:
+                    if self.alt:
+                        bios_scan = _ALT_NAVIGATION_SCANS[code]
+                    elif self.ctrl:
+                        bios_scan = _CTRL_NAVIGATION_SCANS[code]
+                self._queue_output(
+                    ascii_val, bios_scan, raw=True, bios_key=True,
+                    port_value=code, physical=True)
                 self.irq_pending = True
                 return  # Only process one char-producing code per call
             else:
-                self._queue_output(0, code, raw=True, bios_key=True)
+                self._queue_output(
+                    0, code, raw=True, bios_key=True, physical=True)
                 self.irq_pending = True
                 return
 
@@ -443,6 +477,10 @@ class KeyboardController:
     def has_data(self):
         """Check if output buffer has data."""
         return len(self._out_buffer) > 0
+
+    def has_physical_data(self):
+        """Return whether queued output contains a physical scan-stream byte."""
+        return any(self._physical_buffer)
 
     @property
     def shift(self):

@@ -440,7 +440,9 @@ class Emulator:
         if self.kbd_ctrl:
             self.kbd_ctrl._out_buffer.clear()
             self.kbd_ctrl._scan_buffer.clear()
+            self.kbd_ctrl._port_buffer.clear()
             self.kbd_ctrl._raw_buffer.clear()
+            self.kbd_ctrl._physical_buffer.clear()
             self.kbd_ctrl._bios_key_buffer.clear()
             self.kbd_ctrl._state_buffer.clear()
             self.kbd_ctrl._scan_fifo.clear()

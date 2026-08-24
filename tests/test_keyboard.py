@@ -75,6 +75,60 @@ class TestScanCodeInjection:
         kbd.inject_extended_key(0x50)
         assert kbd.read_port_data() == 0x50
 
+    @pytest.mark.parametrize('modifier,expected_scan', [
+        (0x1D, 0x73),  # Ctrl+Left
+        (0x38, 0x9B),  # Alt+Left
+    ])
+    def test_enhanced_navigation_separates_port_byte_from_bios_scan(
+            self, modifier, expected_scan):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(modifier)
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x4B)
+
+        assert kbd.read_key_event() == (expected_scan, 0x00)
+
+        kbd = KeyboardController()
+        kbd.inject_scan_code(modifier)
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x4B)
+        assert kbd.read_port_data() == modifier
+        assert kbd.read_port_data() == 0xE0
+        assert kbd.read_port_data() == 0x4B
+
+    def test_enhanced_navigation_break_is_raw_and_not_a_bios_key(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0xCB)
+
+        assert kbd.read_port_data() == 0xE0
+        assert kbd.read_port_data() == 0xCB
+        assert kbd.read_key_event() == (None, 0x00)
+
+    def test_physical_and_host_direct_events_are_distinguished(self):
+        kbd = KeyboardController()
+        kbd.inject_key(ord('X'))
+        assert kbd.has_physical_data() is False
+
+        kbd.inject_scan_code(0xE0)
+        assert kbd.has_physical_data() is True
+        kbd.read_port_data()
+        assert kbd.has_physical_data() is True
+        kbd.read_port_data()
+        assert kbd.has_physical_data() is False
+
+    def test_modified_function_key_keeps_physical_port_byte(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x1D)  # Ctrl make
+        kbd.inject_scan_code(0x3B)  # F1 make
+        assert kbd.read_port_data() == 0x1D
+        assert kbd.read_port_data() == 0x3B
+
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x1D)
+        kbd.inject_scan_code(0x3B)
+        assert kbd.read_key_event() == (0x5E, 0x00)
+
     def test_backspace(self):
         kbd = KeyboardController()
         kbd.inject_scan_code(0x0E)  # Backspace

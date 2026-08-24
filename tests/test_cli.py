@@ -7,7 +7,8 @@ import pytest
 from main import (BUNDLED_DOS_IMAGE, Emulator, build_argument_parser,
                   create_hard_disk_image, parse_args,
                   sanitize_snap_gtk_environment, schedule_pit_ticks)
-from gtdisplay import CURSOR_BLINK_INTERVAL_MS, _GWBASIC_FUNCTION_KEYS
+from gtdisplay import (CURSOR_BLINK_INTERVAL_MS, _FUNCTION_KEY_SCANS,
+                       _set1_scan_for_char)
 from hostbridge import (audit_host_directory_deletions,
                         build_host_directory_disk, snapshot_host_directory,
                         sync_host_directory_disk)
@@ -144,12 +145,19 @@ def test_non_snap_environment_is_untouched():
     assert environment == {'GTK_PATH': '/usr/lib/gtk-3.0'}
 
 
-def test_gw_basic_function_key_macros_match_status_line():
-    assert _GWBASIC_FUNCTION_KEYS[1] == 'LIST '
-    assert _GWBASIC_FUNCTION_KEYS[2] == 'RUN'
-    assert _GWBASIC_FUNCTION_KEYS[3] == 'LOAD "'
-    assert _GWBASIC_FUNCTION_KEYS[4] == 'SAVE "'
-    assert set(_GWBASIC_FUNCTION_KEYS) == set(range(1, 11))
+def test_gtk_function_keys_use_pc_bios_scan_codes():
+    assert _FUNCTION_KEY_SCANS[1] == 0x3B
+    assert _FUNCTION_KEY_SCANS[5] == 0x3F
+    assert _FUNCTION_KEY_SCANS[10] == 0x44
+    assert _FUNCTION_KEY_SCANS[11] == 0x57
+    assert _FUNCTION_KEY_SCANS[12] == 0x58
+
+
+def test_gtk_modifier_chords_resolve_physical_keys():
+    assert _set1_scan_for_char('f') == 0x21
+    assert _set1_scan_for_char('F') == 0x21
+    assert _set1_scan_for_char('!') == 0x02
+    assert _set1_scan_for_char('|') == 0x2B
 
 
 def test_cursor_blink_interval_matches_cga_16_field_rate():

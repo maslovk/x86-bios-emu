@@ -48,13 +48,33 @@ _CGA_RGB = [
     (0xFF, 0xFF, 0xFF),   # 15 bright white
 ]
 
-# GW-BASIC displays these command macros on its bottom status line.  They are
-# inserted without Enter, matching the original interface: the user can edit
-# the command (for example, add a filename after LOAD ") and then press Enter.
-_GWBASIC_FUNCTION_KEYS = {
-    1: 'LIST ', 2: 'RUN', 3: 'LOAD "', 4: 'SAVE "', 5: 'CONT',
-    6: 'LPRINT', 7: 'TRON', 8: 'TROFF', 9: 'KEY', 10: 'SCREEN',
+_FUNCTION_KEY_SCANS = {
+    1: 0x3B, 2: 0x3C, 3: 0x3D, 4: 0x3E, 5: 0x3F, 6: 0x40,
+    7: 0x41, 8: 0x42, 9: 0x43, 10: 0x44, 11: 0x57, 12: 0x58,
 }
+
+_SET1_CHAR_KEYS = {
+    '`~': 0x29, '1!': 0x02, '2@': 0x03, '3#': 0x04,
+    '4$': 0x05, '5%': 0x06, '6^': 0x07, '7&': 0x08,
+    '8*': 0x09, '9(': 0x0A, '0)': 0x0B, '-_': 0x0C,
+    '=+': 0x0D, 'qQ': 0x10, 'wW': 0x11, 'eE': 0x12,
+    'rR': 0x13, 'tT': 0x14, 'yY': 0x15, 'uU': 0x16,
+    'iI': 0x17, 'oO': 0x18, 'pP': 0x19, '[{': 0x1A,
+    ']}': 0x1B, 'aA': 0x1E, 'sS': 0x1F, 'dD': 0x20,
+    'fF': 0x21, 'gG': 0x22, 'hH': 0x23, 'jJ': 0x24,
+    'kK': 0x25, 'lL': 0x26, ';:': 0x27, "'\"": 0x28,
+    '\\|': 0x2B, 'zZ': 0x2C, 'xX': 0x2D, 'cC': 0x2E,
+    'vV': 0x2F, 'bB': 0x30, 'nN': 0x31, 'mM': 0x32,
+    ',<': 0x33, '.>': 0x34, '/?': 0x35, ' ': 0x39,
+}
+
+
+def _set1_scan_for_char(ch):
+    """Return the physical set-1 key for a printable host character."""
+    for characters, scan_code in _SET1_CHAR_KEYS.items():
+        if ch in characters:
+            return scan_code
+    return None
 
 # IBM CGA cursor blink toggles every 16 display fields.  The standard CGA
 # refresh is 59.92 Hz, so each on/off transition is 16 / 59.92 = 267 ms.
@@ -72,14 +92,20 @@ class GtkDisplay:
         before each redraw so the displayed grid reflects whatever DOS has
         written into 0xB8000.
     on_key : callable(int) | None
-        Callback invoked once per keypress with the ASCII byte to inject.
-        Pass ``None`` to ignore keyboard input.
+        Callback invoked once per printable/control keypress with the ASCII
+        byte to inject. Pass ``None`` to ignore those keys.
+    on_extended_key : callable(int) | None
+        Callback invoked for enhanced keys such as the arrow keys with their
+        IBM PC/AT set-1 scan code. Pass ``None`` to ignore enhanced keys.
+    on_scan_code : callable(int) | None
+        Callback invoked for raw set-1 make/break bytes. Modifier chords and
+        function keys use this path so DOS receives normal BIOS key events.
     on_close : callable() | None
         Called once when the user closes the window; the loop should then
         stop (``pump()`` also returns True after this point).
     on_reset : callable() | None
-        Called by the Reset button or Ctrl+R.  The emulator owns the reset
-        operation so the display remains independent of CPU/device details.
+        Called by the Reset button or Ctrl+Shift+R. The emulator owns the
+        reset operation so the display remains independent of CPU details.
     on_refresh : callable() | None
         Called by the Refresh B: button to rebuild host-folder media.
     on_eject : callable() | None
@@ -97,7 +123,8 @@ class GtkDisplay:
                  on_refresh=None, on_eject=None,
                  close_warning=None,
                  media_status="A: none  B: none  C: none",
-                 font_size=18, title="Simple BIOS Emulator — VGA Text"):
+                 font_size=18, title="Simple BIOS Emulator — VGA Text",
+                 on_extended_key=None, on_scan_code=None):
         # Lazy import so ``main.py`` can be imported without GTK installed
         # (e.g. in CI / test runs).  Only --gtk actually needs gi.
         try:
@@ -120,6 +147,8 @@ class GtkDisplay:
 
         self.video = video
         self.on_key = on_key
+        self.on_extended_key = on_extended_key
+        self.on_scan_code = on_scan_code
         self.on_close = on_close
         self.on_reset = on_reset
         self.on_refresh = on_refresh
@@ -140,6 +169,7 @@ class GtkDisplay:
         self.window.connect('destroy', self._on_destroy)
         self.window.connect('window-state-event', self._on_window_state)
         self.window.connect('key-press-event', self._on_key_press)
+        self.window.connect('key-release-event', self._on_key_release)
 
         self.drawing_area = Gtk.DrawingArea()
         self.drawing_area.connect('draw', self._on_draw)
@@ -243,12 +273,54 @@ class GtkDisplay:
         Gdk = self._Gdk
         keyval = event.keyval
         ch = Gdk.keyval_to_unicode(keyval)
+        ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
+        alt = bool(event.state & Gdk.ModifierType.MOD1_MASK)
+        shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
+
+        modifier_scans = {
+            Gdk.KEY_Shift_L: (0x2A,), Gdk.KEY_Shift_R: (0x36,),
+            Gdk.KEY_Control_L: (0x1D,), Gdk.KEY_Control_R: (0xE0, 0x1D),
+            Gdk.KEY_Alt_L: (0x38,), Gdk.KEY_Alt_R: (0xE0, 0x38),
+            Gdk.KEY_Caps_Lock: (0x3A,), Gdk.KEY_Num_Lock: (0x45,),
+            Gdk.KEY_Scroll_Lock: (0x46,),
+        }
+        modifier = modifier_scans.get(keyval)
+        if modifier is not None:
+            self._emit_scan_sequence(modifier)
+            return True
+
+        # Reserve Ctrl+Shift host shortcuts; unshifted Ctrl combinations must
+        # reach DOS (Ctrl+C is BREAK and Ctrl+V is meaningful in editors).
+        if ctrl and shift and keyval in (Gdk.KEY_c, Gdk.KEY_C):
+            if self._copy_selection():
+                return True
+            self.stop = True
+            return True
+        if ctrl and shift and keyval in (Gdk.KEY_r, Gdk.KEY_R):
+            self._on_reset_clicked(None)
+            return True
+        if ctrl and shift and keyval in (Gdk.KEY_v, Gdk.KEY_V):
+            self._on_paste_clicked(None)
+            return True
+        if ctrl and shift and keyval == Gdk.KEY_F11:
+            self._toggle_fullscreen()
+            return True
+
         # Printable ASCII -> inject directly.  This is the path DOS's
         # DATE/TIME prompts use; injecting the ASCII byte (not a scan code)
         # keeps INT 16h AH=00 returning the exact typed character.
-        if 0x20 <= ch <= 0x7E and not (event.state & Gdk.ModifierType.CONTROL_MASK):
+        if 0x20 <= ch <= 0x7E and not (ctrl or alt):
             self._emit(ch)
             return True
+
+        # Ctrl/Alt printable chords need a physical key event.  The keyboard
+        # controller converts Ctrl+letter to a control byte and Alt+letter to
+        # the BIOS (scan, ASCII=0) form used by QBASIC menus.
+        if 0x20 <= ch <= 0x7E and (ctrl or alt):
+            scan_code = _set1_scan_for_char(chr(ch))
+            if scan_code is not None:
+                self._emit_scan_sequence((scan_code, scan_code | 0x80))
+                return True
         # Special keys that map to control characters DOS understands.
         specials = {
             Gdk.KEY_Return: 0x0D,
@@ -259,38 +331,79 @@ class GtkDisplay:
             Gdk.KEY_ISO_Left_Tab: 0x09,
         }
         if keyval in specials:
+            special_scans = {
+                Gdk.KEY_Return: 0x1C, Gdk.KEY_KP_Enter: 0x1C,
+                Gdk.KEY_BackSpace: 0x0E, Gdk.KEY_Escape: 0x01,
+                Gdk.KEY_Tab: 0x0F, Gdk.KEY_ISO_Left_Tab: 0x0F,
+            }
+            if ctrl or alt or keyval == Gdk.KEY_ISO_Left_Tab:
+                scan_code = special_scans[keyval]
+                self._emit_scan_sequence((scan_code, scan_code | 0x80))
+                return True
             self._emit(specials[keyval])
+            return True
+        # Enhanced keys are delivered to DOS as scan codes with an ASCII
+        # value of zero.  Setup's menus use the Up/Down arrows to select
+        # actions (for example, Exit versus allocating a disk); forwarding
+        # only an ASCII byte drops these keys before INT 16h can see them.
+        extended_keys = {
+            Gdk.KEY_Up: 0x48,
+            Gdk.KEY_Down: 0x50,
+            Gdk.KEY_Left: 0x4B,
+            Gdk.KEY_Right: 0x4D,
+            Gdk.KEY_Home: 0x47,
+            Gdk.KEY_End: 0x4F,
+            Gdk.KEY_Page_Up: 0x49,
+            Gdk.KEY_Page_Down: 0x51,
+            Gdk.KEY_Insert: 0x52,
+            Gdk.KEY_Delete: 0x53,
+        }
+        scan_code = extended_keys.get(keyval)
+        if scan_code is not None:
+            ctrl_navigation = {
+                0x47: 0x77, 0x48: 0x8D, 0x49: 0x84,
+                0x4B: 0x73, 0x4D: 0x74, 0x4F: 0x75,
+                0x50: 0x91, 0x51: 0x76, 0x52: 0x92, 0x53: 0x93,
+            }
+            alt_navigation = {
+                0x47: 0x97, 0x48: 0x98, 0x49: 0x99,
+                0x4B: 0x9B, 0x4D: 0x9D, 0x4F: 0x9F,
+                0x50: 0xA0, 0x51: 0xA1, 0x52: 0xA2, 0x53: 0xA3,
+            }
+            if alt:
+                scan_code = alt_navigation[scan_code]
+            elif ctrl:
+                scan_code = ctrl_navigation[scan_code]
+            self._emit_extended(scan_code)
             return True
         function_keys = {
             Gdk.KEY_F1: 1, Gdk.KEY_F2: 2, Gdk.KEY_F3: 3,
             Gdk.KEY_F4: 4, Gdk.KEY_F5: 5, Gdk.KEY_F6: 6,
             Gdk.KEY_F7: 7, Gdk.KEY_F8: 8, Gdk.KEY_F9: 9,
-            Gdk.KEY_F10: 10,
+            Gdk.KEY_F10: 10, Gdk.KEY_F11: 11, Gdk.KEY_F12: 12,
         }
         function_number = function_keys.get(keyval)
         if function_number is not None:
-            for byte in _GWBASIC_FUNCTION_KEYS[function_number].encode('ascii'):
-                self._emit(byte)
-            return True
-        if keyval == Gdk.KEY_F11:
-            self._toggle_fullscreen()
-            return True
-        # Ctrl+C as a graceful "stop the emulator" shortcut.
-        if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (
-                Gdk.KEY_c, Gdk.KEY_C):
-            if self._copy_selection():
-                return True
-            self.stop = True
-            return True
-        if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (
-                Gdk.KEY_r, Gdk.KEY_R):
-            self._on_reset_clicked(None)
-            return True
-        if (event.state & Gdk.ModifierType.CONTROL_MASK) and keyval in (
-                Gdk.KEY_v, Gdk.KEY_V):
-            self._on_paste_clicked(None)
+            scan_code = _FUNCTION_KEY_SCANS[function_number]
+            self._emit_scan_sequence((scan_code, scan_code | 0x80))
             return True
         return False
+
+    def _on_key_release(self, _widget, event):
+        Gdk = self._Gdk
+        modifier_breaks = {
+            Gdk.KEY_Shift_L: (0xAA,), Gdk.KEY_Shift_R: (0xB6,),
+            Gdk.KEY_Control_L: (0x9D,),
+            Gdk.KEY_Control_R: (0xE0, 0x9D),
+            Gdk.KEY_Alt_L: (0xB8,), Gdk.KEY_Alt_R: (0xE0, 0xB8),
+            Gdk.KEY_Caps_Lock: (0xBA,), Gdk.KEY_Num_Lock: (0xC5,),
+            Gdk.KEY_Scroll_Lock: (0xC6,),
+        }
+        sequence = modifier_breaks.get(event.keyval)
+        if sequence is None:
+            return False
+        self._emit_scan_sequence(sequence)
+        return True
 
     def _cell_at(self, x, y):
         allocation = self.drawing_area.get_allocation()
@@ -399,6 +512,15 @@ class GtkDisplay:
     def _emit(self, byte):
         if self.on_key:
             self.on_key(byte & 0xFF)
+
+    def _emit_extended(self, scan_code):
+        if self.on_extended_key:
+            self.on_extended_key(scan_code & 0xFF)
+
+    def _emit_scan_sequence(self, sequence):
+        if self.on_scan_code:
+            for scan_code in sequence:
+                self.on_scan_code(scan_code & 0xFF)
 
     def _blink_cursor(self):
         """Toggle the cursor and request a redraw; stop after window close."""

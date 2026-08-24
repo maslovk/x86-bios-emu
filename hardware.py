@@ -28,42 +28,23 @@ _SCANCODE_MAP = {
     0x21: ('f', 'F'), 0x22: ('g', 'G'), 0x23: ('h', 'H'),
     0x24: ('j', 'J'), 0x25: ('k', 'K'), 0x26: ('l', 'L'),
     0x27: (';', ':'), 0x28: ("'", '"'), 0x29: ('`', '~'),
-    0x2B: (' ', ' '),
+    0x2B: ('\\', '|'),
     0x2C: ('z', 'Z'), 0x2D: ('x', 'X'), 0x2E: ('c', 'C'),
     0x2F: ('v', 'V'), 0x30: ('b', 'B'), 0x31: ('n', 'N'),
     0x32: ('m', 'M'), 0x33: (',', '<'), 0x34: ('.', '>'),
-    0x35: ('/', '?'), 0x37: ('*', '*'),
-    0x39: ('_', '_'), 0x3A: (' ', ' '),
-    0x3B: (' ', ' '), 0x3C: (' ', ' '), 0x3D: (' ', ' '),
-    0x3E: (' ', ' '), 0x45: (' ', ' '), 0x47: (' ', ' '),
-    0x49: (' ', ' '), 0x4B: (' ', ' '), 0x4F: (' ', ' '),
-    0x50: (' ', ' '), 0x52: (' ', ' '), 0x53: (' ', ' '),
-    0x57: (' ', ' '), 0x58: (' ', ' '),
-    0x5B: (0x1B, 0x1B), 0x5D: (' ', ' '), 0x63: (0x1B, 0x1B),
-    0x66: (' ', ' '), 0x67: (' ', ' '), 0x68: (' ', ' '),
-    0x69: (' ', ' '), 0x6B: ('\x1F', '\x1F'),
-    0x6C: ('\x10', '\x10'), 0x6D: ('\x11', '\x11'),
-    0x6E: ('\x12', '\x12'), 0x70: (' ', ' '),
-    0x71: ('/', '/'), 0x73: ('-', '-'), 0x75: ('+', '+'),
-    0x7A: ('.', '.'), 0x7C: (' ', ' '), 0x7F: (' ', ' '),
+    0x35: ('/', '?'), 0x37: ('*', '*'), 0x39: (' ', ' '),
 }
 
 _E0_MAP = {
-    0x1C: (0x0D, 0x0D), 0x1F: ('\x14', '\x14'),
-    0x27: (';', ';'), 0x35: (',', ','), 0x38: ('+', '+'),
-    0x48: (' ', ' '), 0x4B: ('\x1B', '\x1B'),
-    0x4F: ('\x1B', '\x1B'), 0x50: ('\x1B', '\x1B'),
-    0x51: ('\x1B', '\x1B'), 0x52: ('\x1B', '\x1B'),
-    0x53: ('\x1B', '\x1B'), 0x57: ('\x1B', '\x1B'),
-    0x58: ('\x1B', '\x1B'), 0x5B: ('\x1B', '\x1B'),
-    0x5D: ('\x1B', '\x1B'), 0x63: ('\x1B', '\x1B'),
-    0x66: ('\x1B', '\x1B'), 0x67: ('\x1B', '\x1B'),
-    0x68: ('\x1B', '\x1B'), 0x69: ('\x1B', '\x1B'),
-    0x6B: ('\x1B', '\x1B'), 0x6C: ('\x1B', '\x1B'),
-    0x6D: ('\x1B', '\x1B'), 0x6E: ('\x1B', '\x1B'),
+    0x1C: (0x0D, 0x0D), 0x35: ('/', '/'),
+    0x47: (0, 0), 0x48: (0, 0), 0x49: (0, 0),
+    0x4B: (0, 0), 0x4D: (0, 0), 0x4F: (0, 0),
+    0x50: (0, 0), 0x51: (0, 0), 0x52: (0, 0),
+    0x53: (0, 0),
 }
 
-_MOD_KEYS = {0x2A, 0x36, 0x1D, 0x38, 0x3A, 0x45, 0x46, 0x5B, 0x5D, 0x63, 0x70}
+_FUNCTION_KEYS = set(range(0x3B, 0x45)) | {0x57, 0x58}
+_MOD_KEYS = {0x2A, 0x36, 0x1D, 0x38, 0x3A, 0x45, 0x46}
 
 
 class KeyboardController:
@@ -163,9 +144,9 @@ class KeyboardController:
     def read_key_event(self):
         """Return ``(scan_code, ascii)`` while consuming one output byte.
 
-        Normal host-injected ASCII has no scan code and returns ``(None,
-        ascii)``.  Raw/extended scan-code injection preserves the scan code
-        so INT 16h enhanced reads can distinguish arrow and function keys.
+        Host-injected ASCII includes its best-effort physical scan code.
+        Raw/extended injection preserves the supplied scan code so INT 16h
+        can distinguish modifier chords, arrows, and function keys.
         """
         scan, value, _raw = self._read_event()
         return scan, value
@@ -244,7 +225,7 @@ class KeyboardController:
         if ascii_val == 0x09:
             return 0x0F
         if ascii_val == 0x20:
-            return 0x2B
+            return 0x39
         if ascii_val == 0x1B:
             return 0x01
         for sc, (lo, hi) in _SCANCODE_MAP.items():
@@ -263,21 +244,42 @@ class KeyboardController:
         while self._scan_fifo:
             code = self._scan_fifo.pop(0)
 
-            if code & 0x80:
-                self._handle_modifier_release(code & 0x7F)
-                continue
-
             if code == 0xE0:
                 self._ext_prefix = True
                 continue
 
-            if code in _MOD_KEYS:
-                self._handle_modifier_make(code)
+            extended = self._ext_prefix
+            self._ext_prefix = False
+
+            if code & 0x80:
+                self._handle_modifier_release(code & 0x7F, extended)
                 continue
 
-            if self._ext_prefix:
+            if code in _MOD_KEYS:
+                self._handle_modifier_make(code, extended)
+                continue
+
+            if not extended and code in _FUNCTION_KEYS:
+                scan_code = code
+                if code <= 0x44:
+                    if self.alt:
+                        scan_code += 0x2D
+                    elif self.ctrl:
+                        scan_code += 0x23
+                    elif self.shift:
+                        scan_code += 0x19
+                elif self.alt:
+                    scan_code = 0x8B + (code - 0x57)
+                elif self.ctrl:
+                    scan_code = 0x89 + (code - 0x57)
+                elif self.shift:
+                    scan_code = 0x87 + (code - 0x57)
+                self._queue_output(0, scan_code, raw=True)
+                self.irq_pending = True
+                return
+
+            if extended:
                 entry = _E0_MAP.get(code)
-                self._ext_prefix = False
             else:
                 entry = _SCANCODE_MAP.get(code)
 
@@ -285,17 +287,31 @@ class KeyboardController:
                 lo, hi = entry
                 lo_c = lo if isinstance(lo, int) else ord(lo)
                 hi_c = hi if isinstance(hi, int) else ord(hi)
-                ascii_val = self._apply_modifiers(lo_c, hi_c)
-                self._queue_output(ascii_val, code)
+                ascii_val = self._apply_modifiers(lo_c, hi_c, code)
+                self._queue_output(ascii_val, code, raw=True)
                 self.irq_pending = True
                 return  # Only process one char-producing code per call
             else:
-                self._queue_output(code, code)
+                self._queue_output(0, code, raw=True)
                 self.irq_pending = True
                 return
 
-    def _apply_modifiers(self, lower, upper):
-        """Apply shift and caps lock."""
+    def _apply_modifiers(self, lower, upper, scan_code):
+        """Apply PC BIOS Shift/Ctrl/Alt translation to a keypress."""
+        if self.alt:
+            return 0
+        if self.ctrl:
+            if 0x61 <= lower <= 0x7A:
+                return lower - 0x60
+            ctrl_chars = {
+                0x1A: 0x1B,  # [ -> ESC
+                0x1B: 0x1D,  # ] -> GS
+                0x2B: 0x1C,  # backslash -> FS
+                0x0C: 0x1F,  # minus/underscore key -> US
+            }
+            return ctrl_chars.get(scan_code, 0)
+        if self.shift and scan_code == 0x0F:  # Shift+Tab is an extended key
+            return 0
         is_alpha = (0x61 <= lower <= 0x7A) or (0x41 <= lower <= 0x5A)
         if is_alpha and self.caps_lock:
             return lower if self.shift else upper
@@ -304,26 +320,26 @@ class KeyboardController:
         else:
             return lower
 
-    def _handle_modifier_make(self, code):
-        if code in (0x2A, 0x36):
+    def _handle_modifier_make(self, code, extended=False):
+        if code in (0x2A, 0x36) and not extended:
             self.shift = True
-        elif code in (0x1D, 0x38):
+        elif code == 0x1D:
             self.ctrl = True
-        elif code == 0x3A:
-            self.caps_lock = not self.caps_lock
-        elif code == 0x45:
-            self.scroll_lock = not self.scroll_lock
-        elif code == 0x70:
-            self.num_lock = not self.num_lock
-        elif code in (0x5B, 0x5D, 0x63):
+        elif code == 0x38:
             self.alt = True
+        elif code == 0x3A and not extended:
+            self.caps_lock = not self.caps_lock
+        elif code == 0x45 and not extended:
+            self.num_lock = not self.num_lock
+        elif code == 0x46 and not extended:
+            self.scroll_lock = not self.scroll_lock
 
-    def _handle_modifier_release(self, code):
-        if code in (0x2A, 0x36):
+    def _handle_modifier_release(self, code, extended=False):
+        if code in (0x2A, 0x36) and not extended:
             self.shift = False
-        elif code in (0x1D, 0x38):
+        elif code == 0x1D:
             self.ctrl = False
-        elif code in (0x5B, 0x5D, 0x63):
+        elif code == 0x38:
             self.alt = False
 
     def feed_string(self, s):

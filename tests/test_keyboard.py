@@ -87,8 +87,13 @@ class TestScanCodeInjection:
 
     def test_space(self):
         kbd = KeyboardController()
-        kbd.inject_scan_code(0x2B)  # Space
+        kbd.inject_scan_code(0x39)  # Space
         assert kbd.read_data() == ord(' ')
+
+    def test_backslash(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x2B)
+        assert kbd.read_data() == ord('\\')
 
     def test_escape(self):
         kbd = KeyboardController()
@@ -103,12 +108,10 @@ class TestScanCodeInjection:
         kbd.inject_scan_code(0x9E)  # 'a' break (0x1E | 0x80)
         assert kbd.has_data() is False
 
-    def test_unknown_scan_code_passthrough(self):
-        """Unknown scan codes pass through as-is."""
+    def test_unknown_scan_code_is_non_ascii(self):
         kbd = KeyboardController()
-        kbd.inject_scan_code(0x7F)  # F10 (mapped to space)
-        data = kbd.read_data()
-        assert data == ord(' ')  # F10 is mapped
+        kbd.inject_scan_code(0x7F)
+        assert kbd.read_key_event() == (0x7F, 0)
 
 
 class TestShiftModifier:
@@ -155,6 +158,42 @@ class TestShiftModifier:
         assert state & 0x02  # Shift bit set
         assert state & 0x20  # Num lock bit set (default)
 
+    def test_shift_tab_returns_bios_extended_event(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x2A)
+        kbd.inject_scan_code(0x0F)
+        assert kbd.read_key_event() == (0x0F, 0)
+
+
+class TestFunctionKeys:
+    def test_f5_returns_bios_scan_code(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x3F)
+        assert kbd.read_key_event() == (0x3F, 0)
+
+    @pytest.mark.parametrize('modifier,expected', [
+        (0x2A, 0x58),  # Shift+F5
+        (0x1D, 0x62),  # Ctrl+F5
+        (0x38, 0x6C),  # Alt+F5
+    ])
+    def test_modified_f5_uses_bios_scan_code(self, modifier, expected):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(modifier)
+        kbd.inject_scan_code(0x3F)
+        assert kbd.read_key_event() == (expected, 0)
+
+    @pytest.mark.parametrize('scan,modifier,expected', [
+        (0x57, None, 0x57), (0x58, None, 0x58),
+        (0x57, 0x2A, 0x87), (0x58, 0x1D, 0x8A),
+        (0x57, 0x38, 0x8B),
+    ])
+    def test_f11_f12_variants(self, scan, modifier, expected):
+        kbd = KeyboardController()
+        if modifier is not None:
+            kbd.inject_scan_code(modifier)
+        kbd.inject_scan_code(scan)
+        assert kbd.read_key_event() == (expected, 0)
+
 
 class TestCtrlModifier:
     """Ctrl key state tracking."""
@@ -172,25 +211,54 @@ class TestCtrlModifier:
         state = kbd.shift_state
         assert state & 0x04  # Ctrl bit set
 
+    def test_ctrl_letter_produces_control_character(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x1D)
+        kbd.inject_scan_code(0x2E)  # C
+        assert kbd.read_key_event() == (0x2E, 0x03)
+
+    def test_right_ctrl_uses_e0_prefix(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x1D)
+        assert kbd.ctrl is True
+        assert kbd.alt is False
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x9D)
+        assert kbd.ctrl is False
+
 
 class TestAltModifier:
-    """Alt key state tracking (extended scan codes)."""
+    """Alt key state tracking and BIOS Alt-key events."""
 
     def test_left_alt(self):
         kbd = KeyboardController()
-        kbd.inject_scan_code(0xE0)  # Extended prefix
-        kbd.inject_scan_code(0x5B)  # Left Alt make
+        kbd.inject_scan_code(0x38)  # Left Alt make
         assert kbd.alt is True
-        kbd.inject_scan_code(0xE0)  # Extended prefix
-        kbd.inject_scan_code(0xDB)  # Left Alt break (0x5B | 0x80)
+        kbd.inject_scan_code(0xB8)  # Left Alt break
         assert kbd.alt is False
 
     def test_alt_state_byte(self):
         kbd = KeyboardController()
-        kbd.inject_scan_code(0xE0)
-        kbd.inject_scan_code(0x5B)
+        kbd.inject_scan_code(0x38)
         state = kbd.shift_state
         assert state & 0x08  # Alt bit set
+
+    def test_alt_letter_returns_zero_ascii_and_scan_code(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0x38)
+        kbd.inject_scan_code(0x21)  # F
+        assert kbd.read_key_event() == (0x21, 0)
+
+    def test_right_alt_uses_e0_prefix(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x38)
+        assert kbd.alt is True
+        assert kbd.ctrl is False
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0xB8)
+        assert kbd.alt is False
 
 
 class TestCapsLock:
@@ -231,9 +299,9 @@ class TestNumLock:
     def test_num_lock_toggle(self):
         kbd = KeyboardController()
         assert kbd.num_lock is True
-        kbd.inject_scan_code(0x70)  # Num Lock make
+        kbd.inject_scan_code(0x45)  # Num Lock make
         assert kbd.num_lock is False
-        kbd.inject_scan_code(0x70)  # Toggle on
+        kbd.inject_scan_code(0x45)  # Toggle on
         assert kbd.num_lock is True
 
 
@@ -243,9 +311,9 @@ class TestScrollLock:
     def test_scroll_lock_toggle(self):
         kbd = KeyboardController()
         assert kbd.scroll_lock is False
-        kbd.inject_scan_code(0x45)  # Scroll Lock make
+        kbd.inject_scan_code(0x46)  # Scroll Lock make
         assert kbd.scroll_lock is True
-        kbd.inject_scan_code(0x45)  # Toggle off
+        kbd.inject_scan_code(0x46)  # Toggle off
         assert kbd.scroll_lock is False
 
 

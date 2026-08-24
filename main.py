@@ -358,8 +358,9 @@ class Emulator:
 
         # GTK display (optional).  When enabled, it takes over rendering and
         # keyboard input: the emulator loop pumps Gtk events between
-        # instruction batches, and key-press callbacks inject ASCII bytes
-        # directly into the keyboard controller (no cbreak/scan-code dance).
+        # instruction batches, and key-press callbacks inject ASCII bytes or
+        # set-1 scan codes directly into the keyboard controller (no cbreak
+        # / scan-code dance for ordinary text input).
         self.gtk = gtk
         self.gtk_display = None
         if gtk:
@@ -373,8 +374,20 @@ class Emulator:
                     self.kbd_ctrl.inject_key(byte)
                 else:
                     self.kbd.buffer.append(byte)
+            def _on_extended_key(scan_code):
+                if self.kbd_ctrl:
+                    self.kbd_ctrl.inject_extended_key(scan_code)
+                else:
+                    # The reference keyboard buffer accepts the same tuple
+                    # consumed by BIOS INT 16h as the hardware controller.
+                    self.kbd.buffer.append((scan_code & 0xFF, 0))
+            def _on_scan_code(scan_code):
+                if self.kbd_ctrl:
+                    self.kbd_ctrl.inject_scan_code(scan_code)
             self.gtk_display = GtkDisplay(
-                self.video, on_key=_on_key, on_reset=self.reset_guest,
+                self.video, on_key=_on_key, on_extended_key=_on_extended_key,
+                on_scan_code=_on_scan_code,
+                on_reset=self.reset_guest,
                 on_refresh=self.refresh_host_dir,
                 on_eject=self.eject_host_dir,
                 close_warning=self._close_warning,
@@ -905,8 +918,8 @@ class Emulator:
                 sys.stdout.write("\033[24;1H")   # cursor to bottom-left
                 sys.stdout.flush()
         elif self.gtk:
-            print("[GTK mode: click the window and type; Ctrl+C or close "
-                  "the window to stop]", file=sys.stderr)
+            print("[GTK mode: click the window and type; Ctrl+Shift+C or "
+                  "close the window to stop]", file=sys.stderr)
 
         step = 0
         last_display = 0

@@ -19,7 +19,7 @@ try:
         UC_X86_REG_AX, UC_X86_REG_BX, UC_X86_REG_CX, UC_X86_REG_DX,
         UC_X86_REG_SP, UC_X86_REG_BP, UC_X86_REG_SI, UC_X86_REG_DI,
         UC_X86_REG_CS, UC_X86_REG_DS, UC_X86_REG_ES, UC_X86_REG_SS,
-        UC_X86_REG_IP, UC_X86_REG_FLAGS,
+        UC_X86_REG_EIP, UC_X86_REG_FLAGS,
     )
 except ImportError as exc:  # pragma: no cover - exercised by no-dev installs
     raise ImportError('the C backend requires the optional unicorn package') from exc
@@ -54,7 +54,9 @@ _REGMAP = {
     'ds': UC_X86_REG_DS,
     'es': UC_X86_REG_ES,
     'ss': UC_X86_REG_SS,
-    'ip': UC_X86_REG_IP,
+    # Unicorn updates EIP for far control transfers even in 16-bit mode;
+    # reading the IP alias leaves the offset stale after RETF/LJMP.
+    'ip': UC_X86_REG_EIP,
 }
 _REG_NAMES = tuple(_REGMAP)
 _REG_IDS = tuple(_REGMAP.values()) + (UC_X86_REG_FLAGS,)
@@ -69,6 +71,7 @@ class CCPU(CPU):
     # calls and Unicorn does not report how many instructions ran before a
     # hook stopped the block.
     native_batch_size = 128
+    graphics_native_batch_size = 1024
 
     def __init__(self, memory, io_ports):
         super().__init__(memory, io_ports)
@@ -230,6 +233,34 @@ class CCPU(CPU):
             return True
         return (video.gdc_regs[5] & 3) != 1
 
+    def preferred_batch_size(self):
+        """Use larger native chunks for bulk graphics without slowing input."""
+        if self._graphics_native_safe() and self.io.video.graphics_mode:
+            return self.graphics_native_batch_size
+        return self.native_batch_size
+
+    def _rep_string_count(self):
+        """Return the native iteration budget needed to finish REP strings."""
+        address = ((self.cs << 4) + self.ip) & 0xFFFFF
+        index = address
+        # REP/REPE/REPNE prefixes may be preceded by segment/lock prefixes;
+        # the boot sectors we support use the conventional F2/F3 form, but
+        # scan the complete prefix range so this remains safe for DOS code.
+        has_rep = False
+        while self._ram[index] in (0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65,
+                                   0xF0, 0xF2, 0xF3):
+            if self._ram[index] in (0xF2, 0xF3):
+                has_rep = True
+            index = (index + 1) & 0xFFFFF
+        if (not has_rep or
+                self._ram[(address + ((index - address) & 0xFFFFF)) & 0xFFFFF] \
+                not in (0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD,
+                        0xAE, 0xAF)):
+            return 0
+        # Unicorn consumes one native count per repeated element.  A zero CX
+        # REP is still a single guest instruction and needs no expansion.
+        return (self.cx + 1) if self.cx else 0
+
     # ── Execution ───────────────────────────────────────────────────
 
     def execute_many(self, count):
@@ -239,11 +270,10 @@ class CCPU(CPU):
         count = min(int(count), self.max_insns - self.insn_count)
         if (getattr(self.io.video, 'graphics_mode', False)
                 and not self._graphics_native_safe()):
-            # Unicorn maps the regular RAM buffer directly, so it can see an
-            # A000h read without passing it through Video.graphics_read().
-            # That bypasses the four VGA latches required by masked EGA/VGA
-            # writes.  The reference CPU routes every video-memory read/write
-            # through the graphics controller.
+            # A native A000h read bypasses Video.graphics_read(), so Unicorn
+            # cannot maintain the four VGA latches required by write mode 1.
+            # Run only this controller-dependent path through the reference
+            # CPU; ordinary DOS code remains native.
             executed = 0
             while executed < count and CPU.execute(self):
                 executed += 1
@@ -256,13 +286,23 @@ class CCPU(CPU):
         try:
             # A zero end address is not accepted consistently across Unicorn
             # builds; 1 MiB is a harmless upper bound for this flat map.
-            self._uc.emu_start(start, 0x100000, count=count)
+            native_count = max(count, self._rep_string_count())
+            self._uc.emu_start(start, 0x100000, count=native_count)
         except UcError as exc:
             self._sync_from_uc()
-            self.halted = True
             if self.debug:
-                print(f'[C CPU exception] {exc} at '
+                print(f'[C CPU fallback] {exc} at '
                       f'{self.cs:04X}:{self.ip:04X}')
+            # Unicorn rejects a small number of legacy/reserved encodings
+            # which the reference decoder intentionally tolerates.  Recover
+            # one instruction through the reference implementation and then
+            # resume native execution; this keeps DOS compatibility without
+            # forcing graphics-heavy guests onto the Python CPU permanently.
+            self._uc.ctl_flush_tb()
+            if CPU.execute(self):
+                self.insn_count += 1
+                return 1
+            self.halted = True
             return 0
 
         if self._pending_interrupt is not None:

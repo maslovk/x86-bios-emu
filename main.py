@@ -39,6 +39,13 @@ def schedule_pit_ticks(now, deadline, interval):
     return ticks, now + interval
 
 
+# A native CPU backend can execute a polling loop many thousands of times
+# before the first 18.2 Hz timer interrupt is due.  Judge a repeated CS:IP by
+# elapsed time rather than by loop iterations so timer-driven DOS programs do
+# not get mistaken for a hung emulator.
+STUCK_LOOP_SECONDS = 0.25
+
+
 def sanitize_snap_gtk_environment(environ=None, executable=None):
     """Remove incompatible Snap host GTK paths from a native Python process.
 
@@ -1004,6 +1011,7 @@ class Emulator:
         last_display = 0
         last_ip = None
         stuck_count = 0
+        stuck_since = time.monotonic()
         pit_interval = 1.0 / 18.2065  # IBM PC PIT channel 0 / 65536
         pit_next_tick = time.monotonic() + pit_interval
         gtk_last_frame = 0.0
@@ -1014,8 +1022,10 @@ class Emulator:
                 if not self.cpu.halted:
                     native = getattr(self.cpu, 'execute_many', None)
                     if native is not None and not self.step_mode:
-                        executed = native(getattr(
-                            self.cpu, 'native_batch_size', 4096))
+                        preferred = getattr(self.cpu, 'preferred_batch_size', None)
+                        batch_size = (preferred() if preferred is not None
+                                      else getattr(self.cpu, 'native_batch_size', 4096))
+                        executed = native(batch_size)
                     else:
                         executed = 1 if self.cpu.execute() else 0
                     if not executed:
@@ -1097,15 +1107,17 @@ class Emulator:
                     # A blocking BIOS call intentionally remains on its INT
                     # instruction while the main loop pumps external input.
                     stuck_count = 0
+                    stuck_since = time.monotonic()
                 elif cur_ip == last_ip:
                     stuck_count += 1
-                    if stuck_count > 100000:
+                    if time.monotonic() - stuck_since > STUCK_LOOP_SECONDS:
                         self.stop_reason = 'stuck instruction loop'
                         print(f"[STUCK at CS:IP={self.cpu.cs:04X}:{self.cpu.ip:04X} "
                               f"after {step:,} instructions]", file=sys.stderr)
                         break
                 else:
                     stuck_count = 0
+                    stuck_since = time.monotonic()
                 last_ip = cur_ip
 
                 # Display video every 5000 instructions (terminal path only).

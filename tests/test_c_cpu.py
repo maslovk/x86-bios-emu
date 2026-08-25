@@ -185,6 +185,15 @@ def test_native_backend_applies_masked_destination_vga_write():
     assert emu.video.graphics_pixel(1, 0) == 0x0F
 
 
+def test_native_backend_uses_larger_batches_for_safe_graphics():
+    emu = Emulator(cpu_backend='c')
+    assert emu.cpu.preferred_batch_size() == 128
+    emu.video.set_mode(0x10)
+    assert emu.cpu.preferred_batch_size() == 1024
+    emu.video.gdc_regs[5] = 1
+    assert emu.cpu.preferred_batch_size() == 128
+
+
 def test_native_backend_falls_back_for_vga_latch_copy_mode():
     emu = Emulator(cpu_backend='c')
     emu.bios.initialize()
@@ -210,3 +219,17 @@ def test_native_backend_falls_back_for_vga_latch_copy_mode():
     assert emu.cpu.halted
     assert [plane[1] for plane in emu.video.graphics_planes] == [
         0xA5, 0x5A, 0x3C, 0xC3]
+
+
+def test_native_backend_recovers_from_unicorn_invalid_legacy_encoding():
+    emu = Emulator(cpu_backend='c')
+    # F6 /1 is reserved on later x86 documentation but appears in some DOS
+    # boot paths; the reference decoder tolerates it as a one-byte operation.
+    emu.mem.ram[0x100:0x103] = bytes((0xF6, 0x0F, 0xF4))
+    emu.cpu.cs = emu.cpu.ds = emu.cpu.ss = 0
+    emu.cpu.ip = 0x100
+    emu.cpu.sp = 0x7000
+    assert emu.cpu.execute_many(4) == 1
+    assert emu.cpu.ip == 0x102
+    assert emu.cpu.execute_many(1) == 1
+    assert emu.cpu.halted

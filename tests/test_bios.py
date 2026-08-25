@@ -135,6 +135,14 @@ class TestINT10h:
         self._call(bios_env, ax=0x0003)
         assert bios_env.video.mode == 3
 
+    def test_vga_bda_describes_active_256k_colour_adapter(self, bios_env):
+        bios_env.initialize()
+        assert bios_env.mem.read_word(0x00463) == 0x03D4
+        assert bios_env.mem.read_byte(0x00484) == 24
+        assert bios_env.mem.read_word(0x00485) == 16
+        assert bios_env.mem.read_byte(0x00487) == 0x60
+        assert bios_env.mem.read_byte(0x00489) & 0x01
+
     def test_write_string(self, bios_env):
         bios_env.initialize()
         bios_env.mem.write_byte(0x7C00, ord('H'))
@@ -189,6 +197,17 @@ class TestINT10h:
         cpu = self._call(bios_env, ax=0x0F00)
         assert cpu.ax & 0xFF == 3
         assert (cpu.ax >> 8) & 0xFF == 80
+
+    def test_ega_information_reports_colour_256k_adapter(self, bios_env):
+        bios_env.initialize()
+        cpu = self._call(bios_env, ax=0x1200, bx=0x0010)
+        assert cpu.ax & 0xFF == 0x12
+        assert cpu.bx == 0x0003  # BH=color, BL=256 KiB EGA/VGA memory
+
+    def test_vga_alternate_select_acknowledges_supported_selector(self, bios_env):
+        bios_env.initialize()
+        cpu = self._call(bios_env, ax=0x1201, bx=0x0030)
+        assert cpu.ax & 0xFF == 0x12
 
     def test_scroll_up(self, bios_env):
         bios_env.initialize()

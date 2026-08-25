@@ -160,6 +160,14 @@ class BIOS:
         # Color CRTC base port (40:63).  Graphics drivers use this BDA
         # field to derive the input-status port at 03DAh.
         self.mem.write_word(bda + 0x63, 0x03D4)
+        # EGA/VGA video data area.  Direct-register graphics drivers such as
+        # Borland's EGAVGA BGI use these fields alongside INT 10h/AH=12h
+        # rather than trusting the text-mode fields above.
+        self.mem.write_byte(bda + 0x84, 24)      # rows minus one
+        self.mem.write_word(bda + 0x85, 16)      # character-cell height
+        self.mem.write_byte(bda + 0x87, 0x60)    # active VGA, 256 KiB VRAM
+        self.mem.write_byte(bda + 0x88, 0x00)    # EGA/VGA feature switches
+        self.mem.write_byte(bda + 0x89, 0x09)    # VGA active, default palette
         # Equipment flag word (matches INT 11h; real layout: 40:10).
         self.mem.write_word(bda + 0x10, self._equipment_word())
         self.mem.write_word(bda + 0x13, 640)  # Conventional memory (KB, word)
@@ -598,11 +606,23 @@ class BIOS:
             cpu.bp = 0xFA6E
             cpu.cx = 14
             cpu.dx = (cpu.dx & 0xFF00) | 14
-        elif ah == 0x12 and bl == 0x10:  # EGA information
-            # Report a 256K EGA/VGA-compatible adapter with color display.
-            cpu.bx = (cpu.bx & 0xFF00) | 0x00
-            cpu.cx = 0x0000
-            cpu.dx = 0x0000
+        elif ah == 0x12:  # EGA/VGA alternate select
+            if bl == 0x10:  # Return EGA information
+                # BH=0 selects the colour monitor and BL=3 describes 256 KiB
+                # of EGA-compatible video RAM.  Returning BL=0 here claimed
+                # 64 KiB despite the VGA model, causing Borland's EGAVGA BGI
+                # driver (used by Pole) to reject the high-resolution path.
+                cpu.bx = 0x0003
+                cpu.cx = 0x0000
+                cpu.dx = 0x0000
+                cpu.ax = (cpu.ax & 0xFF00) | 0x12
+            elif bl in (0x20, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36):
+                # These VGA selectors alter firmware-maintained display
+                # policy (print-screen, scan lines, palette loading, CPU
+                # access, greyscale, cursor emulation, display switching and
+                # refresh).  The modeled adapter keeps the compatible default
+                # policy, but must acknowledge the selector in AL.
+                cpu.ax = (cpu.ax & 0xFF00) | 0x12
 
     # ── INT 11h: Equipment List ────────────────────────────────
 

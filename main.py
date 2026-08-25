@@ -1016,6 +1016,12 @@ class Emulator:
         pit_next_tick = time.monotonic() + pit_interval
         gtk_last_frame = 0.0
         gtk_poll_counter = 0
+        # Native graphics batches can complete far faster than text-mode DOS
+        # work. Check the GTK clock more often in graphics mode so the 30 FPS
+        # render cap is reachable instead of being limited by a 100-batch
+        # polling cadence.
+        gtk_graphics_poll_batches = 8
+        gtk_text_poll_batches = 100
 
         try:
             while True:
@@ -1066,7 +1072,10 @@ class Emulator:
                     # this remains responsive while leaving nearly all CPU
                     # time to emulation.
                     gtk_poll_counter += 1
-                    if gtk_poll_counter >= 100:
+                    poll_batches = (gtk_graphics_poll_batches
+                                    if self.video.graphics_mode
+                                    else gtk_text_poll_batches)
+                    if gtk_poll_counter >= poll_batches:
                         gtk_poll_counter = 0
                         now = time.monotonic()
                         if now - gtk_last_frame >= 1 / 30:

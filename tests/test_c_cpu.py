@@ -221,6 +221,33 @@ def test_native_backend_falls_back_for_vga_latch_copy_mode():
         0xA5, 0x5A, 0x3C, 0xC3]
 
 
+def test_native_backend_bulk_copies_rep_movs_in_vga_latch_mode():
+    emu = Emulator(cpu_backend='c')
+    emu.bios.initialize()
+    emu.video.set_mode(0x10)
+    emu.video.gdc_regs[5] = 1
+    emu.video.seq_regs[2] = 0x0F
+    for plane, values in enumerate(((0xA5, 0x5A), (0x3C, 0xC3),
+                                    (0x0F, 0xF0), (0x96, 0x69))):
+        emu.video.graphics_planes[plane][0:2] = bytes(values)
+    emu.mem.ram[0x100:0x103] = bytes((0xF3, 0xA4, 0xF4))
+    emu.cpu.cs = emu.cpu.ss = 0
+    emu.cpu.ds = emu.cpu.es = 0xA000
+    emu.cpu.ip = 0x100
+    emu.cpu.sp = 0x7000
+    emu.cpu.cx = 2
+    emu.cpu.si = 0
+    emu.cpu.di = 4
+
+    emu.cpu.execute_many(4)
+
+    assert emu.cpu.cx == 0
+    assert emu.cpu.si == 2
+    assert emu.cpu.di == 6
+    assert [list(plane[4:6]) for plane in emu.video.graphics_planes] == [
+        [0xA5, 0x5A], [0x3C, 0xC3], [0x0F, 0xF0], [0x96, 0x69]]
+
+
 def test_native_backend_recovers_from_unicorn_invalid_legacy_encoding():
     emu = Emulator(cpu_backend='c')
     # F6 /1 is reserved on later x86 documentation but appears in some DOS

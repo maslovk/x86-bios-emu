@@ -131,6 +131,17 @@ class TestVideo:
         assert video.graphics_rgb(6) == (0xAA, 0x55, 0x00)
         assert video.graphics_rgb(13) == (0xFF, 0x55, 0xFF)
 
+    def test_vga_mode1_bulk_copy_preserves_all_latches(self, video):
+        video.set_mode(0x10)
+        video.gdc_regs[5] = 1
+        video.seq_regs[2] = 0x0F
+        for plane, values in enumerate(((0xA5, 0x5A), (0x3C, 0xC3),
+                                        (0x0F, 0xF0), (0x96, 0x69))):
+            video.graphics_planes[plane][4:6] = bytes(values)
+        assert video.graphics_copy_mode1(4, 8, 2)
+        assert [list(plane[8:10]) for plane in video.graphics_planes] == [
+            [0xA5, 0x5A], [0x3C, 0xC3], [0x0F, 0xF0], [0x96, 0x69]]
+
     def test_putc_normal(self, video):
         video.cur_x = 0; video.cur_y = 0
         video.putc(ord('H'), 0x09)

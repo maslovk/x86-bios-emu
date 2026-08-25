@@ -700,6 +700,25 @@ class CPU:
     def _string_repeat_count(self):
         return self.cx if self._rep_prefix else 1
 
+    def _fast_vga_mode1_movs(self, width, count):
+        """Accelerate forward REP MOVS blits wholly inside planar VRAM."""
+        if (not self._rep_prefix or self.df or count <= 0
+                or not getattr(self.io.video, 'graphics_mode', False)):
+            return False
+        source = self._phys(self._default_data_seg(), self.si)
+        destination = self._phys(self.es, self.di)
+        if not (0xA0000 <= source < 0xB0000
+                and 0xA0000 <= destination < 0xB0000):
+            return False
+        length = count * width
+        if not self.io.video.graphics_copy_mode1(
+                source - 0xA0000, destination - 0xA0000, length):
+            return False
+        self.si = (self.si + length) & 0xFFFF
+        self.di = (self.di + length) & 0xFFFF
+        self.cx = 0
+        return True
+
     # ── Main execute loop ──────────────────────────────────────────
 
     def execute(self):
@@ -1429,6 +1448,8 @@ class CPU:
         # A4 MOVSB
         if opc == 0xA4:
             count = self._string_repeat_count()
+            if self._fast_vga_mode1_movs(1, count):
+                return
             inc = 1 if not self.df else -1
             src_seg = self._default_data_seg()
             for _ in range(count):
@@ -1444,6 +1465,8 @@ class CPU:
         # A5 MOVSW
         if opc == 0xA5:
             count = self._string_repeat_count()
+            if self._fast_vga_mode1_movs(2, count):
+                return
             inc = 2 if not self.df else -2
             src_seg = self._default_data_seg()
             for _ in range(count):

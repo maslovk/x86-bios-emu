@@ -233,6 +233,32 @@ class Video:
             self.graphics_planes[plane][offset] = result & 0xFF
         self.graphics_dirty = True
 
+    def graphics_copy_mode1(self, source, destination, count):
+        """Bulk-copy a forward, non-overlapping planar write-mode-1 blit.
+
+        A ``REP MOVS`` whose source and destination both live in A000h loads
+        all four source latches then writes the selected planes at the target.
+        This is equivalent to a plane-wise slice copy, avoiding Python work
+        for every byte in common BGI sprite blits.  Overlapping forward copies
+        intentionally return False: their byte-at-a-time propagation semantics
+        must remain on the reference path.
+        """
+        if (not self._planar or (self.gdc_regs[5] & 3) != 1 or count <= 0
+                or source < 0 or destination < 0
+                or source + count > 0x10000 or destination + count > 0x10000):
+            return False
+        if source < destination < source + count:
+            return False
+        for plane, memory in enumerate(self.graphics_planes):
+            if self.seq_regs[2] & (1 << plane):
+                memory[destination:destination + count] = \
+                    memory[source:source + count]
+        final = source + count - 1
+        for plane, memory in enumerate(self.graphics_planes):
+            self.graphics_latches[plane] = memory[final]
+        self.graphics_dirty = True
+        return True
+
     def graphics_pixel(self, x, y):
         if not self.graphics_mode or not (0 <= x < self.graphics_width
                                            and 0 <= y < self.graphics_height):

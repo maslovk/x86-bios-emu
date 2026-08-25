@@ -12,6 +12,12 @@ class FakeGdk:
         MOD1_MASK = 0x02
         SHIFT_MASK = 0x04
 
+    class EventType:
+        KEY_PRESS = 'key-press'
+
+    def __init__(self):
+        self.next_event = None
+
     def __getattr__(self, name):
         if name.startswith('KEY_'):
             return name
@@ -23,6 +29,9 @@ class FakeGdk:
         suffix = name[4:] if name.startswith('KEY_') else name
         return ord(suffix) if len(suffix) == 1 else 0
 
+    def event_peek(self):
+        return self.next_event
+
 
 def make_display():
     display = GtkDisplay.__new__(GtkDisplay)
@@ -31,11 +40,14 @@ def make_display():
     display.on_extended_key = None
     display.on_scan_code = None
     display.stop = False
+    display._held_physical_keys = {}
+    display._typematic_key = None
+    display._typematic_deadline = None
     return display
 
 
-def event(keyval, state=0):
-    return SimpleNamespace(keyval=keyval, state=state)
+def event(keyval, state=0, **kwargs):
+    return SimpleNamespace(keyval=keyval, state=state, **kwargs)
 
 
 def test_alt_f_reaches_bios_as_alt_key_event():
@@ -106,16 +118,68 @@ def test_arrow_key_emits_physical_enhanced_make_and_break():
     assert scans == [0xE0, 0x4B, 0xE0, 0xCB]
 
 
-def test_arrow_auto_repeat_repeats_make_until_one_break():
+def test_host_arrow_auto_repeat_is_replaced_by_paced_typematic():
     display = make_display()
     scans = []
     display.on_scan_code = scans.append
 
     display._on_key_press(None, event(display._Gdk.KEY_Down))
     display._on_key_press(None, event(display._Gdk.KEY_Down))
+    deadline = display._typematic_deadline
+    assert not display._service_typematic(now=deadline - 0.001)
+    assert display._service_typematic(now=deadline)
     display._on_key_release(None, event(display._Gdk.KEY_Down))
 
     assert scans == [0xE0, 0x50, 0xE0, 0x50, 0xE0, 0xD0]
+
+
+def test_direction_change_cannot_leave_stale_host_repeat():
+    display = make_display()
+    scans = []
+    display.on_scan_code = scans.append
+    gdk = display._Gdk
+
+    display._on_key_press(None, event(gdk.KEY_Right))
+    display._on_key_press(None, event(gdk.KEY_Right))
+    display._on_key_press(None, event(gdk.KEY_Right))
+    display._on_key_release(None, event(gdk.KEY_Right))
+    display._on_key_press(None, event(gdk.KEY_Left))
+
+    assert scans == [0xE0, 0x4D, 0xE0, 0xCD, 0xE0, 0x4B]
+
+
+def test_x11_synthetic_repeat_release_does_not_break_held_key():
+    display = make_display()
+    scans = []
+    display.on_scan_code = scans.append
+    gdk = display._Gdk
+    press = event(gdk.KEY_Right, time=100, hardware_keycode=114)
+    synthetic_release = event(
+        gdk.KEY_Right, time=200, hardware_keycode=114)
+    gdk.next_event = event(
+        gdk.KEY_Right, time=200, hardware_keycode=114,
+        type=gdk.EventType.KEY_PRESS)
+
+    display._on_key_press(None, press)
+    display._on_key_release(None, synthetic_release)
+    display._on_key_press(None, gdk.next_event)
+    gdk.next_event = None
+    display._on_key_release(
+        None, event(gdk.KEY_Right, time=300, hardware_keycode=114))
+
+    assert scans == [0xE0, 0x4D, 0xE0, 0xCD]
+
+
+def test_focus_loss_releases_held_typematic_key():
+    display = make_display()
+    scans = []
+    display.on_scan_code = scans.append
+
+    display._on_key_press(None, event(display._Gdk.KEY_Left))
+    assert not display._on_focus_out(None, None)
+    assert not display._service_typematic(now=float('inf'))
+
+    assert scans == [0xE0, 0x4B, 0xE0, 0xCB]
 
 
 def test_ctrl_left_uses_physical_modifier_and_navigation_scans():

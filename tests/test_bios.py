@@ -367,6 +367,15 @@ class TestINT17h:
 # ── INT 16h: Keyboard ──────────────────────────────────────────
 
 class TestINT16h:
+    def test_empty_blocking_read_requests_retry_without_phantom_key(self):
+        bios, _kbd_ctrl = self._make_bios_with_kbd_ctrl()
+        cpu = FakeCPU(ax=0x10A5)
+
+        bios.handlers[0x16](cpu)
+
+        assert cpu.ax == 0x10A5
+        assert cpu.retry_software_interrupt is True
+
     def test_wait_for_key(self, bios_env):
         bios_env.initialize()
         bios_env.kbd.feed_string("A")

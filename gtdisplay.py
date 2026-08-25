@@ -24,6 +24,7 @@ exactly (foreground = attr low nibble, background = attr high nibble).
 """
 
 import sys
+import time
 
 from video import decode_vga_char
 
@@ -80,6 +81,13 @@ def _set1_scan_for_char(ch):
 # refresh is 59.92 Hz, so each on/off transition is 16 / 59.92 = 267 ms.
 # GTK timers are wall-clock based, but this preserves the real-machine rate.
 CURSOR_BLINK_INTERVAL_MS = 267
+
+# The IBM enhanced keyboard powers up at a 500 ms typematic delay and about
+# 10.9 characters per second.  Generate repeats here instead of accepting the
+# desktop's autorepeat stream: GTK may deliver a whole burst in one pump,
+# which can leave obsolete cursor keys queued after the user changes direction.
+TYPEMATIC_DELAY_SECONDS = 0.500
+TYPEMATIC_INTERVAL_SECONDS = 1.0 / 10.9
 
 
 class GtkDisplay:
@@ -161,6 +169,9 @@ class GtkDisplay:
         self.fullscreen = False
         self.selection_start = None
         self.selection_end = None
+        self._held_physical_keys = {}
+        self._typematic_key = None
+        self._typematic_deadline = None
 
         # --- window + drawing area ---
         self.window = Gtk.Window()
@@ -170,6 +181,7 @@ class GtkDisplay:
         self.window.connect('window-state-event', self._on_window_state)
         self.window.connect('key-press-event', self._on_key_press)
         self.window.connect('key-release-event', self._on_key_release)
+        self.window.connect('focus-out-event', self._on_focus_out)
 
         self.drawing_area = Gtk.DrawingArea()
         self.drawing_area.connect('draw', self._on_draw)
@@ -299,8 +311,8 @@ class GtkDisplay:
             Gdk.KEY_Escape: (0x01,), Gdk.KEY_Tab: (0x0F,),
             Gdk.KEY_ISO_Left_Tab: (0x0F,),
             # The dedicated enhanced-keyboard navigation cluster sends an E0
-            # prefix for both make and break.  Repeated GTK key-press events
-            # therefore model the keyboard's typematic repeated make codes.
+            # prefix for both make and break.  Typematic make codes are paced
+            # by _service_typematic rather than by the host desktop.
             Gdk.KEY_Home: (0xE0, 0x47), Gdk.KEY_Up: (0xE0, 0x48),
             Gdk.KEY_Page_Up: (0xE0, 0x49), Gdk.KEY_Left: (0xE0, 0x4B),
             Gdk.KEY_Right: (0xE0, 0x4D), Gdk.KEY_End: (0xE0, 0x4F),
@@ -334,6 +346,59 @@ class GtkDisplay:
         if make_sequence[0] == 0xE0:
             return 0xE0, make_sequence[1] | 0x80
         return (make_sequence[0] | 0x80,)
+
+    @staticmethod
+    def _physical_key_id(event):
+        """Identify a physical host key even if modifiers change its keyval."""
+        hardware_keycode = getattr(event, 'hardware_keycode', None)
+        if hardware_keycode is not None:
+            return 'hardware', hardware_keycode
+        return 'keyval', event.keyval
+
+    def _is_auto_repeat_release(self, event):
+        """Recognize the synthetic release/press pair used by X11 repeat."""
+        try:
+            next_event = self._Gdk.event_peek()
+            key_press = self._Gdk.EventType.KEY_PRESS
+        except (AttributeError, TypeError):
+            return False
+        if next_event is None or next_event.type != key_press:
+            return False
+        if getattr(next_event, 'time', None) != getattr(event, 'time', None):
+            return False
+        return self._physical_key_id(next_event) == self._physical_key_id(event)
+
+    def _press_physical_key(self, event, make_sequence, now=None):
+        """Emit one make and arm keyboard-paced repeat for a new key press."""
+        key_id = self._physical_key_id(event)
+        if key_id in self._held_physical_keys:
+            # Wayland and X servers with detectable autorepeat send repeated
+            # key-press events.  The emulated keyboard supplies those makes.
+            return
+        self._held_physical_keys[key_id] = make_sequence
+        self._typematic_key = key_id
+        if now is None:
+            now = time.monotonic()
+        self._typematic_deadline = now + TYPEMATIC_DELAY_SECONDS
+        self._emit_scan_sequence(make_sequence)
+
+    def _service_typematic(self, now=None):
+        """Emit at most one repeat make, never a catch-up burst."""
+        key_id = self._typematic_key
+        if key_id is None:
+            return False
+        make_sequence = self._held_physical_keys.get(key_id)
+        if make_sequence is None:
+            self._typematic_key = None
+            self._typematic_deadline = None
+            return False
+        if now is None:
+            now = time.monotonic()
+        if now < self._typematic_deadline:
+            return False
+        self._emit_scan_sequence(make_sequence)
+        self._typematic_deadline = now + TYPEMATIC_INTERVAL_SECONDS
+        return True
 
     def _on_key_press(self, _widget, event):
         Gdk = self._Gdk
@@ -375,7 +440,7 @@ class GtkDisplay:
         # remains direct text injection because it is a host convenience.
         make_sequence = self._physical_scan_for_key(keyval)
         if make_sequence is not None:
-            self._emit_scan_sequence(make_sequence)
+            self._press_physical_key(event, make_sequence)
             return True
         return False
 
@@ -394,10 +459,27 @@ class GtkDisplay:
             self._emit_scan_sequence(sequence)
             return True
 
-        make_sequence = self._physical_scan_for_key(event.keyval)
+        key_id = self._physical_key_id(event)
+        held_sequence = self._held_physical_keys.get(key_id)
+        make_sequence = held_sequence or self._physical_scan_for_key(event.keyval)
         if make_sequence is not None:
+            if self._is_auto_repeat_release(event):
+                return True
+            self._held_physical_keys.pop(key_id, None)
+            if self._typematic_key == key_id:
+                self._typematic_key = None
+                self._typematic_deadline = None
             self._emit_scan_sequence(self._break_sequence(make_sequence))
             return True
+        return False
+
+    def _on_focus_out(self, _widget, _event):
+        """Release typematic keys if the window loses their host releases."""
+        for make_sequence in self._held_physical_keys.values():
+            self._emit_scan_sequence(self._break_sequence(make_sequence))
+        self._held_physical_keys.clear()
+        self._typematic_key = None
+        self._typematic_deadline = None
         return False
 
     def _cell_at(self, x, y):
@@ -591,6 +673,7 @@ class GtkDisplay:
         self.drawing_area.queue_draw()
         while Gtk.events_pending():
             Gtk.main_iteration_do(False)
+        self._service_typematic()
         return self.stop
 
     def close(self):

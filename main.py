@@ -447,6 +447,9 @@ class Emulator:
             self.kbd_ctrl._state_buffer.clear()
             self.kbd_ctrl._scan_fifo.clear()
             self.kbd_ctrl._irq_port_event = None
+            self.kbd_ctrl._output_ready = False
+            self.kbd_ctrl._next_output_time = 0.0
+            self.kbd_ctrl._out_full = False
             self.kbd_ctrl.irq_pending = False
         self.cpu = self._new_cpu()
         boot_disk = self.hard_disk if self.boot_drive == 0x80 else self.disk
@@ -774,8 +777,13 @@ class Emulator:
     def _schedule_keyboard_irq(self):
         """Raise IRQ 1 for queued controller data without claiming another IRQ."""
         if (not self.kbd_ctrl or not self.pic
-                or not self.kbd_ctrl.has_data()
                 or self.pic.is_irq_pending(1)):
+            return False
+        # A real 8042 presents only one keyboard byte in its output buffer.
+        # Advance the serial stream after the preceding IRQ/EOI, not when the
+        # host enqueues the whole E0 make/break sequence.
+        self.kbd_ctrl.service_input()
+        if not self.kbd_ctrl.has_output_data():
             return False
         self.kbd_ctrl.irq_pending = True
         self.pic.raise_irq(1)
@@ -813,25 +821,76 @@ class Emulator:
         result_mask = 0x08D5  # CF, PF, AF, ZF, SF, OF
         return (saved_flags & ~result_mask) | (live_flags & result_mask)
 
+    def _merge_bios_flags_into_outer_frame(self):
+        """Propagate handler result flags into a chained BIOS stub's IRET frame.
+
+        The BIOS ROM stubs are ``INT n; IRET``.  A guest that chains with the
+        standard ``PUSHF; CALL FAR [vec]`` pattern leaves its original FLAGS on
+        the stack just above the call's CS:IP (SS:SP+4 once the inner Python
+        INT hook has unwound its own frame).  The inner hook merges handler
+        result flags into the inner return, but the stub's *outer* IRET would
+        pop that stale PUSHF word and discard ZF/CF.  Rewrite it here so the
+        stub's IRET restores the correct flags.
+        """
+        addr = self.cpu._phys(self.cpu.ss, (self.cpu.sp + 4) & 0xFFFF)
+        saved = self.cpu._readw(addr)
+        merged = self._merge_interrupt_flags(saved, self.cpu.flags)
+        self.cpu._writew(addr, merged)
+
     def _install_bios_interrupt_hook(self):
         """Route CPU software interrupts to BIOS handlers directly."""
         bios_ref = self.bios
 
         def hooked_interrupt(n):
             # Push flags, CS, IP (standard INT behavior)
-            saved_flags = self.cpu.flags
-            self.cpu._push(saved_flags)
+            entry_cs, entry_ip = self.cpu.cs, self.cpu.ip
+            stub = bios_ref.ivt_stubs.get(n)
+            at_bios_stub = (stub is not None
+                            and (entry_cs, entry_ip) == (stub[0], stub[1] + 2))
+            retry_state = self.cpu._retry_interrupt_state
+            continuing_retry = (retry_state is not None
+                                and retry_state[:3] ==
+                                (n, self.cpu.cs, self.cpu.ip))
+            saved_flags = retry_state[3] if continuing_retry else self.cpu.flags
+            self.cpu._push(self.cpu.flags)
             self.cpu.tf = False
             self.cpu.if_flag = False
             self.cpu._push(self.cpu.cs)
             self.cpu._push(self.cpu.ip)
             # Reset no-return flag
             self.cpu.int_no_return = False
+            self.cpu.retry_software_interrupt = False
             # Call BIOS handler (modifies registers; sets int_no_return for boot)
             bios_ref.handle_interrupt(self.cpu, n)
             # For normal interrupts: restore CS:IP and IRET-style control flags.
             if not self.cpu.int_no_return:
                 self._finish_interrupt_return(saved_flags)
+                if self.cpu.retry_software_interrupt:
+                    # INT imm8 is two bytes.  Repeating it lets the outer loop
+                    # deliver hardware IRQs and pump host input while keeping
+                    # AH=00h/10h truly blocking from the guest's perspective.
+                    self.cpu._retry_interrupt_state = (
+                        n, self.cpu.cs, self.cpu.ip, saved_flags)
+                    self.cpu.ip = (self.cpu.ip - 2) & 0xFFFF
+                    # The IBM BIOS enables maskable interrupts while waiting
+                    # for keyboard input, then IRET restores the caller's IF.
+                    # Keep IRQ1 deliverable between host-side retry slices.
+                    self.cpu.if_flag = True
+                else:
+                    # Successful completion: this stub will IRET shortly, so
+                    # fold the handler result flags into its outer PUSHF word.
+                    if at_bios_stub:
+                        self._merge_bios_flags_into_outer_frame()
+                    if continuing_retry:
+                        self.cpu._retry_interrupt_state = None
+                    elif retry_state is not None:
+                        # A hardware IRQ handler may invoke an unrelated
+                        # software interrupt while a keyboard wait is pending.
+                        # Preserve the exact outer retry instead of letting
+                        # that nested INT consume its marker.
+                        self.cpu.retry_software_interrupt = True
+            elif retry_state is not None:
+                self.cpu.retry_software_interrupt = True
 
         self.cpu._do_interrupt = hooked_interrupt
 
@@ -1034,7 +1093,11 @@ class Emulator:
 
                 # Detect infinite loops
                 cur_ip = (self.cpu.cs << 4) + self.cpu.ip
-                if cur_ip == last_ip:
+                if self.cpu._retry_interrupt_state is not None:
+                    # A blocking BIOS call intentionally remains on its INT
+                    # instruction while the main loop pumps external input.
+                    stuck_count = 0
+                elif cur_ip == last_ip:
                     stuck_count += 1
                     if stuck_count > 100000:
                         self.stop_reason = 'stuck instruction loop'

@@ -24,6 +24,10 @@ class CPU:
         self.io = io_ports
         self.halted = False
         self.int_no_return = False  # True when INT handler takes over (e.g., boot)
+        # A synchronous host BIOS handler can ask the emulator loop to pump
+        # devices before the guest is allowed to return from a blocking INT.
+        self.retry_software_interrupt = False
+        self._retry_interrupt_state = None
         self.insn_count = 0
         # The CPU core has no implicit lifetime limit. Embedders may assign a
         # finite value for bounded tests; the emulator applies its separate

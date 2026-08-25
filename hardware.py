@@ -8,6 +8,11 @@ import time
 import datetime
 
 
+# PS/2 frames contain 11 clocked bits.  At the keyboard clock's normal
+# 10-16.7 kHz range, consecutive bytes arrive roughly 0.7-1.1 ms apart.
+KEYBOARD_BYTE_INTERVAL_SECONDS = 0.001
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Keyboard Controller (i8042)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -85,6 +90,8 @@ class KeyboardController:
         self._state_buffer = []     # modifier-state snapshot for each byte
         self._irq_port_event = None  # byte read by a guest IRQ 1 handler
         self._out_full = False
+        self._output_ready = False   # one byte exposed through port 60h
+        self._next_output_time = 0.0
         self._in_buffer = None
         self._in_full = False
         self._scan_fifo = []
@@ -114,7 +121,7 @@ class KeyboardController:
     def read_status(self):
         """Read status register (port 0x64)."""
         status = 0x00
-        if len(self._out_buffer) > 0:
+        if self._output_ready and self._out_buffer:
             status |= 0x01
         if self._in_full:
             status |= 0x02
@@ -156,7 +163,7 @@ class KeyboardController:
 
     def read_data(self):
         """Read translated ASCII from the controller (test/API helper)."""
-        while self._out_buffer:
+        while self.has_data():
             _scan, ascii_value, _port, _raw, bios_key, _state = \
                 self._read_event()
             if bios_key is not False:
@@ -187,7 +194,7 @@ class KeyboardController:
         Raw/extended injection preserves the supplied scan code so INT 16h
         can distinguish modifier chords, arrows, and function keys.
         """
-        while self._out_buffer:
+        while self.has_data():
             scan, value, _port, _raw, bios_key, _state = self._read_event()
             if bios_key is not False:
                 return scan, value
@@ -212,9 +219,14 @@ class KeyboardController:
         self._irq_port_event = None
 
     def _read_event(self):
+        # API helpers may read successive bytes without an Emulator/PIC pump.
+        # Guest code normally observes OBF clear and waits for service_input()
+        # to expose the next queued byte on a separate IRQ cycle.
+        if not self._output_ready:
+            self.service_input(force=True)
         if self._cmd_mode:
             self._cmd_mode = False
-        if self._out_buffer:
+        if self._output_ready and self._out_buffer:
             val = self._out_buffer.pop(0)
             scan = self._scan_buffer.pop(0)
             port_value = self._port_buffer.pop(0)
@@ -222,18 +234,22 @@ class KeyboardController:
             self._physical_buffer.pop(0)
             bios_key = self._bios_key_buffer.pop(0)
             state = self._state_buffer.pop(0)
+            self._output_ready = False
+            if self._out_buffer:
+                self._next_output_time = (
+                    time.monotonic() + KEYBOARD_BYTE_INTERVAL_SECONDS)
         else:
             val, scan, port_value, raw, bios_key = \
                 0x00, None, 0x00, False, None
             state = (self.shift_state, self.extended_shift_state,
                      self.bios_flags_3)
-        if not self._out_buffer:
-            self._out_full = False
-            self.irq_pending = False
+        self._out_full = False
+        self.irq_pending = False
         return scan, val, port_value, raw, bios_key, state
 
     def _queue_output(self, value, scan_code=None, raw=False, bios_key=None,
                       port_value=None, physical=False):
+        first_byte = not self._out_buffer
         self._out_buffer.append(value & 0xFF)
         self._scan_buffer.append(scan_code)
         if port_value is None:
@@ -244,7 +260,9 @@ class KeyboardController:
         self._bios_key_buffer.append(bios_key)
         self._state_buffer.append(
             (self.shift_state, self.extended_shift_state, self.bios_flags_3))
-        self._out_full = True
+        if first_byte:
+            self._output_ready = True
+            self._out_full = True
 
     def write_data(self, val):
         """Write to data port (port 0x60)."""
@@ -314,8 +332,9 @@ class KeyboardController:
     def _process_fifo(self):
         """Process one scan code from FIFO → output buffer + modifier state.
 
-        Only processes one character-producing scan code per call.
-        Modifier and prefix codes are processed inline.
+        Decode one keyboard byte and append its translated event.  Modifier
+        state changes at keyboard-arrival time, while service_input() controls
+        when each decoded byte becomes visible in the one-byte 8042 OBF.
         """
         while self._scan_fifo:
             code = self._scan_fifo.pop(0)
@@ -325,7 +344,7 @@ class KeyboardController:
                 self._queue_output(
                     0, 0xE0, raw=True, bios_key=False, physical=True)
                 self.irq_pending = True
-                return
+                return True
 
             extended = self._ext_prefix
             self._ext_prefix = False
@@ -335,14 +354,14 @@ class KeyboardController:
                 self._queue_output(
                     0, code, raw=True, bios_key=False, physical=True)
                 self.irq_pending = True
-                return
+                return True
 
             if code in _MOD_KEYS:
                 self._handle_modifier_make(code, extended)
                 self._queue_output(
                     0, code, raw=True, bios_key=False, physical=True)
                 self.irq_pending = True
-                return
+                return True
 
             if not extended and code in _FUNCTION_KEYS:
                 scan_code = code
@@ -362,7 +381,7 @@ class KeyboardController:
                 self._queue_output(0, scan_code, raw=True, bios_key=True,
                                    port_value=code, physical=True)
                 self.irq_pending = True
-                return
+                return True
 
             if extended:
                 entry = _E0_MAP.get(code)
@@ -384,12 +403,26 @@ class KeyboardController:
                     ascii_val, bios_scan, raw=True, bios_key=True,
                     port_value=code, physical=True)
                 self.irq_pending = True
-                return  # Only process one char-producing code per call
+                return True
             else:
                 self._queue_output(
                     0, code, raw=True, bios_key=True, physical=True)
                 self.irq_pending = True
-                return
+                return True
+        return False
+
+    def service_input(self, now=None, force=False):
+        """Expose one queued byte after its keyboard serial-frame delay."""
+        if self._output_ready or not self._out_buffer:
+            return False
+        if now is None:
+            now = time.monotonic()
+        if not force and now < self._next_output_time:
+            return False
+        self._output_ready = True
+        self._out_full = True
+        self.irq_pending = True
+        return True
 
     def _apply_modifiers(self, lower, upper, scan_code):
         """Apply PC BIOS Shift/Ctrl/Alt translation to a keypress."""
@@ -475,8 +508,12 @@ class KeyboardController:
         self.inject_key(0x0D)
 
     def has_data(self):
-        """Check if output buffer has data."""
-        return len(self._out_buffer) > 0
+        """Check whether controller output data remains queued."""
+        return bool(self._out_buffer)
+
+    def has_output_data(self):
+        """Return whether port 60h currently has a host-readable byte."""
+        return self._output_ready and bool(self._out_buffer)
 
     def has_physical_data(self):
         """Return whether queued output contains a physical scan-stream byte."""

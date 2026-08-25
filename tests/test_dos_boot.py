@@ -135,3 +135,42 @@ class TestDOSBoot:
         host_file = tmp_path / 'NEW.COM'
         assert host_file.exists()
         assert host_file.read_bytes()
+
+
+def test_harness_uses_emulator_hook_with_chained_stub_flag_propagation():
+    """The harness must wire Emulator._install_bios_interrupt_hook (not a
+    legacy duplicate) so chained `PUSHF; CALL FAR [vec]` BIOS calls get their
+    handler result flags folded into the stub's outer IRET frame."""
+    h = DOSHarness(writable=False)
+    cpu = h.cpu
+    stub_cs, stub_off = h.emu.bios.ivt_stubs[0x16]
+
+    # Guest: PUSHF then CALL FAR [INT 16 vec], landing on the BIOS stub.
+    cpu.cs = stub_cs
+    cpu.ip = stub_off + 2
+    cpu.ss = 0x2000
+    cpu.sp = 0x0100
+    cpu.flags = 0x0002  # guest PUSHF value
+    base = 0x20000 + 0x0100
+    h.emu.mem.write_word(base, 0x0400)             # guest return IP
+    h.emu.mem.write_word(base + 2, 0x3000)         # guest return CS
+    h.emu.mem.write_word(base + 4, cpu.flags)      # guest PUSHF word
+    cpu.ax = 0x1100  # AH=11h: check key (empty buffer)
+
+    cpu._do_interrupt(0x16)
+
+    # "No key" -> ZF=1 folded into the stub's outer FLAGS word for its IRET.
+    outer_flags = h.emu.mem.read_word(base + 4)
+    assert outer_flags & 0x40
+    assert cpu.zf is True
+    assert cpu.sp == 0x0100
+
+    # Retry semantics still flow through the harness: a blocking AH=00 request
+    # without a key marks the software interrupt for retry.
+    cpu.cs = 0x1234
+    cpu.ip = 0x0102
+    cpu.sp = 0x9000
+    cpu.ax = 0x1000
+    cpu._do_interrupt(0x16)
+    assert cpu.retry_software_interrupt is True
+    assert cpu.ip == 0x0100

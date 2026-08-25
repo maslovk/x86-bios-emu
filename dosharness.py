@@ -164,22 +164,6 @@ class DOSHarness:
         # (drive B), wiring it into the BIOS for INT 13h DL=01 dispatch.
         self._load_path_b = load_path_b
         self._load_path_hd = load_path_hd
-
-        bios_ref = self.emu.bios
-
-        def hooked_interrupt(n):
-            saved_flags = cpu.flags
-            cpu._push(saved_flags)
-            cpu.tf = False
-            cpu.if_flag = False
-            cpu._push(cpu.cs)
-            cpu._push(cpu.ip)
-            cpu.int_no_return = False
-            bios_ref.handle_interrupt(cpu, n)
-            if not cpu.int_no_return:
-                self.emu._finish_interrupt_return(saved_flags)
-
-        cpu._do_interrupt = hooked_interrupt
         self.cpu = cpu
 
     # ── Image materialisation ──────────────────────────────────────────

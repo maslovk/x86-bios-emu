@@ -166,6 +166,31 @@ class TestEmulatorIntegration:
         assert emu._check_and_dispatch_irq() is True
         assert not (emu.mem.read_byte(0x00417) & 0x08)
 
+    def test_enhanced_key_bytes_receive_separate_keyboard_irqs(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        emu.pic.initialize()
+        emu.cpu.if_flag = True
+
+        emu.kbd_ctrl.inject_scan_code(0xE0)
+        emu.kbd_ctrl.inject_scan_code(0x4B)
+
+        assert emu._schedule_keyboard_irq() is True
+        assert emu._check_and_dispatch_irq() is True
+        assert emu.kbd.buffer == []
+
+        assert not emu.kbd_ctrl.has_output_data()
+
+        # No new host key event is needed: after the prefix IRQ/EOI, the next
+        # controller service presents the actual Left scan byte and raises a
+        # fresh IRQ 1.
+        assert emu._schedule_keyboard_irq() is False
+        emu.kbd_ctrl._next_output_time = 0.0
+        assert emu._schedule_keyboard_irq() is True
+        assert emu._check_and_dispatch_irq() is True
+        assert emu.kbd.buffer == [(0x4B, 0)]
+
     def test_irq_dispatch_preserves_handler_updated_flags(self):
         from main import Emulator
         emu = Emulator()
@@ -250,3 +275,232 @@ class TestEmulatorIntegration:
 
         assert emu.cpu.cf is True
         assert emu.cpu.if_flag is True
+
+    def test_blocking_keyboard_interrupt_retries_after_device_pump(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        emu.cpu.cs = 0x1234
+        emu.cpu.ip = 0x0102  # Unicorn/Python have consumed CD 16 already.
+        emu.cpu.sp = 0x9000
+        emu.cpu.flags = 0x0202
+        emu.cpu.ax = 0x10A5
+        emu._install_bios_interrupt_hook()
+
+        emu.cpu._do_interrupt(0x16)
+
+        assert emu.cpu.cs == 0x1234
+        assert emu.cpu.ip == 0x0100
+        assert emu.cpu.sp == 0x9000
+        assert emu.cpu.flags == 0x0202
+        assert emu.cpu.ax == 0x10A5
+        assert emu.cpu.retry_software_interrupt is True
+
+    def test_blocking_keyboard_interrupt_returns_once_key_is_ready(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        emu.cpu.cs = 0x1234
+        emu.cpu.ip = 0x0102
+        emu.cpu.sp = 0x9000
+        emu.cpu.flags = 0x0202
+        emu.cpu.ax = 0x1000
+        emu.kbd_ctrl.inject_extended_key(0x50)
+        emu._install_bios_interrupt_hook()
+
+        emu.cpu._do_interrupt(0x16)
+
+        assert emu.cpu.cs == 0x1234
+        assert emu.cpu.ip == 0x0102
+        assert emu.cpu.sp == 0x9000
+        assert emu.cpu.flags == 0x0202
+        assert emu.cpu.ax == 0x5000
+        assert emu.cpu.retry_software_interrupt is False
+
+    def test_blocking_keyboard_retry_enables_irq_then_restores_caller_if(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        emu.cpu.cs = 0x1234
+        emu.cpu.ip = 0x0102
+        emu.cpu.sp = 0x9000
+        emu.cpu.flags = 0x0002  # Caller entered with maskable IRQs disabled.
+        emu.cpu.ax = 0x1000
+        emu._install_bios_interrupt_hook()
+
+        emu.cpu._do_interrupt(0x16)
+
+        assert emu.cpu.ip == 0x0100
+        assert emu.cpu.if_flag is True
+        assert emu.cpu._retry_interrupt_state == (
+            0x16, 0x1234, 0x0102, 0x0002)
+
+        # Simulate the retried CD 16 instruction advancing to its return IP.
+        emu.cpu.ip = 0x0102
+        emu.kbd_ctrl.inject_extended_key(0x50)
+        emu.cpu._do_interrupt(0x16)
+
+        assert emu.cpu.ip == 0x0102
+        assert emu.cpu.sp == 0x9000
+        assert emu.cpu.ax == 0x5000
+        assert emu.cpu.if_flag is False
+        assert emu.cpu._retry_interrupt_state is None
+
+    def test_unrelated_nested_interrupt_preserves_keyboard_retry(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        emu.cpu.cs = 0x1234
+        emu.cpu.ip = 0x0102
+        emu.cpu.sp = 0x9000
+        emu.cpu.flags = 0x0002
+        emu.cpu.ax = 0x1000
+        emu._install_bios_interrupt_hook()
+        emu.cpu._do_interrupt(0x16)
+        retry_state = emu.cpu._retry_interrupt_state
+
+        # Model an IRQ handler making an unrelated nonblocking BIOS call.
+        emu.cpu.cs = 0x2000
+        emu.cpu.ip = 0x3002
+        emu.cpu.ax = 0x0200
+        emu.cpu._do_interrupt(0x16)
+
+        assert emu.cpu.cs == 0x2000
+        assert emu.cpu.ip == 0x3002
+        assert emu.cpu._retry_interrupt_state == retry_state
+        assert emu.cpu.retry_software_interrupt is True
+
+        emu.cpu.cs = 0x1234
+        emu.cpu.ip = 0x0102
+        emu.cpu.ax = 0x1000
+        emu.kbd_ctrl.inject_extended_key(0x50)
+        emu.cpu._do_interrupt(0x16)
+
+        assert emu.cpu.ax == 0x5000
+        assert emu.cpu.if_flag is False
+        assert emu.cpu._retry_interrupt_state is None
+
+    def test_blocking_read_waits_for_separate_e0_scan_irq(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        emu.pic.initialize()
+        emu.cpu.cs = 0x1234
+        emu.cpu.ip = 0x0102
+        emu.cpu.sp = 0x9000
+        emu.cpu.flags = 0x0202
+        emu.cpu.ax = 0x1000
+        emu._install_bios_interrupt_hook()
+        emu.kbd_ctrl.inject_scan_code(0xE0)
+        emu.kbd_ctrl.inject_scan_code(0x50)
+
+        assert emu._schedule_keyboard_irq() is True
+        assert emu._check_and_dispatch_irq() is True
+        assert emu.kbd.buffer == []
+
+        # Model a DOS program owning IRQ1: its physical bytes cannot be
+        # short-circuited through the host-only direct-drain path.
+        emu.mem.write_word(0x09 * 4, 0x5678)
+        emu.mem.write_word(0x09 * 4 + 2, 0x1234)
+
+        # No phantom AX=0000 escapes while only the prefix has arrived.
+        emu.cpu._do_interrupt(0x16)
+        assert emu.cpu.ax == 0x1000
+        assert emu.cpu.ip == 0x0100
+        assert emu.cpu.retry_software_interrupt is True
+
+        stub_cs, stub_ip = emu.bios.ivt_stubs[0x09]
+        emu.mem.write_word(0x09 * 4, stub_ip)
+        emu.mem.write_word(0x09 * 4 + 2, stub_cs)
+        emu.kbd_ctrl._next_output_time = 0.0
+        assert emu._schedule_keyboard_irq() is True
+        assert emu._check_and_dispatch_irq() is True
+        assert emu.kbd.buffer == [(0x50, 0)]
+
+        emu.cpu.ip = 0x0102
+        emu.cpu._do_interrupt(0x16)
+        assert emu.cpu.ax == 0x5000
+        assert emu.cpu.ip == 0x0102
+        assert emu.cpu.retry_software_interrupt is False
+
+    def test_chained_bios_stub_propagates_zf_empty(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        stub_cs, stub_off = emu.bios.ivt_stubs[0x16]
+        # Guest: PUSHF then CALL FAR [INT 16 vec], landing on the BIOS stub.
+        # The stub is `INT 16; IRET`; the CPU sits at stub_off+2 (operand read).
+        emu.cpu.cs = stub_cs
+        emu.cpu.ip = stub_off + 2
+        emu.cpu.ss = 0x2000
+        emu.cpu.sp = 0x0100
+        emu.cpu.flags = 0x0002  # guest PUSHF value
+        base = 0x20000 + 0x0100
+        # Outer CALL frame: [call-IP][call-CS][guest-FLAGS]
+        emu.mem.write_word(base, 0x0400)             # guest return IP
+        emu.mem.write_word(base + 2, 0x3000)         # guest return CS
+        emu.mem.write_word(base + 4, emu.cpu.flags)  # guest PUSHF word
+        emu.cpu.ax = 0x1100  # AH=11h: check key (empty buffer)
+        emu._install_bios_interrupt_hook()
+
+        emu.cpu._do_interrupt(0x16)
+
+        # "No key" -> ZF=1 must survive the stub's outer IRET.
+        outer_flags = emu.mem.read_word(base + 4)
+        assert outer_flags & 0x40
+        # Outer frame control flags (IF bit 0x200) are preserved untouched.
+        assert outer_flags & 0x0200 == 0x0002 & 0x0200
+        assert emu.cpu.zf is True
+        assert emu.cpu.sp == 0x0100
+
+    def test_chained_bios_stub_propagates_zf_ready(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        stub_cs, stub_off = emu.bios.ivt_stubs[0x16]
+        emu.cpu.cs = stub_cs
+        emu.cpu.ip = stub_off + 2
+        emu.cpu.ss = 0x2000
+        emu.cpu.sp = 0x0100
+        emu.cpu.flags = 0x0242  # guest PUSHF word: ZF set, IF set
+        base = 0x20000 + 0x0100
+        emu.mem.write_word(base, 0x0400)
+        emu.mem.write_word(base + 2, 0x3000)
+        emu.mem.write_word(base + 4, emu.cpu.flags)
+        emu.kbd.buffer.append(0x41)  # 'A' ready
+        emu.cpu.ax = 0x1100  # AH=11h: check key (available)
+        emu._install_bios_interrupt_hook()
+
+        emu.cpu._do_interrupt(0x16)
+
+        # Key available -> ZF=0 written into the stub's outer FLAGS word.
+        outer_flags = emu.mem.read_word(base + 4)
+        assert not outer_flags & 0x40
+        # The outer frame's IF (0x200) survives the merge.
+        assert outer_flags & 0x0200
+        assert emu.cpu.zf is False
+        assert emu.cpu.sp == 0x0100
+
+    def test_direct_interrupt_leaves_outer_frame_word_untouched(self):
+        from main import Emulator
+        emu = Emulator()
+        emu.bios.initialize()
+        # A direct software interrupt (not chained via the stub) must not
+        # rewrite whatever word happens to sit at SS:SP+4.
+        emu.cpu.cs = 0x1234
+        emu.cpu.ip = 0x5678
+        emu.cpu.ss = 0x2000
+        emu.cpu.sp = 0x0100
+        emu.cpu.flags = 0x0002
+        base = 0x20000 + 0x0100
+        emu.mem.write_word(base + 4, 0x4242)  # unrelated sentinel
+        emu.cpu.ax = 0x1100  # AH=11h: check key (empty)
+        emu._install_bios_interrupt_hook()
+
+        emu.cpu._do_interrupt(0x16)
+
+        # cpu.flags reflects the handler result (ZF=1)...
+        assert emu.cpu.zf is True
+        # ...but the outer word at SS:SP+4 is left exactly as it was.
+        assert emu.mem.read_word(base + 4) == 0x4242
+        assert emu.cpu.sp == 0x0100

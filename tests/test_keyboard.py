@@ -661,6 +661,20 @@ class TestIRQGeneration:
         assert kbd.read_port_data() == 0xE0
         assert kbd.read_port_data() == 0x38
 
+    def test_scan_stream_waits_for_output_buffer_service(self):
+        kbd = KeyboardController()
+        kbd.inject_scan_code(0xE0)
+        kbd.inject_scan_code(0x4B)
+
+        assert kbd.read_status() & 0x01
+        assert kbd.read_port_data() == 0xE0
+        assert not (kbd.read_status() & 0x01)
+        assert kbd.has_data()
+
+        assert kbd.service_input(force=True)
+        assert kbd.read_status() & 0x01
+        assert kbd.read_port_data() == 0x4B
+
     def test_chained_bios_handler_reuses_irq_port_byte(self):
         kbd = KeyboardController()
         kbd.inject_scan_code(0x38)  # Left Alt make

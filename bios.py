@@ -611,13 +611,6 @@ class BIOS:
 
     # ── INT 13h: Disk Services ─────────────────────────────────
 
-    # Poll iterations spent inside a blocking INT 16h AH=00/AH=10h read
-    # before falling back to the legacy NUL-key return.  Keys are queued
-    # from the host at any time, so a few thousand polls (~1 ms wall clock)
-    # are enough to catch a queued keystroke while keeping single-stepping
-    # host loops responsive.
-    KBD_WAIT_POLLS = 1024
-
     _SPT_BY_MEDIA = {0xF9: 18, 0xF8: 15, 0xF0: 15, 0xF1: 9,
                      0xFD: 9, 0xF2: 18, 0xFE: 8, 0xFF: 8}
     # (max_cylinder, max_head) per media descriptor byte; heads = max_head+1.
@@ -1001,9 +994,9 @@ class BIOS:
             # Direct draining is a compatibility path for hosts/tests that
             # call INT 16h without running the hardware IRQ pump.  Once a DOS
             # program owns IRQ 1, every physical byte must instead pass
-            # through that handler.  Consuming its queued bytes here leaves
-            # stale PIC requests that later deliver phantom port-60 zeros and
-            # makes menu input arrive one key behind.
+            # through that handler.  The software-interrupt retry below lets
+            # the outer device loop deliver those IRQs without manufacturing
+            # an empty return or bypassing the guest handler.
             if not self.kbd_ctrl or not self.kbd_ctrl.has_data():
                 return
             if (self._keyboard_irq_is_hooked()
@@ -1045,14 +1038,12 @@ class BIOS:
                 return False
 
             if not _take_key():
-                # Real BIOS semantics block here. Keep polling for host input
-                # for a bounded period, then return NUL so the single-threaded
-                # emulator loop can continue pumping devices and host events.
-                for _ in range(self.KBD_WAIT_POLLS):
-                    if _take_key():
-                        return
-                cpu.ax = 0
-                cpu.flags &= ~0x40
+                # Real BIOS semantics block here.  Yield immediately to the
+                # outer device/host-event pump, then repeat this instruction;
+                # busy-polling cannot discover single-threaded host input and
+                # only starves the display.  Returning AX=0000 would expose a
+                # phantom extended-key prefix and leave the real key behind.
+                cpu.retry_software_interrupt = True
         elif ah in (0x01, 0x11):  # Check key (peek; do NOT consume)
             # Drain the keyboard controller output buffer into the BIOS key
             # buffer first.  Without this, keys injected via kbd_ctrl (the

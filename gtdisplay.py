@@ -26,6 +26,11 @@ exactly (foreground = attr low nibble, background = attr high nibble).
 import sys
 import time
 
+try:  # Optional vectorized framebuffer colour conversion.
+    import numpy as _np
+except ImportError:  # pragma: no cover - exercised on minimal installs
+    _np = None
+
 from video import decode_vga_char
 
 
@@ -137,6 +142,7 @@ class GtkDisplay:
         # (e.g. in CI / test runs).  Only --gtk actually needs gi.
         try:
             import gi
+            import cairo
             gi.require_version('Gtk', '3.0')
             gi.require_version('PangoCairo', '1.0')
             from gi.repository import Gtk, Gdk, Pango, PangoCairo, GLib
@@ -152,6 +158,7 @@ class GtkDisplay:
         self._Pango = Pango
         self._PangoCairo = PangoCairo
         self._GLib = GLib
+        self._cairo = cairo
 
         self.video = video
         self.on_key = on_key
@@ -172,6 +179,11 @@ class GtkDisplay:
         self._held_physical_keys = {}
         self._typematic_key = None
         self._typematic_deadline = None
+        self._graphics_surface = None
+        self._graphics_surface_data = None
+        self._graphics_surface_size = None
+        self._graphics_palette_signature = None
+        self._graphics_palette_pairs = None
 
         # --- window + drawing area ---
         self.window = Gtk.Window()
@@ -668,7 +680,7 @@ class GtkDisplay:
         cr.restore()
 
     def _draw_graphics(self, video, cr, area):
-        """Render the packed palette view of the EGA/VGA framebuffer."""
+        """Render the graphics framebuffer as one cached Cairo surface."""
         allocation = area.get_allocation()
         width, height = video.graphics_width, video.graphics_height
         scale = min(allocation.width / width, allocation.height / height)
@@ -677,25 +689,53 @@ class GtkDisplay:
         oy = (allocation.height - height * scale) / 2
         cr.set_source_rgb(0, 0, 0)
         cr.paint()
-        pixels = video.graphics_pixels()
+        size = (width, height)
+        if self._graphics_surface_size != size:
+            self._graphics_surface_size = size
+            self._graphics_surface_data = bytearray(width * height * 4)
+            self._graphics_surface = self._cairo.ImageSurface.create_for_data(
+                self._graphics_surface_data, self._cairo.FORMAT_RGB24,
+                width, height, width * 4)
+            video.graphics_dirty = True
+        if video.graphics_dirty:
+            # Cairo RGB24 is native-endian B,G,R,X on our little-endian host.
+            # One image paint is far cheaper than emitting a rectangle for
+            # every colour run in a 640x350 EGA frame.
+            pixels = video.graphics_pixels()
+            data = self._graphics_surface_data
+            self._graphics_surface.flush()
+            palette = tuple(video.graphics_rgb(color) for color in range(16))
+            if _np is not None:
+                # Cairo RGB24 is native B,G,R,X.  Vectorized conversion keeps
+                # a changing 640x350 EGA surface below a frame interval.
+                target = _np.frombuffer(data, dtype=_np.uint8).reshape(-1, 4)
+                indices = _np.frombuffer(pixels, dtype=_np.uint8)
+                rgb = _np.asarray(palette, dtype=_np.uint8)[indices]
+                target[:, :3] = rgb[:, ::-1]
+                target[:, 3] = 0
+            elif palette != self._graphics_palette_signature:
+                self._graphics_palette_signature = palette
+                packed = [r << 16 | g << 8 | b for r, g, b in palette]
+                self._graphics_palette_pairs = [
+                    packed[low] | (packed[high] << 32)
+                    for high in range(16) for low in range(16)
+                ]
+            if _np is None:
+                # Cairo RGB24 is native B,G,R,X.  Each 64-bit store updates
+                # two display pixels, avoiding temporary byte objects.
+                words = memoryview(data).cast('Q')
+                pairs = self._graphics_palette_pairs
+                for index in range(len(words)):
+                    offset = index * 2
+                    words[index] = pairs[pixels[offset] | (pixels[offset + 1] << 4)]
+            self._graphics_surface.mark_dirty()
+            video.graphics_dirty = False
         cr.save()
         cr.translate(ox, oy)
         cr.scale(scale, scale)
-        # Draw horizontal runs, reducing a 640x350 frame to a few thousand
-        # Cairo rectangles for typical game screens.
-        for y in range(height):
-            row = pixels[y * width:(y + 1) * width]
-            start = 0
-            while start < width:
-                color = row[start]
-                end = start + 1
-                while end < width and row[end] == color:
-                    end += 1
-                r, g, b = _CGA_RGB[color & 0x0F]
-                cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)
-                cr.rectangle(start, y, end - start, 1)
-                cr.fill()
-                start = end
+        cr.set_source_surface(self._graphics_surface, 0, 0)
+        cr.get_source().set_filter(self._cairo.FILTER_NEAREST)
+        cr.paint()
         cr.restore()
 
     # ── public API ─────────────────────────────────────────────────

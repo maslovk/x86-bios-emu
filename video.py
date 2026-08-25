@@ -7,6 +7,35 @@ VGA text-mode video (80x25) and I/O port emulation.
 import os
 import sys
 
+try:  # Optional fast path for large EGA/VGA framebuffer expansion.
+    import numpy as _np
+except ImportError:  # pragma: no cover - exercised on minimal installs
+    _np = None
+
+
+# Power-on DAC entries 0-15 for the standard IBM EGA/VGA palette.  DAC
+# components are kept in the renderer's 0-255 range (writes to 3C9 expand
+# their native 6-bit values the same way).
+_VGA_16_PALETTE = (
+    (0x00, 0x00, 0x00), (0x00, 0x00, 0xAA),
+    (0x00, 0xAA, 0x00), (0x00, 0xAA, 0xAA),
+    (0xAA, 0x00, 0x00), (0xAA, 0x00, 0xAA),
+    (0xAA, 0x55, 0x00), (0xAA, 0xAA, 0xAA),
+    (0x55, 0x55, 0x55), (0x55, 0x55, 0xFF),
+    (0x55, 0xFF, 0x55), (0x55, 0xFF, 0xFF),
+    (0xFF, 0x55, 0x55), (0xFF, 0x55, 0xFF),
+    (0xFF, 0xFF, 0x55), (0xFF, 0xFF, 0xFF),
+)
+
+# Expand an eight-pixel planar byte into eight little-endian byte lanes of a
+# native 64-bit word.  The renderer combines one value per plane, avoiding a
+# Python loop for every individual EGA pixel.
+_PLANAR_LANES = tuple(
+    sum(((value >> (7 - pixel)) & 1) << (pixel * 8)
+        for pixel in range(8))
+    for value in range(256)
+)
+
 
 def decode_vga_char(ch):
     """Decode printable ASCII and the CP437 box/shading glyphs used by DOS."""
@@ -64,16 +93,30 @@ class Video:
         self.graphics_colors = 16
         self.graphics_planes = [bytearray(0x10000) for _ in range(4)]
         self.graphics_vram = bytearray(0x10000)
+        # GTK keeps a packed display surface.  Mark it stale only when guest
+        # VRAM or palette state changes; merely repainting a window must not
+        # re-expand the complete planar framebuffer.
+        self.graphics_dirty = True
         self.seq_index = 2
         self.seq_regs = [0, 0, 0, 0, 0]
         self.gdc_index = 8
         self.gdc_regs = [0] * 16
         self.gdc_regs[8] = 0xFF
+        # A VGA memory read loads all four plane bytes into these latches.
+        # Graphics-controller write modes combine new CPU data with them.
+        self.graphics_latches = [0, 0, 0, 0]
+        # VGA attribute-controller palette registers.  The 16 EGA pixel
+        # values reach the DAC through this extra indirection.
+        self.attr_index = 0
+        self.attr_flip_flop = False
+        self.attr_palette = list(range(16))
+        self.attr_mode_control = 0x0C
+        self.attr_color_select = 0
         self.misc_output = 0x67
         self.dac_mask = 0xFF
         self.dac_index = 0
         self.dac_component = 0
-        self.palette = [(i, i, i) for i in range(256)]
+        self.palette = list(_VGA_16_PALETTE) + [(i, i, i) for i in range(16, 256)]
         self.mem = None
         self.text_base = 0xB8000
         self.crtc_index = 0
@@ -106,33 +149,71 @@ class Video:
         for plane in self.graphics_planes:
             plane[:] = b'\0' * len(plane)
         self.graphics_vram[:] = b'\0' * len(self.graphics_vram)
+        self.graphics_latches[:] = [0, 0, 0, 0]
+        self.graphics_dirty = True
 
     def graphics_read(self, offset):
         offset &= 0xFFFF
-        return (self.graphics_vram[offset] if not self._planar else
-                self.graphics_planes[self.gdc_regs[4] & 3][offset])
+        if not self._planar:
+            return self.graphics_vram[offset]
+        for plane in range(4):
+            self.graphics_latches[plane] = self.graphics_planes[plane][offset]
+        if self.gdc_regs[5] & 0x08:  # read mode 1: colour compare
+            compare = self.gdc_regs[2] & 0x0F
+            dont_care = self.gdc_regs[7] & 0x0F
+            matches = 0xFF
+            for plane, latch in enumerate(self.graphics_latches):
+                if dont_care & (1 << plane):
+                    matches &= ~(latch ^ (0xFF if compare & (1 << plane) else 0)) & 0xFF
+            return matches
+        return self.graphics_latches[self.gdc_regs[4] & 3]
 
     def graphics_write(self, offset, value):
-        """Apply the VGA write-mode-0 registers to an A0000 write."""
+        """Apply the VGA graphics-controller write pipeline to an A0000 write."""
         offset &= 0xFFFF
         value &= 0xFF
         if not self._planar:
             self.graphics_vram[offset] = value
+            self.graphics_dirty = True
             return
         bit_mask = self.gdc_regs[8] & 0xFF
         set_reset = self.gdc_regs[0] & 0x0F
         enable_set_reset = self.gdc_regs[1] & 0x0F
-        rotate = self.gdc_regs[3] & 7
+        rotate_function = self.gdc_regs[3]
+        rotate = rotate_function & 7
         if rotate:
             value = ((value >> rotate) | (value << (8 - rotate))) & 0xFF
+        write_mode = self.gdc_regs[5] & 3
+
+        def logical(source, latch):
+            operation = (rotate_function >> 3) & 3
+            if operation == 1:
+                return source & latch
+            if operation == 2:
+                return source | latch
+            if operation == 3:
+                return source ^ latch
+            return source
+
         for plane in range(4):
             if not (self.seq_regs[2] & (1 << plane)):
                 continue
-            src = (((set_reset >> plane) & 1) * 0xFF
-                   if (enable_set_reset >> plane) & 1 else value)
-            old = self.graphics_planes[plane][offset]
-            self.graphics_planes[plane][offset] = ((old & ~bit_mask)
-                                                   | (src & bit_mask))
+            latch = self.graphics_latches[plane]
+            if write_mode == 1:
+                result = latch
+            else:
+                if write_mode == 0:
+                    source = (0xFF if set_reset & (1 << plane) else 0)
+                    if not (enable_set_reset & (1 << plane)):
+                        source = value
+                elif write_mode == 2:
+                    source = 0xFF if value & (1 << plane) else 0
+                else:  # mode 3: rotated data selects bits from set/reset.
+                    source = 0xFF if set_reset & (1 << plane) else 0
+                mask = bit_mask & value if write_mode == 3 else bit_mask
+                result = ((latch & ~mask) | (logical(source, latch) & mask))
+            self.graphics_planes[plane][offset] = result & 0xFF
+        self.graphics_dirty = True
 
     def graphics_pixel(self, x, y):
         if not self.graphics_mode or not (0 <= x < self.graphics_width
@@ -148,9 +229,79 @@ class Video:
     def graphics_pixels(self):
         if not self.graphics_mode:
             return None
-        return bytes(self.graphics_pixel(x, y)
-                     for y in range(self.graphics_height)
-                     for x in range(self.graphics_width))
+        if not self._planar:
+            size = self.graphics_width * self.graphics_height
+            return bytes(self.graphics_vram[:size])
+
+        # Expand eight planar pixels at once into native byte lanes.  This
+        # keeps EGA redraws responsive while a game changes most of the frame.
+        width = self.graphics_width
+        row_bytes = (width + 7) // 8
+        plane_bytes = row_bytes * self.graphics_height
+        p0, p1, p2, p3 = self.graphics_planes
+        if _np is not None:
+            expanded = _np.unpackbits(
+                _np.frombuffer(p0, dtype=_np.uint8, count=plane_bytes),
+                bitorder='big')
+            for plane, shift in ((p1, 1), (p2, 2), (p3, 3)):
+                expanded |= (_np.unpackbits(
+                    _np.frombuffer(plane, dtype=_np.uint8, count=plane_bytes),
+                    bitorder='big') << shift)
+            return expanded.tobytes()
+        pixels = bytearray(width * self.graphics_height)
+        words = memoryview(pixels).cast('Q')
+        out = 0
+        for y in range(self.graphics_height):
+            base = y * row_bytes
+            for column in range(row_bytes):
+                index = base + column
+                words[out] = (_PLANAR_LANES[p0[index]]
+                              | (_PLANAR_LANES[p1[index]] << 1)
+                              | (_PLANAR_LANES[p2[index]] << 2)
+                              | (_PLANAR_LANES[p3[index]] << 3))
+                out += 1
+        return bytes(pixels)
+
+    def graphics_rgb(self, color):
+        """Return the DAC RGB triplet selected by a 4-bit EGA pixel."""
+        palette = self.attr_palette[color & 0x0F] & 0x3F
+        select = self.attr_color_select & 0x0F
+        # Colour Select supplies DAC bits 7-6.  With P54S (attribute mode
+        # control bit 7), it also replaces palette-register bits 5-4.
+        dac_index = (palette & 0x0F) | ((select & 0x0C) << 4)
+        dac_index |= ((select & 0x03) << 4 if self.attr_mode_control & 0x80
+                      else palette & 0x30)
+        return self.palette[dac_index]
+
+    def reset_attr_flip_flop(self):
+        self.attr_flip_flop = False
+
+    def write_attribute(self, value):
+        """Handle the address/data flip-flop shared by port 3C0h."""
+        value &= 0xFF
+        if not self.attr_flip_flop:
+            self.attr_index = value & 0x1F
+            self.attr_flip_flop = True
+            return
+        index = self.attr_index
+        if index < 16:
+            self.attr_palette[index] = value & 0x3F
+        elif index == 0x10:
+            self.attr_mode_control = value
+        elif index == 0x14:
+            self.attr_color_select = value & 0x0F
+        self.attr_flip_flop = False
+        self.graphics_dirty = True
+
+    def read_attribute(self):
+        index = self.attr_index
+        if index < 16:
+            return self.attr_palette[index]
+        if index == 0x10:
+            return self.attr_mode_control
+        if index == 0x14:
+            return self.attr_color_select
+        return 0
 
     def read_seq(self):
         return self.seq_regs[self.seq_index & 0x0F]
@@ -467,7 +618,10 @@ class IO:
         if port == 0x3D5:
             return self.video.read_crtc()
         if port == 0x3DA:
+            self.video.reset_attr_flip_flop()
             return self.video.input_status_1()
+        if port == 0x3C1:
+            return self.video.read_attribute()
         if port == 0x3CC:
             return self.video.misc_output
         if port == 0x3C6:
@@ -543,6 +697,9 @@ class IO:
         if port == 0x3D5:
             self.video.write_crtc(val)
             return
+        if port == 0x3C0:
+            self.video.write_attribute(val)
+            return
         if port == 0x3C4:
             if not self.video.graphics_mode:
                 # Borland's EGAVGA BGI driver programs the adapter directly
@@ -581,6 +738,7 @@ class IO:
             rgb = list(self.video.palette[index])
             rgb[self.video.dac_component] = (val & 0x3F) << 2
             self.video.palette[index] = tuple(rgb)
+            self.video.graphics_dirty = True
             self.video.dac_component = (self.video.dac_component + 1) % 3
             if self.video.dac_component == 0:
                 self.video.dac_index = (index + 1) & 0xFF

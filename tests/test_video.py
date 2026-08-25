@@ -48,6 +48,56 @@ class TestVideo:
         video.graphics_write(10, 0xA5)
         assert video.graphics_pixel(10, 0) == 0xA5
 
+    def test_ega_write_modes_use_plane_latches(self, video):
+        video.set_mode(0x10)
+        video.seq_regs[2] = 0x0F
+
+        # Mode 0 substitutes an all-zero/all-one byte per plane when
+        # enable-set/reset is active; this is how EGA text drawing selects
+        # the foreground colour.
+        video.gdc_regs[0] = 0x05
+        video.gdc_regs[1] = 0x0F
+        video.graphics_write(0, 0xFF)
+        assert video.graphics_pixel(0, 0) == 0x05
+
+        # Mode 2 expands the low four CPU-data bits into the four planes.
+        video.gdc_regs[1] = 0
+        video.gdc_regs[5] = 2
+        video.graphics_write(0, 0x05)
+        assert video.graphics_pixel(0, 0) == 0x05
+
+        # A read loads every plane latch; mode 1 copies those latches back.
+        video.graphics_planes[0][1] = 0xA5
+        video.graphics_planes[1][1] = 0x5A
+        video.graphics_read(1)
+        for plane in video.graphics_planes:
+            plane[1] = 0
+        video.gdc_regs[5] = 1
+        video.graphics_write(1, 0)
+        assert video.graphics_planes[0][1] == 0xA5
+        assert video.graphics_planes[1][1] == 0x5A
+
+        # Mode 3 uses rotated CPU data as a mask for the set/reset colour.
+        video.clear_graphics()
+        video.gdc_regs[0] = 0x0A
+        video.gdc_regs[3] = 0
+        video.gdc_regs[8] = 0xF0
+        video.gdc_regs[5] = 3
+        video.graphics_write(0, 0xCC)
+        assert video.graphics_pixel(0, 0) == 0x0A
+        assert video.graphics_pixel(1, 0) == 0x0A
+        assert video.graphics_pixel(2, 0) == 0
+
+    def test_ega_packed_view_matches_planar_pixel_addressing(self, video):
+        """The fast renderer must retain the normal 80-byte EGA scanline."""
+        video.set_mode(0x10)
+        for plane, memory in enumerate(video.graphics_planes):
+            for offset in range(80 * 350):
+                memory[offset] = (offset * (plane + 3) + plane) & 0xFF
+        packed = video.graphics_pixels()
+        assert packed == bytes(video.graphics_pixel(x, y)
+                               for y in range(350) for x in range(640))
+
     def test_vga_graphics_register_ports(self, io_ports):
         io_ports.outb(0x3C4, 2)
         io_ports.outb(0x3C5, 5)
@@ -55,6 +105,26 @@ class TestVideo:
         io_ports.outb(0x3CE, 8)
         io_ports.outb(0x3CF, 0xF0)
         assert io_ports.inb(0x3CF) == 0xF0
+
+    def test_vga_dac_palette_drives_graphics_colours(self, video, io_ports):
+        assert video.palette[4] == (0xAA, 0x00, 0x00)
+        io_ports.outb(0x3C8, 4)
+        io_ports.outb(0x3C9, 0x01)
+        io_ports.outb(0x3C9, 0x02)
+        io_ports.outb(0x3C9, 0x3F)
+        assert video.palette[4] == (0x04, 0x08, 0xFC)
+        assert video.graphics_dirty
+
+    def test_vga_attribute_palette_selects_dac_colour(self, video, io_ports):
+        io_ports.outb(0x3C8, 0x2A)
+        io_ports.outb(0x3C9, 0x03)
+        io_ports.outb(0x3C9, 0x04)
+        io_ports.outb(0x3C9, 0x05)
+        io_ports.inb(0x3DA)  # resets the attribute address/data flip-flop
+        io_ports.outb(0x3C0, 2)
+        io_ports.outb(0x3C0, 0x2A)
+        assert io_ports.inb(0x3C1) == 0x2A
+        assert video.graphics_rgb(2) == (0x0C, 0x10, 0x14)
 
     def test_putc_normal(self, video):
         video.cur_x = 0; video.cur_y = 0

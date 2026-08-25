@@ -130,3 +130,83 @@ def test_native_backend_routes_ega_vram_writes():
             break
     assert emu.cpu.halted
     assert emu.video.graphics_pixel(0, 0) == 0x0F
+
+
+def test_native_backend_uses_reference_path_for_vga_latched_writes():
+    emu = Emulator(cpu_backend='c')
+    emu.bios.initialize()
+    emu.video.set_mode(0x10)
+    emu.video.seq_regs[2] = 0x0F
+    emu.video.gdc_regs[0] = 0x05
+    emu.video.gdc_regs[1] = 0x0F
+    # mov ax,A000; mov es,ax; xor di,di; mov al,80h;
+    # mov es:[di],al; hlt.  Set/reset selects colour 5, not CPU-data 8.
+    emu.mem.ram[0x100:0x10D] = bytes((
+        0xB8, 0x00, 0xA0, 0x8E, 0xC0, 0x31, 0xFF,
+        0xB0, 0x80, 0x26, 0x88, 0x05, 0xF4,
+    ))
+    emu.cpu.cs = emu.cpu.ds = emu.cpu.ss = 0
+    emu.cpu.es = 0
+    emu.cpu.ip = 0x100
+    emu.cpu.sp = 0x7000
+    for _ in range(20):
+        emu.cpu.execute_many(1)
+        if emu.cpu.halted:
+            break
+    assert emu.cpu.halted
+    assert emu.video.graphics_pixel(0, 0) == 0x05
+
+
+def test_native_backend_applies_masked_destination_vga_write():
+    emu = Emulator(cpu_backend='c')
+    emu.bios.initialize()
+    emu.video.set_mode(0x10)
+    emu.video.seq_regs[2] = 0x0F
+    for plane in emu.video.graphics_planes:
+        plane[0] = 0xFF
+    emu.video.gdc_regs[0] = 0x05
+    emu.video.gdc_regs[1] = 0x0F
+    emu.video.gdc_regs[8] = 0x80
+    # mov ax,A000; mov es,ax; xor di,di; mov al,0; mov es:[di],al; hlt
+    emu.mem.ram[0x100:0x10D] = bytes((
+        0xB8, 0x00, 0xA0, 0x8E, 0xC0, 0x31, 0xFF,
+        0xB0, 0x00, 0x26, 0x88, 0x05, 0xF4,
+    ))
+    emu.cpu.cs = emu.cpu.ds = emu.cpu.ss = 0
+    emu.cpu.es = 0
+    emu.cpu.ip = 0x100
+    emu.cpu.sp = 0x7000
+    for _ in range(20):
+        emu.cpu.execute_many(1)
+        if emu.cpu.halted:
+            break
+    assert emu.cpu.halted
+    assert emu.video.graphics_pixel(0, 0) == 0x05
+    assert emu.video.graphics_pixel(1, 0) == 0x0F
+
+
+def test_native_backend_falls_back_for_vga_latch_copy_mode():
+    emu = Emulator(cpu_backend='c')
+    emu.bios.initialize()
+    emu.video.set_mode(0x10)
+    emu.video.seq_regs[2] = 0x0F
+    for plane, value in enumerate((0xA5, 0x5A, 0x3C, 0xC3)):
+        emu.video.graphics_planes[plane][0] = value
+    emu.video.gdc_regs[5] = 1  # write mode 1 copies latches
+    # mov ax,A000; mov es,ax; xor di,di; mov al,es:[di];
+    # inc di; mov es:[di],al; hlt
+    emu.mem.ram[0x100:0x10F] = bytes((
+        0xB8, 0x00, 0xA0, 0x8E, 0xC0, 0x31, 0xFF,
+        0x26, 0x8A, 0x05, 0x47, 0x26, 0x88, 0x05, 0xF4,
+    ))
+    emu.cpu.cs = emu.cpu.ds = emu.cpu.ss = 0
+    emu.cpu.es = 0
+    emu.cpu.ip = 0x100
+    emu.cpu.sp = 0x7000
+    for _ in range(20):
+        emu.cpu.execute_many(1)
+        if emu.cpu.halted:
+            break
+    assert emu.cpu.halted
+    assert [plane[1] for plane in emu.video.graphics_planes] == [
+        0xA5, 0x5A, 0x3C, 0xC3]

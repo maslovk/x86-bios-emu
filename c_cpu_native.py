@@ -190,14 +190,45 @@ class CCPU(CPU):
             self.io.outw(port, value & 0xFFFF)
         else:
             self.io.outb(port, value & 0xFF)
+        if (getattr(self.io.video, 'graphics_mode', False)
+                and not self._graphics_native_safe()):
+            # A port write can change the graphics controller halfway through
+            # a native batch.  Stop before a latch-dependent A000h access;
+            # the next batch uses the reference path.
+            uc.emu_stop()
         return 0
 
     def _on_mem_write(self, uc, access, address, size, value, user_data=None):
         if (0xA0000 <= address < 0xB0000
                 and getattr(self.io.video, 'graphics_mode', False)):
             for i in range(size):
-                self.io.video.graphics_write(address - 0xA0000 + i,
-                                             value >> (8 * i))
+                offset = address - 0xA0000 + i
+                video = self.io.video
+                # Modes 0, 2, and 3 use the destination latches for their
+                # raster operation.  Unicorn cannot expose A000h reads to
+                # the device model, so load them from the destination here.
+                # Mode 1 instead transfers a previously-read source latch
+                # and remains on the reference path below.
+                if video._planar and (video.gdc_regs[5] & 3) != 1:
+                    for plane in range(4):
+                        video.graphics_latches[plane] = video.graphics_planes[
+                            plane][offset & 0xFFFF]
+                video.graphics_write(offset, value >> (8 * i))
+
+    def _graphics_native_safe(self):
+        """Whether native A000h writes cannot observe VGA latches.
+
+        Modes 0, 2, and 3 operate on destination latches, which the native
+        write callback can load exactly from the target byte.  Mode 1 copies
+        a source latch loaded by a preceding VRAM read, so it stays on the
+        reference path.
+        """
+        video = self.io.video
+        if not video.graphics_mode:
+            return True
+        if not video._planar:
+            return True
+        return (video.gdc_regs[5] & 3) != 1
 
     # ── Execution ───────────────────────────────────────────────────
 
@@ -206,6 +237,18 @@ class CCPU(CPU):
         if count <= 0 or self.halted or self.insn_count >= self.max_insns:
             return 0
         count = min(int(count), self.max_insns - self.insn_count)
+        if (getattr(self.io.video, 'graphics_mode', False)
+                and not self._graphics_native_safe()):
+            # Unicorn maps the regular RAM buffer directly, so it can see an
+            # A000h read without passing it through Video.graphics_read().
+            # That bypasses the four VGA latches required by masked EGA/VGA
+            # writes.  The reference CPU routes every video-memory read/write
+            # through the graphics controller.
+            executed = 0
+            while executed < count and CPU.execute(self):
+                executed += 1
+            self._uc.ctl_flush_tb()
+            return executed
         self._pending_interrupt = None
         self._last_block = None
         self._sync_to_uc()

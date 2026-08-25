@@ -328,7 +328,7 @@ class Emulator:
                  persist=False, serial_output=True, host_dir=None,
                  host_dir_write=False, host_dir_delete=False,
                  host_dir_dos_text=False, max_instructions=10_000_000,
-                 cpu_backend='python'):
+                 cpu_backend='python', pit_speed=1.0):
         self.memory = type('Memory', (), {})()
         self.cpu_backend = normalize_backend(cpu_backend)
         # We need a proper Memory class
@@ -349,6 +349,9 @@ class Emulator:
                      pit=self.pit, pic=self.pic, cmos=self.cmos,
                      kbd_ctrl=self.kbd_ctrl)
         self.step_mode = step_mode
+        if not 0.25 <= pit_speed <= 8.0:
+            raise ValueError('pit_speed must be between 0.25 and 8')
+        self.pit_speed = float(pit_speed)
         self.cpu = self._new_cpu()
         if max_instructions < 1:
             raise ValueError('max-instructions must be positive')
@@ -1012,7 +1015,11 @@ class Emulator:
         last_ip = None
         stuck_count = 0
         stuck_since = time.monotonic()
-        pit_interval = 1.0 / 18.2065  # IBM PC PIT channel 0 / 65536
+        # Keep the PIT's simulated hardware elapsed time independent from
+        # how frequently it is scheduled.  Passing the shorter scheduling
+        # interval to ``io.tick`` would cancel --pit-speed exactly.
+        pit_tick_duration = 1.0 / 18.2065  # IBM PC PIT channel 0 / 65536
+        pit_interval = pit_tick_duration / self.pit_speed
         pit_next_tick = time.monotonic() + pit_interval
         gtk_last_frame = 0.0
         gtk_poll_counter = 0
@@ -1052,7 +1059,7 @@ class Emulator:
                         now, pit_next_tick, pit_interval)
                     if elapsed_ticks:
                         for _ in range(elapsed_ticks):
-                            self.io.tick(pit_interval)
+                            self.io.tick(pit_tick_duration)
 
                 # Check for pending IRQs and dispatch
                 if self.pic:
@@ -1302,6 +1309,8 @@ always protects the bundled image and therefore cannot be used with --persist.''
     runtime.add_argument('--max-instructions', type=int, default=10_000_000,
                          metavar='N',
                          help='noninteractive instruction limit (default: 10000000)')
+    runtime.add_argument('--pit-speed', type=float, default=1.0, metavar='N',
+                         help='PIT/timer speed multiplier, 0.25..8 (default: 1)')
     serial = runtime.add_mutually_exclusive_group()
     serial.add_argument('--serial', dest='serial_output', action='store_true',
                         default=True,
@@ -1361,6 +1370,8 @@ def parse_args(argv=None):
             parser.error('--host-dir-delete requires --host-dir-write')
     if args.max_instructions < 1:
         parser.error('--max-instructions must be positive')
+    if not 0.25 <= args.pit_speed <= 8.0:
+        parser.error('--pit-speed must be between 0.25 and 8')
 
     if args.dos:
         args.floppy = BUNDLED_DOS_IMAGE
@@ -1420,7 +1431,7 @@ def main(argv=None):
                        host_dir_delete=args.host_dir_delete,
                        host_dir_dos_text=args.host_dir_dos_text,
                        max_instructions=args.max_instructions,
-                       cpu_backend=args.cpu_backend)
+                       cpu_backend=args.cpu_backend, pit_speed=args.pit_speed)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))

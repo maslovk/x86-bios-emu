@@ -42,6 +42,11 @@ def test_cpu_backend_c_is_an_explicit_optional_choice():
     assert args.cpu_backend == 'c'
 
 
+def test_pit_speed_multiplier_is_configurable():
+    _parser, args = parse_args(['--pit-speed', '2'])
+    assert args.pit_speed == 2.0
+
+
 def test_emulator_python_backend_is_explicit_and_resettable():
     emulator = Emulator(enable_hardware=False, cpu_backend='python')
     assert emulator.cpu.__class__.__module__ == 'cpu'
@@ -53,6 +58,7 @@ def test_emulator_python_backend_is_explicit_and_resettable():
     (['--boot-hard-disk'], '--boot-hard-disk requires --hard-disk IMG'),
     (['--gtk-font-size', '5'], '--gtk-font-size must be between 6 and 72'),
     (['--gtk-font-size', '73'], '--gtk-font-size must be between 6 and 72'),
+    (['--pit-speed', '9'], '--pit-speed must be between 0.25 and 8'),
     (['--dos', '--persist'], '--dos protects the bundled image'),
     (['--host-dir-dos-text'], '--host-dir-dos-text requires --host-dir DIR'),
     (['--floppy', 'does-not-exist.img'], '--floppy: file not found'),

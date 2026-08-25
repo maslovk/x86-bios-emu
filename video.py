@@ -21,7 +21,17 @@ def decode_vga_char(ch):
 
 
 class Video:
-    """VGA text mode 0xB8000, 80x25, 16 colors."""
+    """VGA text mode plus a practical EGA/VGA graphics framebuffer."""
+
+    MODES = {
+        0x0D: (320, 200, 16, True),
+        0x0E: (640, 200, 16, True),
+        0x0F: (640, 350, 2, True),
+        0x10: (640, 350, 16, True),
+        0x11: (640, 480, 2, True),
+        0x12: (640, 480, 16, True),
+        0x13: (320, 200, 256, False),
+    }
 
     # IBM VGA mode-3 defaults for CRTC registers 00h-18h.  The renderer only
     # needs the text geometry, but DOS applications also probe these ports to
@@ -48,6 +58,22 @@ class Video:
         self.cur_x = 0
         self.cur_y = 0
         self.mode = 3
+        self.graphics_mode = False
+        self.graphics_width = 80
+        self.graphics_height = 25
+        self.graphics_colors = 16
+        self.graphics_planes = [bytearray(0x10000) for _ in range(4)]
+        self.graphics_vram = bytearray(0x10000)
+        self.seq_index = 2
+        self.seq_regs = [0, 0, 0, 0, 0]
+        self.gdc_index = 8
+        self.gdc_regs = [0] * 16
+        self.gdc_regs[8] = 0xFF
+        self.misc_output = 0x67
+        self.dac_mask = 0xFF
+        self.dac_index = 0
+        self.dac_component = 0
+        self.palette = [(i, i, i) for i in range(256)]
         self.mem = None
         self.text_base = 0xB8000
         self.crtc_index = 0
@@ -58,6 +84,86 @@ class Video:
         # accumulate a full scrollback transcript, since output longer than 25
         # rows is otherwise lost (only the final visible screen survives).
         self.on_scroll_line = None
+
+    def set_mode(self, mode):
+        """Select a BIOS video mode and clear its visible memory."""
+        self.mode = mode & 0xFF
+        spec = self.MODES.get(self.mode)
+        self.graphics_mode = spec is not None
+        if spec:
+            self.graphics_width, self.graphics_height, self.graphics_colors, self._planar = spec
+            self.width, self.height = self.graphics_width, self.graphics_height
+            self.seq_regs[2] = 0x0F
+            self.clear_graphics()
+        else:
+            self.graphics_width, self.graphics_height = 80, 25
+            self.graphics_colors = 16
+            self._planar = False
+            self.width, self.height = 80, 25
+            self.clear()
+
+    def clear_graphics(self):
+        for plane in self.graphics_planes:
+            plane[:] = b'\0' * len(plane)
+        self.graphics_vram[:] = b'\0' * len(self.graphics_vram)
+
+    def graphics_read(self, offset):
+        offset &= 0xFFFF
+        return (self.graphics_vram[offset] if not self._planar else
+                self.graphics_planes[self.gdc_regs[4] & 3][offset])
+
+    def graphics_write(self, offset, value):
+        """Apply the VGA write-mode-0 registers to an A0000 write."""
+        offset &= 0xFFFF
+        value &= 0xFF
+        if not self._planar:
+            self.graphics_vram[offset] = value
+            return
+        bit_mask = self.gdc_regs[8] & 0xFF
+        set_reset = self.gdc_regs[0] & 0x0F
+        enable_set_reset = self.gdc_regs[1] & 0x0F
+        rotate = self.gdc_regs[3] & 7
+        if rotate:
+            value = ((value >> rotate) | (value << (8 - rotate))) & 0xFF
+        for plane in range(4):
+            if not (self.seq_regs[2] & (1 << plane)):
+                continue
+            src = (((set_reset >> plane) & 1) * 0xFF
+                   if (enable_set_reset >> plane) & 1 else value)
+            old = self.graphics_planes[plane][offset]
+            self.graphics_planes[plane][offset] = ((old & ~bit_mask)
+                                                   | (src & bit_mask))
+
+    def graphics_pixel(self, x, y):
+        if not self.graphics_mode or not (0 <= x < self.graphics_width
+                                           and 0 <= y < self.graphics_height):
+            return 0
+        if not self._planar:
+            return self.graphics_vram[y * self.graphics_width + x]
+        offset = y * ((self.graphics_width + 7) // 8) + (x >> 3)
+        bit = 7 - (x & 7)
+        return sum(((self.graphics_planes[p][offset] >> bit) & 1) << p
+                   for p in range(4))
+
+    def graphics_pixels(self):
+        if not self.graphics_mode:
+            return None
+        return bytes(self.graphics_pixel(x, y)
+                     for y in range(self.graphics_height)
+                     for x in range(self.graphics_width))
+
+    def read_seq(self):
+        return self.seq_regs[self.seq_index & 0x0F]
+
+    def write_seq(self, value):
+        if (self.seq_index & 0x0F) < len(self.seq_regs):
+            self.seq_regs[self.seq_index & 0x0F] = value & 0xFF
+
+    def read_gdc(self):
+        return self.gdc_regs[self.gdc_index & 0x0F]
+
+    def write_gdc(self, value):
+        self.gdc_regs[self.gdc_index & 0x0F] = value & 0xFF
 
     def read_crtc(self):
         """Read the currently selected color CRTC register."""
@@ -113,6 +219,8 @@ class Video:
 
     def _sync_from_memory(self):
         if self.mem is None:
+            return
+        if self.graphics_mode:
             return
         for y in range(self.height):
             for x in range(self.width):
@@ -360,6 +468,29 @@ class IO:
             return self.video.read_crtc()
         if port == 0x3DA:
             return self.video.input_status_1()
+        if port == 0x3CC:
+            return self.video.misc_output
+        if port == 0x3C6:
+            return self.video.dac_mask
+        if port == 0x3C7:
+            return self.video.dac_index
+        if port == 0x3C4:
+            return self.video.seq_index
+        if port == 0x3C5:
+            return self.video.read_seq()
+        if port == 0x3CE:
+            return self.video.gdc_index
+        if port == 0x3CF:
+            return self.video.read_gdc()
+        if port == 0x3C2:
+            return self.video.misc_output
+        if port == 0x3C9:
+            rgb = self.video.palette[self.video.dac_index]
+            value = rgb[self.video.dac_component]
+            self.video.dac_component = (self.video.dac_component + 1) % 3
+            if self.video.dac_component == 0:
+                self.video.dac_index = (self.video.dac_index + 1) & 0xFF
+            return value >> 2
 
         # PIT counters (0x40-0x42)
         if self.pit and 0x40 <= port <= 0x42:
@@ -411,6 +542,48 @@ class IO:
             return
         if port == 0x3D5:
             self.video.write_crtc(val)
+            return
+        if port == 0x3C4:
+            if not self.video.graphics_mode:
+                # Borland's EGAVGA BGI driver programs the adapter directly
+                # instead of calling INT 10h/AH=00.  Its first sequencer/GDC
+                # access is the mode switch in practice.
+                self.video.set_mode(0x10)
+            self.video.seq_index = val & 0x0F
+            return
+        if port == 0x3C5:
+            self.video.write_seq(val)
+            return
+        if port == 0x3CE:
+            if not self.video.graphics_mode:
+                self.video.set_mode(0x10)
+            self.video.gdc_index = val & 0x0F
+            return
+        if port == 0x3CF:
+            self.video.write_gdc(val)
+            return
+        if port == 0x3C2:
+            self.video.misc_output = val & 0xFF
+            return
+        if port == 0x3C6:
+            self.video.dac_mask = val & 0xFF
+            return
+        if port == 0x3C7:
+            self.video.dac_index = val & 0xFF
+            self.video.dac_component = 0
+            return
+        if port == 0x3C8:
+            self.video.dac_index = val & 0xFF
+            self.video.dac_component = 0
+            return
+        if port == 0x3C9:
+            index = self.video.dac_index
+            rgb = list(self.video.palette[index])
+            rgb[self.video.dac_component] = (val & 0x3F) << 2
+            self.video.palette[index] = tuple(rgb)
+            self.video.dac_component = (self.video.dac_component + 1) % 3
+            if self.video.dac_component == 0:
+                self.video.dac_index = (index + 1) & 0xFF
             return
 
         # PIT counters (0x40-0x42)

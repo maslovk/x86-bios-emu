@@ -107,3 +107,26 @@ def test_native_backend_chained_bios_status_preserves_zf():
     assert emu.cpu.sp == 0x7000
     assert emu.cpu.zf is True
     assert emu.cpu.if_flag is True
+
+
+def test_native_backend_routes_ega_vram_writes():
+    emu = Emulator(cpu_backend='c')
+    emu.bios.initialize()
+    emu.video.set_mode(0x10)
+    emu.video.seq_regs[2] = 0x0F
+    # mov ax,A000; mov es,ax; xor di,di; mov al,80h;
+    # mov es:[di],al; hlt
+    emu.mem.ram[0x100:0x10D] = bytes((
+        0xB8, 0x00, 0xA0, 0x8E, 0xC0, 0x31, 0xFF,
+        0xB0, 0x80, 0x26, 0x88, 0x05, 0xF4,
+    ))
+    emu.cpu.cs = emu.cpu.ds = emu.cpu.ss = 0
+    emu.cpu.es = 0
+    emu.cpu.ip = 0x100
+    emu.cpu.sp = 0x7000
+    for _ in range(20):
+        emu.cpu.execute_many(1)
+        if emu.cpu.halted:
+            break
+    assert emu.cpu.halted
+    assert emu.video.graphics_pixel(0, 0) == 0x0F

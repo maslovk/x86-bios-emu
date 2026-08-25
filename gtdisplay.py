@@ -612,6 +612,9 @@ class GtkDisplay:
         """Render the full 80x25 grid: bg colour rect + fg glyph per cell."""
         PangoCairo = self._PangoCairo
         video = self.video
+        if video.graphics_mode:
+            self._draw_graphics(video, cr, _area)
+            return
         video._sync_from_memory()
         cw, ch = self.cell_w, self.cell_h
         layout = self._layout
@@ -662,6 +665,37 @@ class GtkDisplay:
                     # the exact widget boundary can be clipped on row 24.
                     cr.rectangle(x * cw, y * ch + ch - 4, cw, 3)
                     cr.fill()
+        cr.restore()
+
+    def _draw_graphics(self, video, cr, area):
+        """Render the packed palette view of the EGA/VGA framebuffer."""
+        allocation = area.get_allocation()
+        width, height = video.graphics_width, video.graphics_height
+        scale = min(allocation.width / width, allocation.height / height)
+        scale = max(0.1, scale)
+        ox = (allocation.width - width * scale) / 2
+        oy = (allocation.height - height * scale) / 2
+        cr.set_source_rgb(0, 0, 0)
+        cr.paint()
+        pixels = video.graphics_pixels()
+        cr.save()
+        cr.translate(ox, oy)
+        cr.scale(scale, scale)
+        # Draw horizontal runs, reducing a 640x350 frame to a few thousand
+        # Cairo rectangles for typical game screens.
+        for y in range(height):
+            row = pixels[y * width:(y + 1) * width]
+            start = 0
+            while start < width:
+                color = row[start]
+                end = start + 1
+                while end < width and row[end] == color:
+                    end += 1
+                r, g, b = _CGA_RGB[color & 0x0F]
+                cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)
+                cr.rectangle(start, y, end - start, 1)
+                cr.fill()
+                start = end
         cr.restore()
 
     # ── public API ─────────────────────────────────────────────────

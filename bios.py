@@ -157,6 +157,9 @@ class BIOS:
         self.mem.write_byte(bda + 0x08, 3)       # Video mode
         self.mem.write_word(bda + 0x0A, 0x0000)  # Cursor shape
         self.mem.write_word(bda + 0x0E, 0xB800)  # Video memory segment
+        # Color CRTC base port (40:63).  Graphics drivers use this BDA
+        # field to derive the input-status port at 03DAh.
+        self.mem.write_word(bda + 0x63, 0x03D4)
         # Equipment flag word (matches INT 11h; real layout: 40:10).
         self.mem.write_word(bda + 0x10, self._equipment_word())
         self.mem.write_word(bda + 0x13, 640)  # Conventional memory (KB, word)
@@ -466,11 +469,13 @@ class BIOS:
         dx = cpu.dx
 
         if ah == 0x00:  # Set video mode
-            self.video.mode = al
-            self.video.clear()
+            self.video.set_mode(al)
             if al == 0x03:
                 self.mem.write_byte(0x00408, 3)
                 self.mem.write_word(0x00406, 80)
+            elif al in self.video.MODES:
+                self.mem.write_byte(0x00408, al)
+                self.mem.write_word(0x00406, self.video.graphics_width)
         elif ah == 0x02:  # Set cursor position
             # BIOS convention is DH=row, DL=column.
             row = (dx >> 8) & 0xFF
@@ -556,9 +561,12 @@ class BIOS:
                     self.video.cur_y][self.video.cur_x]
             self.video.putc(al, attr)
         elif ah == 0x0F:  # Get text mode
-            cpu.ax = (self.video.width << 8) | self.video.mode
+            columns = (self.video.graphics_width if self.video.graphics_mode
+                       else self.video.width)
+            cpu.ax = (columns << 8) | self.video.mode
             cpu.bx = 0
-            cpu.cx = self.video.height - 1
+            cpu.cx = ((self.video.graphics_height - 1)
+                      if self.video.graphics_mode else self.video.height - 1)
         elif ah == 0x13:  # Write string
             attr = bl if (bh & 0x80) else 0x07
             count = cx
@@ -576,6 +584,25 @@ class BIOS:
                 else:
                     self.video.write(self.video.cur_x, self.video.cur_y, ch, attr)
                     self.video.cur_x = (self.video.cur_x + 1) % 80
+        elif ah == 0x1A and al == 0x00:  # Get display combination
+            # IBM VGA color: BL=08h.  Borland's EGAVGA BGI driver uses this
+            # service to select its direct VGA register path.
+            cpu.ax = 0x001A
+            cpu.bx = 0x0008
+        elif ah == 0x11 and al == 0x30:  # Get current character font
+            # Return a conventional 8x14 EGA font descriptor.  Graphics
+            # drivers use the character height to choose 350-line mode;
+            # applications that need glyph bytes can still use the resident
+            # BIOS font area supplied by the ROM image.
+            cpu.es = 0xF000
+            cpu.bp = 0xFA6E
+            cpu.cx = 14
+            cpu.dx = (cpu.dx & 0xFF00) | 14
+        elif ah == 0x12 and bl == 0x10:  # EGA information
+            # Report a 256K EGA/VGA-compatible adapter with color display.
+            cpu.bx = (cpu.bx & 0xFF00) | 0x00
+            cpu.cx = 0x0000
+            cpu.dx = 0x0000
 
     # ── INT 11h: Equipment List ────────────────────────────────
 

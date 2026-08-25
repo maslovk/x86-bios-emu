@@ -35,6 +35,27 @@ class TestVideo:
         video.write(0, -1, ord('X'))
         video.write(0, 25, ord('X'))
 
+    def test_ega_mode_dimensions_and_planar_write(self, video):
+        video.set_mode(0x10)
+        assert (video.width, video.height) == (640, 350)
+        video.seq_regs[2] = 0x0F
+        video.graphics_write(0, 0x80)
+        assert video.graphics_pixel(0, 0) == 0x0F
+        assert video.graphics_pixel(1, 0) == 0
+
+    def test_vga_mode_13_packed_pixels(self, video):
+        video.set_mode(0x13)
+        video.graphics_write(10, 0xA5)
+        assert video.graphics_pixel(10, 0) == 0xA5
+
+    def test_vga_graphics_register_ports(self, io_ports):
+        io_ports.outb(0x3C4, 2)
+        io_ports.outb(0x3C5, 5)
+        assert io_ports.inb(0x3C5) == 5
+        io_ports.outb(0x3CE, 8)
+        io_ports.outb(0x3CF, 0xF0)
+        assert io_ports.inb(0x3CF) == 0xF0
+
     def test_putc_normal(self, video):
         video.cur_x = 0; video.cur_y = 0
         video.putc(ord('H'), 0x09)

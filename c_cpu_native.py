@@ -12,6 +12,7 @@ import ctypes
 try:
     from unicorn import (Uc, UcError, UC_ARCH_X86, UC_MODE_16,
                          UC_HOOK_BLOCK, UC_HOOK_INSN, UC_HOOK_INTR,
+                         UC_HOOK_MEM_WRITE,
                          UC_PROT_ALL)
     from unicorn.x86_const import (
         UC_X86_INS_IN, UC_X86_INS_OUT,
@@ -95,6 +96,7 @@ class CCPU(CPU):
             UC_HOOK_INSN, self._on_in, aux1=UC_X86_INS_IN)
         self._uc.hook_add(
             UC_HOOK_INSN, self._on_out, aux1=UC_X86_INS_OUT)
+        self._uc.hook_add(UC_HOOK_MEM_WRITE, self._on_mem_write)
 
     # ── State synchronization ──────────────────────────────────────
 
@@ -189,6 +191,13 @@ class CCPU(CPU):
         else:
             self.io.outb(port, value & 0xFF)
         return 0
+
+    def _on_mem_write(self, uc, access, address, size, value, user_data=None):
+        if (0xA0000 <= address < 0xB0000
+                and getattr(self.io.video, 'graphics_mode', False)):
+            for i in range(size):
+                self.io.video.graphics_write(address - 0xA0000 + i,
+                                             value >> (8 * i))
 
     # ── Execution ───────────────────────────────────────────────────
 

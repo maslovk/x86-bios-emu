@@ -70,6 +70,7 @@ class TestBIOSInit:
         # memory size in KB is the word at 40:13.
         assert bios_env.mem.read_word(0x00410) & 0x0001
         assert bios_env.mem.read_word(0x00413) == 640
+        assert bios_env.mem.read_word(0x00463) == 0x03D4
 
     def test_registers_handlers(self, bios_env):
         bios_env.initialize()

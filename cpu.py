@@ -189,23 +189,38 @@ class CPU:
         return ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
 
     def _readb(self, a):
+        if 0xA0000 <= (a & 0xFFFFF) < 0xB0000 \
+                and getattr(self.io.video, 'graphics_mode', False):
+            return self.io.video.graphics_read(a - 0xA0000)
         if self._ram is not None:
             return self._ram[a & 0xFFFFF]
         return self.mem.read_byte(a)
 
     def _readw(self, a):
+        if 0xA0000 <= (a & 0xFFFFF) < 0xB0000 \
+                and getattr(self.io.video, 'graphics_mode', False):
+            return self._readb(a) | (self._readb(a + 1) << 8)
         if self._ram is not None:
             a &= 0xFFFFF
             return self._ram[a] | (self._ram[(a + 1) & 0xFFFFF] << 8)
         return self.mem.read_word(a)
 
     def _writeb(self, a, v):
+        if 0xA0000 <= (a & 0xFFFFF) < 0xB0000 \
+                and getattr(self.io.video, 'graphics_mode', False):
+            self.io.video.graphics_write(a - 0xA0000, v)
+            return
         if self._ram is not None:
             self._ram[a & 0xFFFFF] = v & 0xFF
         else:
             self.mem.write_byte(a, v)
 
     def _writew(self, a, v):
+        if 0xA0000 <= (a & 0xFFFFF) < 0xB0000 \
+                and getattr(self.io.video, 'graphics_mode', False):
+            self._writeb(a, v)
+            self._writeb(a + 1, v >> 8)
+            return
         if self._ram is not None:
             a &= 0xFFFFF
             self._ram[a] = v & 0xFF

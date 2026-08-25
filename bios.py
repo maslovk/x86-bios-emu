@@ -575,6 +575,13 @@ class BIOS:
             cpu.bx = 0
             cpu.cx = ((self.video.graphics_height - 1)
                       if self.video.graphics_mode else self.video.height - 1)
+        elif ah == 0x10 and al == 0x00:  # Set EGA/VGA palette register
+            # BL selects one of the 16 attribute-controller palette entries;
+            # BH supplies its six-bit EGA/DAC colour. Borland's EGAVGA BGI
+            # driver uses this service to select its game palette.
+            if bl < 16:
+                self.video.attr_palette[bl] = bh & 0x3F
+                self.video.graphics_dirty = True
         elif ah == 0x13:  # Write string
             attr = bl if (bh & 0x80) else 0x07
             count = cx

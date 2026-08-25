@@ -126,6 +126,11 @@ class TestVideo:
         assert io_ports.inb(0x3C1) == 0x2A
         assert video.graphics_rgb(2) == (0x0C, 0x10, 0x14)
 
+    def test_vga_default_attribute_palette_uses_ega_dac_entries(self, video):
+        assert video.attr_palette[6] == 0x14
+        assert video.graphics_rgb(6) == (0xAA, 0x55, 0x00)
+        assert video.graphics_rgb(13) == (0xFF, 0x55, 0xFF)
+
     def test_putc_normal(self, video):
         video.cur_x = 0; video.cur_y = 0
         video.putc(ord('H'), 0x09)

@@ -135,6 +135,12 @@ class TestINT10h:
         self._call(bios_env, ax=0x0003)
         assert bios_env.video.mode == 3
 
+    def test_set_ega_palette_register(self, bios_env):
+        bios_env.initialize()
+        self._call(bios_env, ax=0x1000, bx=0x2705)
+        assert bios_env.video.attr_palette[5] == 0x27
+        assert bios_env.video.graphics_rgb(5) == (0xFF, 0xAA, 0xAA)
+
     def test_vga_bda_describes_active_256k_colour_adapter(self, bios_env):
         bios_env.initialize()
         assert bios_env.mem.read_word(0x00463) == 0x03D4

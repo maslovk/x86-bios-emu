@@ -27,6 +27,23 @@ _VGA_16_PALETTE = (
     (0xFF, 0xFF, 0x55), (0xFF, 0xFF, 0xFF),
 )
 
+
+def _ega_rgb(index):
+    """Expand an EGA six-bit ``rgbRGB`` palette value to 8-bit RGB."""
+    index &= 0x3F
+    return (
+        (0xAA if index & 0x04 else 0) + (0x55 if index & 0x20 else 0),
+        (0xAA if index & 0x02 else 0) + (0x55 if index & 0x10 else 0),
+        (0xAA if index & 0x01 else 0) + (0x55 if index & 0x08 else 0),
+    )
+
+
+_EGA_64_PALETTE = tuple(_ega_rgb(index) for index in range(64))
+_VGA_DEFAULT_ATTR_PALETTE = (
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
+    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+)
+
 # Expand an eight-pixel planar byte into eight little-endian byte lanes of a
 # native 64-bit word.  The renderer combines one value per plane, avoiding a
 # Python loop for every individual EGA pixel.
@@ -109,14 +126,15 @@ class Video:
         # values reach the DAC through this extra indirection.
         self.attr_index = 0
         self.attr_flip_flop = False
-        self.attr_palette = list(range(16))
+        self.attr_palette = list(_VGA_DEFAULT_ATTR_PALETTE)
         self.attr_mode_control = 0x0C
         self.attr_color_select = 0
         self.misc_output = 0x67
         self.dac_mask = 0xFF
         self.dac_index = 0
         self.dac_component = 0
-        self.palette = list(_VGA_16_PALETTE) + [(i, i, i) for i in range(16, 256)]
+        self.palette = (list(_EGA_64_PALETTE)
+                        + [(i, i, i) for i in range(64, 256)])
         self.mem = None
         self.text_base = 0xB8000
         self.crtc_index = 0

@@ -12,9 +12,9 @@ from hardware import PIT, PIC, CMOS
 class TestPIT:
     def test_init(self):
         pit = PIT()
-        assert pit.counters == [0, 0, 0]
-        assert pit.reloads == [0, 0, 0]
-        assert pit.modes == [2, 3, 2]
+        assert pit.counters == [0x10000, 0, 0]
+        assert pit.reloads == [0x10000, 0, 0]
+        assert pit.modes == [3, 3, 2]
         assert pit.tick_count == 0
 
     def test_write_command_counter0(self):
@@ -31,25 +31,39 @@ class TestPIT:
 
     def test_write_counter_byte(self):
         pit = PIT()
-        pit.write_command(0x34)  # Counter 0, low byte only, mode 2
+        pit.write_command(0x14)  # Counter 0, low byte only, mode 2
         pit.write_counter(0, 0x50)
         assert pit.counters[0] == 0x50
 
     def test_write_counter_word(self):
         pit = PIT()
         pit.write_command(0x36)  # Counter 0, rw=3 (both bytes), mode 3
-        pit.write_counter(0, 0x3450)  # Both bytes at once
+        pit.write_counter(0, 0x50)
+        pit.write_counter(0, 0x34)
         assert pit.counters[0] == 0x3450
         assert pit.reloads[0] == 0x3450
 
     def test_write_counter_word_sequential(self):
         pit = PIT()
-        pit.write_command(0x34)  # Counter 0, low byte first (rw=2), mode 2
+        pit.write_command(0x36)  # Counter 0, low byte then high byte
         pit.write_counter(0, 0x50)  # Low byte
         pit.write_counter(0, 0x34)  # High byte (rw=3 branch stores both)
-        # With rw=2, first write stores pending, second write uses rw=3 logic
-        # Actual implementation: rw=2 stores pending, rw=3 stores both at once
-        assert pit.counters[0] == 0x34  # Last write overwrites
+        assert pit.counters[0] == 0x3450
+        assert pit.reloads[0] == 0x3450
+
+    def test_write_zero_count_means_65536(self):
+        pit = PIT()
+        pit.write_command(0x36)
+        pit.write_counter(0, 0)
+        pit.write_counter(0, 0)
+        assert pit.counters[0] == 0x10000
+
+    def test_extended_modes_alias_standard_modes(self):
+        pit = PIT()
+        pit.write_command(0x3C)  # mode 6 is mode 2
+        assert pit.modes[0] == 2
+        pit.write_command(0x3E)  # mode 7 is mode 3
+        assert pit.modes[0] == 3
 
     def test_read_counter(self):
         pit = PIT()
@@ -61,10 +75,9 @@ class TestPIT:
         pit.counters[0] = 0x1234
         assert pit.read_word_counter(0) == 0x1234
 
-    def test_tick_no_reload(self):
+    def test_default_tick_is_18hz(self):
         pit = PIT()
-        pit.reloads[0] = 0
-        fired = pit.tick(1.0 / 18.2)
+        fired = pit.tick(0x10000 / PIT.INPUT_CLK)
         assert 0 in fired
 
     def test_tick_with_reload(self):
@@ -88,9 +101,9 @@ class TestPIT:
         pit.reloads[0] = 0x1234
         pit.counters[0] = 0x5678
         pit.reset_counter0()
-        assert pit.reloads[0] == 0
-        assert pit.counters[0] == 0
-        assert pit.modes[0] == 2
+        assert pit.reloads[0] == 0x10000
+        assert pit.counters[0] == 0x10000
+        assert pit.modes[0] == 3
 
 
 class TestPIC:

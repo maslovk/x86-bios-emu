@@ -600,12 +600,19 @@ class PIT:
     """
 
     INPUT_CLK = 1_193_180
+    _ZERO_COUNT = 0x10000
 
     def __init__(self):
-        self.counters = [0, 0, 0]
-        self.reloads = [0, 0, 0]
-        self.modes = [2, 3, 2]
-        self.rw_modes = [0, 0, 0]
+        # The PC powers up channel 0 as the familiar 18.2 Hz source: mode 3
+        # with a programmed count of zero, which means 65536 to an 8253.
+        # Keep the effective count internally rather than allowing a zero
+        # counter to assert IRQ0 on every service poll.
+        self.counters = [self._ZERO_COUNT, 0, 0]
+        self.reloads = [self._ZERO_COUNT, 0, 0]
+        self.modes = [3, 3, 2]
+        self.rw_modes = [3, 0, 0]
+        self._programmed_words = [0, 0, 0]
+        self._write_low_pending = [False, False, False]
         self.irq_pending = [False, False, False]
         self._tick_accumulator = 0
         self._ticks = 0
@@ -616,22 +623,47 @@ class PIT:
             return
         rw = (val >> 4) & 3
         mode = (val >> 1) & 7
+        # 8253 modes 6 and 7 are aliases for 2 and 3 respectively.
+        if mode in (6, 7):
+            mode -= 4
         self.modes[counter] = mode
         self.rw_modes[counter] = rw
+        self._write_low_pending[counter] = False
 
     def write_counter(self, counter, val):
+        """Program one data byte at a PIT counter port.
+
+        Counts are byte-addressed.  In particular, the common ``36h`` then
+        low-byte/high-byte sequence must not reload channel zero until the
+        high byte arrives.  A written zero is the PIT encoding for 65536.
+        """
         rw = self.rw_modes[counter]
+        val &= 0xFF
         if rw == 0:
-            self.reloads[counter] = (self.reloads[counter] & 0xFF00) | val
-            self.counters[counter] = val
+            return  # Counter latch command; latching is not needed yet.
         elif rw == 1:
-            self.reloads[counter] = (self.reloads[counter] & 0x00FF) | (val << 8)
-            self.counters[counter] = self.reloads[counter]
+            word = (self._programmed_words[counter] & 0xFF00) | val
+            self._load_count(counter, word)
         elif rw == 2:
-            self._pending_val = val
+            word = (self._programmed_words[counter] & 0x00FF) | (val << 8)
+            self._load_count(counter, word)
         elif rw == 3:
-            self.reloads[counter] = val & 0xFFFF
-            self.counters[counter] = val & 0xFFFF
+            if not self._write_low_pending[counter]:
+                self._programmed_words[counter] = (
+                    (self._programmed_words[counter] & 0xFF00) | val)
+                self._write_low_pending[counter] = True
+            else:
+                word = (self._programmed_words[counter] & 0x00FF) | (val << 8)
+                self._write_low_pending[counter] = False
+                self._load_count(counter, word)
+
+    def _load_count(self, counter, word):
+        self._programmed_words[counter] = word & 0xFFFF
+        count = word & 0xFFFF
+        if count == 0:
+            count = self._ZERO_COUNT
+        self.reloads[counter] = count
+        self.counters[counter] = count
 
     def read_counter(self, counter):
         return self.counters[counter] & 0xFF
@@ -645,18 +677,31 @@ class PIT:
     def tick(self, dt):
         """Advance PIT. Returns list of fired IRQs."""
         self._tick_accumulator += dt * self.INPUT_CLK
+        clocks = int(self._tick_accumulator)
+        self._tick_accumulator -= clocks
+        if not clocks:
+            return []
         fired = []
         for i in range(3):
-            while self._tick_accumulator >= 1.0:
-                self._tick_accumulator -= 1.0
-                self.counters[i] -= 1
-                if self.counters[i] <= 0:
-                    if i == 0:
-                        self._ticks += 1
-                    self.counters[i] = self.reloads[i] if self.reloads[i] else 0
-                    self.irq_pending[i] = True
-                    fired.append(i)
-                    break
+            reload = self.reloads[i]
+            if not reload:
+                continue
+            count = self.counters[i] or self._ZERO_COUNT
+            if clocks < count:
+                self.counters[i] = count - clocks
+                continue
+
+            # First terminal count consumes ``count`` clocks; subsequent
+            # periods consume the programmed reload.  Preserve the residual
+            # count even when a delayed host poll spans multiple periods.
+            after_first = clocks - count
+            periods = 1 + (after_first // reload)
+            remainder = after_first % reload
+            self.counters[i] = reload if remainder == 0 else reload - remainder
+            if i == 0:
+                self._ticks += periods
+            self.irq_pending[i] = True
+            fired.append(i)
         return fired
 
     @property
@@ -664,10 +709,12 @@ class PIT:
         return self._ticks
 
     def reset_counter0(self):
-        self.reloads[0] = 0
-        self.counters[0] = 0
-        self.modes[0] = 2
-        self.rw_modes[0] = 1
+        self._programmed_words[0] = 0
+        self._write_low_pending[0] = False
+        self.reloads[0] = self._ZERO_COUNT
+        self.counters[0] = self._ZERO_COUNT
+        self.modes[0] = 3
+        self.rw_modes[0] = 3
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -36,6 +36,12 @@ DISK02 = os.path.join(REPO_ROOT, 'DOS3_3_525', 'DISK02.IMG')
 # not mistaken for the marker itself.
 _FAIL_MARKER = 'XX_FAIL_XX'
 
+# A DOS-era CPU executes roughly fifty thousand instructions in one BIOS
+# timer period.  Servicing IRQ0 every 500 instructions made the harness run
+# the 18.2 Hz timer about a hundred times too quickly, which can starve DOS's
+# stack-switching INT 08 wrapper and timer-sensitive programs such as Pole.
+PIT_INSTRUCTION_QUANTUM = 50_000
+
 
 @dataclass
 class CommandResult:
@@ -286,8 +292,8 @@ class DOSHarness:
                 break
             remaining -= executed
             pit += executed
-            if pit >= 500 and self.emu.pit:
-                pit %= 500
+            if pit >= PIT_INSTRUCTION_QUANTUM and self.emu.pit:
+                pit %= PIT_INSTRUCTION_QUANTUM
                 self.emu.io.tick(1.0 / 18.2)
             self._pump()
         return not self.cpu.halted
@@ -319,7 +325,7 @@ class DOSHarness:
                 step += executed
             if step % 10000 == 0 and text in self.vga_str():
                 return step
-            if step % 500 == 0 and self.emu.pit:
+            if step % PIT_INSTRUCTION_QUANTUM == 0 and self.emu.pit:
                 self.emu.io.tick(1.0 / 18.2)
             self._pump()
             cur = (self.cpu.cs << 4) + self.cpu.ip
@@ -443,7 +449,7 @@ class DOSHarness:
         last_ip = None
         stuck = 0
         next_prompt_check = 5000
-        next_pit_tick = 500
+        next_pit_tick = PIT_INSTRUCTION_QUANTUM
         while step < limit:
             if self.cpu.halted:
                 if self.emu.pit:
@@ -466,7 +472,7 @@ class DOSHarness:
                 next_prompt_check += 5000
             if step >= next_pit_tick and self.emu.pit:
                 self.emu.io.tick(1.0 / 18.2)
-                next_pit_tick += 500
+                next_pit_tick += PIT_INSTRUCTION_QUANTUM
             self._pump()
             cur = (self.cpu.cs << 4) + self.cpu.ip
             if cur == last_ip:

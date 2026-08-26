@@ -32,6 +32,15 @@ _TOPBENCH_METRIC_PATTERNS = {
         r'(?:us|µs|\xB5s)\b'),
 }
 
+_TOPBENCH_INI_KEYS = {
+    'MemoryTest': 'memory_us',
+    'OpcodeTest': 'opcode_us',
+    'VidramTest': 'video_adapter_us',
+    'MemEATest': 'effective_addressing_us',
+    '3DGameTest': 'three_d_game_us',
+    'Score': 'score',
+}
+
 
 def parse_topbench_metrics(screen):
     """Extract the measurements printed by TopBench's ``-i`` mode.
@@ -48,6 +57,23 @@ def parse_topbench_metrics(screen):
             if match:
                 metrics[name] = int(match.group('value'))
                 break
+    return metrics
+
+
+def parse_topbench_ini(text):
+    """Parse component values from TOPBSTUB's ``OUTPUT.INI`` file."""
+    metrics = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition('=')
+        if not separator:
+            continue
+        name = _TOPBENCH_INI_KEYS.get(key.strip())
+        if name is None:
+            continue
+        try:
+            metrics[name] = int(value.strip())
+        except ValueError:
+            continue
     return metrics
 
 
@@ -69,6 +95,8 @@ def build_parser():
                         help='use TopBench live score mode instead of -i')
     parser.add_argument('--ui', action='store_true',
                         help='run the normal TopBench UI')
+    parser.add_argument('--stub', action='store_true',
+                        help='run TOPBSTUB.EXE and capture OUTPUT.INI metrics')
     parser.add_argument('--cpi', type=float,
                         help='override profile cycles per instruction')
     return parser
@@ -87,7 +115,10 @@ def run_topbench(args):
         boot_drive=0x80, cpu_backend=args.cpu_backend, machine=profile,
         emulated_timing=True)
     harness.boot_to_prompt()
-    for source in ('TOPBENCH.EXE', 'DATABASE.INI'):
+    sources = ['TOPBENCH.EXE', 'DATABASE.INI']
+    if args.stub:
+        sources.extend(('TOPBSTUB.EXE', 'TOPBSTUB.OVR'))
+    for source in sources:
         copied = harness.run_command(
             f'COPY B:\\{source} C:\\{source}',
             max_steps=1_200_000, timeout_steps=800_000,
@@ -97,19 +128,35 @@ def run_topbench(args):
 
     harness.emu.io.trace_port_accesses = {}
     harness.emu.io.trace_port_values = {}
-    # -i prints the measured score and exits. -l continuously displays the
-    # score and is useful when diagnosing a long-running calibration phase.
-    option = '-l' if args.live else ('' if args.ui else '-i')
-    command = f'C:\\TOPBENCH.EXE {option}'.rstrip()
-    harness.inject_string(command + '\r')
     before = harness.cpu.insn_count
-    if args.ui:
-        intro_steps = min(200_000, args.steps)
-        harness.run_steps(intro_steps)
-        harness.inject_string('\r')
-        harness.run_steps(args.steps - intro_steps)
+    if args.stub:
+        result = harness.run_command(
+            r'C:\TOPBSTUB.EXE -s', max_steps=args.steps,
+            timeout_steps=args.steps, probe_errorlevel=False)
+        if result.timed_out:
+            raise RuntimeError(
+                'TOPBSTUB did not finish; ensure TOPBSTUB.EXE and '
+                'TOPBSTUB.OVR are present in --topbench-dir')
+        report = harness.run_command(
+            r'TYPE C:\OUTPUT.INI', max_steps=500_000,
+            timeout_steps=500_000, probe_errorlevel=False)
+        metrics = parse_topbench_ini(report.output)
+        screen = report.output
     else:
-        harness.run_steps(args.steps)
+        # -i prints the measured score and exits. -l continuously displays
+        # the score and is useful when diagnosing a long-running calibration.
+        option = '-l' if args.live else ('' if args.ui else '-i')
+        command = f'C:\\TOPBENCH.EXE {option}'.rstrip()
+        harness.inject_string(command + '\r')
+        if args.ui:
+            intro_steps = min(200_000, args.steps)
+            harness.run_steps(intro_steps)
+            harness.inject_string('\r')
+            harness.run_steps(args.steps - intro_steps)
+        else:
+            harness.run_steps(args.steps)
+        metrics = parse_topbench_metrics(harness.vga_str())
+        screen = harness.vga_str()
     profile = harness.emu.machine_profile
     address = ((harness.cpu.cs << 4) + harness.cpu.ip) & 0xFFFFF
     return {
@@ -138,8 +185,8 @@ def run_topbench(args):
             for (port, value), count
             in harness.emu.io.trace_port_values.items()
         },
-        'screen': harness.vga_str(),
-        'metrics': parse_topbench_metrics(harness.vga_str()),
+        'screen': screen,
+        'metrics': metrics,
     }
 
 

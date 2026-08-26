@@ -647,6 +647,16 @@ reports only the continuously updated headline score. The XT reference in the
 bundled database is TopBench score 4 with an 8088 at 4.77 MHz; the built-in XT
 profile is calibrated to that score.
 
+For a complete component report, use the bundled `TOPBSTUB.EXE` and its
+overlay. The stub writes `OUTPUT.INI`, which the runner reads back through
+DOS:
+
+```bash
+python3 benchmark_topbench.py --hard-disk dos622-new.hdd \
+    --topbench-dir DOS_tools/Topbench --machine ibm-pc-xt \
+    --cpu-backend c --stub --steps 3000000 --json
+```
+
 ## Testing
 
 ```bash

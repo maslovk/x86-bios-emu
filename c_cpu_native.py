@@ -123,7 +123,8 @@ class CCPU(CPU):
         # instrumented Python path.
         self._native_vga_hook = None
         if not getattr(self.io.video, 'trace_graphics_writes', None):
-            self._native_vga_hook = install_native_vga_hook(self._uc, self.io.video)
+            self._native_vga_hook = install_native_vga_hook(
+                self._uc, self.io.video, self._ram)
         if self._native_vga_hook is None:
             self._uc.hook_add(UC_HOOK_MEM_WRITE, self._on_mem_write)
 
@@ -243,6 +244,29 @@ class CCPU(CPU):
         video = self.io.video
         if (video.graphics_mode and video._planar
                 and (video.gdc_regs[5] & 3) == 1):
+            # The compiled hook completes forward non-overlapping REP MOVS
+            # copies in one plane-wise operation. Let it see this source read
+            # instead of stopping for the reference path.
+            native_cs = uc.reg_read(UC_X86_REG_CS) & 0xFFFF
+            native_ip = uc.reg_read(UC_X86_REG_EIP) & 0xFFFF
+            ip = ((native_cs << 4) + native_ip) & 0xFFFFF
+            if (self._native_vga_hook is not None and size == 1
+                    and self._ram[ip:ip + 2] in (b'\xf3\xa4', b'\xf3\xa5')):
+                width = 2 if self._ram[ip + 1] == 0xA5 else 1
+                flags = uc.reg_read(UC_X86_REG_FLAGS)
+                source = ((uc.reg_read(UC_X86_REG_DS) & 0xFFFF) << 4) + \
+                    (uc.reg_read(UC_X86_REG_SI) & 0xFFFF)
+                destination = ((uc.reg_read(UC_X86_REG_ES) & 0xFFFF) << 4) + \
+                    (uc.reg_read(UC_X86_REG_DI) & 0xFFFF)
+                length = (uc.reg_read(UC_X86_REG_CX) & 0xFFFF) * width
+                safe = (not (flags & 0x0400) and length
+                        and 0xA0000 <= source < 0xB0000
+                        and 0xA0000 <= destination < 0xB0000
+                        and source + length <= 0xB0000
+                        and destination + length <= 0xB0000
+                        and not (source < destination < source + length))
+                if safe:
+                    return
             self._native_vram_read_fallback = True
             uc.emu_stop()
 
@@ -285,7 +309,7 @@ class CCPU(CPU):
         return True
 
     def preferred_batch_size(self):
-        """Use larger native chunks for bulk graphics without slowing input."""
+        """Use stable native chunks for bulk graphics and responsive input."""
         if self._graphics_native_safe() and self.io.video.graphics_mode:
             return self.graphics_native_batch_size
         return self.native_batch_size

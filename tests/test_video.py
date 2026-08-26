@@ -586,8 +586,8 @@ class TestIO:
         pit.write_command(0xB6)
         pit.write_counter(2, 8)
         pit.write_counter(2, 0)
-        io._pit2_last_update = time.monotonic()
+        io._pit2_last_update = time.monotonic() + 1
         assert io.inb(0x61) & 0x20
         pit.counters[2] = 4
-        io._pit2_last_update = time.monotonic()
+        io._pit2_last_update = time.monotonic() + 1
         assert not (io.inb(0x61) & 0x20)

@@ -13,7 +13,9 @@ class _State(ctypes.Structure):
                ('gdc', ctypes.POINTER(ctypes.c_ubyte)),
                ('latches', ctypes.POINTER(ctypes.c_ubyte)),
                ('active', ctypes.POINTER(ctypes.c_ubyte)),
-               ('dirty', ctypes.POINTER(ctypes.c_ubyte))]
+               ('dirty', ctypes.POINTER(ctypes.c_ubyte)),
+               ('ram', ctypes.POINTER(ctypes.c_ubyte)),
+               ('fills', ctypes.c_uint64), ('copies', ctypes.c_uint64)]
 
 
 class _BlockState(ctypes.Structure):
@@ -49,7 +51,7 @@ def _library():
     return library
 
 
-def install(uc, video):
+def install(uc, video, ram):
     """Return keep-alive state if the hook installed, otherwise ``None``."""
     try:
         library = _library()
@@ -61,6 +63,7 @@ def install(uc, video):
             state.planes[index] = _pointer(plane)
         state.seq, state.gdc, state.latches, state.active = map(_pointer, buffers[4:])
         state.dirty = _pointer(dirty)
+        state.ram = _pointer(ram)
         hook = ctypes.c_size_t()
         handle = getattr(uc, '_uch', None)
         if not handle or library.x86_vga_install(handle, ctypes.byref(state),

@@ -1114,10 +1114,13 @@ class Emulator:
         gtk_last_frame = 0.0
         gtk_poll_counter = 0
         # Native graphics batches can complete far faster than text-mode DOS
-        # work. Check the GTK clock more often in graphics mode so the 30 FPS
+        # work. Check the GTK clock more often in graphics mode so the 60 FPS
         # render cap is reachable instead of being limited by a 100-batch
         # polling cadence.
-        gtk_graphics_poll_batches = 8
+        # A graphics batch is deliberately large to amortize Unicorn's call
+        # boundary. Poll after each one so the GTK frame cap—not a delayed
+        # batch counter—remains responsible for UI responsiveness.
+        gtk_graphics_poll_batches = 1
         gtk_text_poll_batches = 100
 
         try:
@@ -1166,7 +1169,7 @@ class Emulator:
                 if self.gtk:
                     # Drawing the complete 80x25 Pango grid after every guest
                     # instruction starves DOS during boot.  Check the clock in
-                    # small batches and cap GTK work at about 30 frames/sec;
+                    # small batches and cap GTK work at about 60 frames/sec;
                     # this remains responsive while leaving nearly all CPU
                     # time to emulation.
                     gtk_poll_counter += 1
@@ -1176,7 +1179,7 @@ class Emulator:
                     if gtk_poll_counter >= poll_batches:
                         gtk_poll_counter = 0
                         now = time.monotonic()
-                        if now - gtk_last_frame >= 1 / 30:
+                        if now - gtk_last_frame >= 1 / 60:
                             gtk_last_frame = now
                             if self.gtk_display.pump():
                                 self.stop_reason = 'GTK window closed'

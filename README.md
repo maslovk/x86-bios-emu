@@ -311,6 +311,22 @@ python3 main.py --boot dos3.3.img         # Load DOS 3.3 boot sector
 python3 main.py --boot dos3.3.img --step  # Step through DOS 3.3 boot
 ```
 
+### Machine profiles
+
+Canonical hardware profiles can be selected independently of the CPU backend:
+
+```bash
+python3 main.py --list-machines
+python3 main.py --machine ibm-pc-xt --cpu-backend c --gtk
+python3 main.py --machine 486dx2-66 --cpu-backend c --gtk
+```
+
+Profiles describe the target CPU, bus, video adapter, memory/I/O timing
+parameters, PIT clock, and benchmark validation targets. Benchmark targets are
+diagnostic data; they do not directly throttle games. The current emulator
+consumes the profile's PIT clock and reports the other timing parameters, while
+cycle-accurate CPU, bus, cache, and wait-state execution is added incrementally.
+
 ### Automated MS-DOS 6.22 installation
 
 With the retail `Disk1.img`, `Disk2.img`, and `Disk3.img` files under

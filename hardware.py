@@ -602,7 +602,10 @@ class PIT:
     INPUT_CLK = 1_193_180
     _ZERO_COUNT = 0x10000
 
-    def __init__(self):
+    def __init__(self, input_clk=None):
+        if input_clk is not None and input_clk <= 0:
+            raise ValueError('PIT input clock must be positive')
+        self.input_clk = float(input_clk or self.INPUT_CLK)
         # The PC powers up channel 0 as the familiar 18.2 Hz source: mode 3
         # with a programmed count of zero, which means 65536 to an 8253.
         # Keep the effective count internally rather than allowing a zero
@@ -641,13 +644,15 @@ class PIT:
         rw = self.rw_modes[counter]
         val &= 0xFF
         if rw == 0:
-            return  # Counter latch command; latching is not needed yet.
+            return False  # Counter latch command; latching is not needed yet.
         elif rw == 1:
             word = (self._programmed_words[counter] & 0xFF00) | val
             self._load_count(counter, word)
+            return True
         elif rw == 2:
             word = (self._programmed_words[counter] & 0x00FF) | (val << 8)
             self._load_count(counter, word)
+            return True
         elif rw == 3:
             if not self._write_low_pending[counter]:
                 self._programmed_words[counter] = (
@@ -657,6 +662,8 @@ class PIT:
                 word = (self._programmed_words[counter] & 0x00FF) | (val << 8)
                 self._write_low_pending[counter] = False
                 self._load_count(counter, word)
+                return True
+        return False
 
     def _load_count(self, counter, word):
         self._programmed_words[counter] = word & 0xFFFF
@@ -665,6 +672,10 @@ class PIT:
             count = self._ZERO_COUNT
         self.reloads[counter] = count
         self.counters[counter] = count
+        if counter == 2:
+            # A newly loaded channel starts a fresh timing phase. The host
+            # side port-61 sampler resets its wall-clock epoch as well.
+            self._channel2_accumulator = 0
 
     def read_counter(self, counter):
         return self.counters[counter] & 0xFF
@@ -717,7 +728,7 @@ class PIT:
 
     def advance_channel2(self, dt):
         """Advance the speaker/timer channel at sub-IRQ0 resolution."""
-        self._channel2_accumulator += max(0.0, dt) * self.INPUT_CLK
+        self._channel2_accumulator += max(0.0, dt) * self.input_clk
         clocks = int(self._channel2_accumulator)
         self._channel2_accumulator -= clocks
         self._advance_counter(2, clocks)
@@ -728,7 +739,7 @@ class PIT:
         Channel 2 is sampled via port 61h and is advanced there at the much
         finer cadence required by games that use it as a delay clock.
         """
-        self._tick_accumulator += dt * self.INPUT_CLK
+        self._tick_accumulator += dt * self.input_clk
         clocks = int(self._tick_accumulator)
         self._tick_accumulator -= clocks
         if not clocks:

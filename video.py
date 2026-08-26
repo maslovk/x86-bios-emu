@@ -668,7 +668,8 @@ class IO:
     """I/O port emulation (keyboard, PIT, PIC, CMOS, serial, etc.)."""
 
     def __init__(self, video, keyboard, disk=None, serial=None,
-                 pit=None, pic=None, cmos=None, kbd_ctrl=None):
+                 pit=None, pic=None, cmos=None, kbd_ctrl=None,
+                 pit_speed=1.0):
         self.video = video
         self.kbd = keyboard
         self.disk = disk
@@ -677,6 +678,8 @@ class IO:
         self.pic = pic
         self.cmos = cmos
         self.kbd_ctrl = kbd_ctrl  # Keyboard controller (8042)
+        self.pit_speed = float(pit_speed)
+        self.use_emulated_time = False
         self.speaker = None
         self._pit_pending_irqs = []  # IRQs fired since last check
         # Last byte written to port 0x61 (speaker/timer gates).  Bit 4 is
@@ -713,9 +716,10 @@ class IO:
             # Toggle the refresh-check bit on each read so DRAM-refresh
             # timing loops observe a change (see __init__).
             self._port61 ^= 0x10
-            if self.pit:
+            if self.pit and not self.use_emulated_time:
                 now = time.monotonic()
-                self.pit.advance_channel2(now - self._pit2_last_update)
+                self.pit.advance_channel2(
+                    (now - self._pit2_last_update) * self.pit_speed)
                 self._pit2_last_update = now
                 timer2 = self.pit.output(2)
             else:
@@ -874,7 +878,11 @@ class IO:
 
         # PIT counters (0x40-0x42)
         if self.pit and 0x40 <= port <= 0x42:
-            self.pit.write_counter(port - 0x40, val)
+            loaded = self.pit.write_counter(port - 0x40, val)
+            if port == 0x42 and loaded:
+                # Channel 2 starts counting from the most recent data write;
+                # do not charge it time elapsed before this reload.
+                self._pit2_last_update = time.monotonic()
             return
         # PIT command (0x43)
         if self.pit and port == 0x43:
@@ -911,6 +919,8 @@ class IO:
     def tick(self, dt=1/18.2):
         """Advance PIT by dt seconds. Returns list of fired IRQs."""
         if self.pit:
+            if self.use_emulated_time:
+                self.pit.advance_channel2(max(0.0, dt))
             fired = self.pit.tick(dt)
             routed = []
             for channel in fired:

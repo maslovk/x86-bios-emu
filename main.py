@@ -20,6 +20,7 @@ from hostbridge import (audit_host_directory_deletions,
                         snapshot_host_directory, sync_host_directory_disk)
 from terminal_keyboard import ASCII, TerminalKeyDecoder
 import video as video_mod
+from machine_profiles import MACHINE_PROFILES, get_machine_profile
 
 
 BUNDLED_DOS_IMAGE = os.path.join(
@@ -329,11 +330,13 @@ class Emulator:
                  host_dir_write=False, host_dir_delete=False,
                  host_dir_dos_text=False, max_instructions=10_000_000,
                  cpu_backend='python', pit_speed=1.0, audio=None,
-                 trace_pole_timing=False):
+                 trace_pole_timing=False, machine='generic'):
         self.memory = type('Memory', (), {})()
         self.cpu_backend = normalize_backend(cpu_backend)
         # We need a proper Memory class
         self.mem = self._create_memory()
+        self.machine_profile = (machine if hasattr(machine, 'cpu_clock_hz')
+                                else get_machine_profile(machine))
         self.video = Video()
         self.video.attach_memory(self.mem)
         self.kbd = Keyboard()
@@ -341,14 +344,20 @@ class Emulator:
         self.serial = Serial(echo=serial_output)
 
         # Hardware devices
-        self.pit = PIT() if enable_hardware else None
+        self.pit = (PIT(input_clk=self.machine_profile.pit_clock_hz)
+                    if enable_hardware else None)
         self.pic = PIC() if enable_hardware else None
         self.cmos = CMOS() if enable_hardware else None
         self.kbd_ctrl = KeyboardController() if enable_hardware else None
 
+        if not 0.25 <= pit_speed <= 8.0:
+            raise ValueError('pit_speed must be between 0.25 and 8')
+        self.pit_speed = float(pit_speed)
+
         self.io = IO(self.video, self.kbd, self.disk, self.serial,
                      pit=self.pit, pic=self.pic, cmos=self.cmos,
-                     kbd_ctrl=self.kbd_ctrl)
+                     kbd_ctrl=self.kbd_ctrl, pit_speed=self.pit_speed)
+        self.io.use_emulated_time = True
         self.speaker = None
         if audio is None:
             audio = gtk
@@ -360,9 +369,6 @@ class Emulator:
             except Exception:
                 self.speaker = None
         self.step_mode = step_mode
-        if not 0.25 <= pit_speed <= 8.0:
-            raise ValueError('pit_speed must be between 0.25 and 8')
-        self.pit_speed = float(pit_speed)
         self.trace_pole_timing = trace_pole_timing
         self._timing_int1a_callers = {}
         self._timing_trace_started = None
@@ -512,6 +518,9 @@ class Emulator:
     def _new_cpu(self):
         """Construct the selected CPU backend for initial boot or reset."""
         cpu = create_cpu(self.cpu_backend, self.mem, self.io)
+        cpu.cpu_clock_hz = self.machine_profile.cpu_clock_hz
+        cpu.timing_model = self.machine_profile.timing_model
+        cpu.cycles_per_instruction = self.machine_profile.cycles_per_instruction
         cpu.step_mode = self.step_mode
         return cpu
 
@@ -1114,9 +1123,8 @@ class Emulator:
         # Keep the PIT's simulated hardware elapsed time independent from
         # how frequently it is scheduled.  Passing the shorter scheduling
         # interval to ``io.tick`` would cancel --pit-speed exactly.
-        pit_tick_duration = 1.0 / 18.2065  # IBM PC PIT channel 0 / 65536
-        pit_interval = pit_tick_duration / self.pit_speed
-        pit_next_tick = time.monotonic() + pit_interval
+        last_cpu_cycles = self.cpu.cycle_count
+        last_pit_wall = time.monotonic()
         if self.trace_pole_timing:
             self._timing_trace_started = time.monotonic()
             self._timing_trace_next_report = self._timing_trace_started + 1.0
@@ -1155,14 +1163,22 @@ class Emulator:
                           file=sys.stderr)
                     break
 
-                # PIT tick: advance timer against wall-clock time
+                # Advance the PIT from virtual CPU time. This makes a machine
+                # profile's CPU clock meaningful to both IRQ0 and channel 2.
+                # If the guest is halted, real elapsed time still advances
+                # the hardware timer so keyboard waits remain responsive.
                 if self.pit:
-                    now = time.monotonic()
-                    elapsed_ticks, pit_next_tick = schedule_pit_ticks(
-                        now, pit_next_tick, pit_interval)
-                    if elapsed_ticks:
-                        for _ in range(elapsed_ticks):
-                            self.io.tick(pit_tick_duration)
+                    current_cycles = self.cpu.cycle_count
+                    cycle_delta = max(0.0, current_cycles - last_cpu_cycles)
+                    if cycle_delta:
+                        pit_dt = cycle_delta / self.cpu.cpu_clock_hz
+                        last_pit_wall = time.monotonic()
+                    else:
+                        now = time.monotonic()
+                        pit_dt = max(0.0, now - last_pit_wall)
+                        last_pit_wall = now
+                    self.io.tick(pit_dt * self.pit_speed)
+                    last_cpu_cycles = current_cycles
                 self._report_pole_timing(time.monotonic())
 
                 # Check for pending IRQs and dispatch
@@ -1409,6 +1425,11 @@ always protects the bundled image and therefore cannot be used with --persist.''
                          help='disable optional PC speaker audio')
 
     runtime = parser.add_argument_group('runtime')
+    runtime.add_argument('--machine', choices=tuple(MACHINE_PROFILES),
+                         default='generic', metavar='PROFILE',
+                         help='select a canonical hardware profile')
+    runtime.add_argument('--list-machines', action='store_true',
+                         help='list available machine profiles and exit')
     runtime.add_argument('--cpu-backend', choices=BACKENDS, default='python',
                          help='CPU implementation: python (reference/default) '
                               'or c (optional native backend)')
@@ -1501,6 +1522,12 @@ def parse_args(argv=None):
 def main(argv=None):
     parser, args = parse_args(argv)
 
+    if args.list_machines:
+        for profile in MACHINE_PROFILES.values():
+            print(f'{profile.id}: {profile.name} ({profile.cpu_model}, '
+                  f'{profile.cpu_clock_hz / 1_000_000:g} MHz)')
+        return
+
     if args.create_hard_disk:
         try:
             sectors, size = create_hard_disk_image(
@@ -1522,6 +1549,9 @@ def main(argv=None):
     if args.step:
         print(f"  Step mode: ON", file=sys.stderr)
     print(f"  CPU backend: {args.cpu_backend}", file=sys.stderr)
+    profile = MACHINE_PROFILES[args.machine]
+    print(f"  Machine: {profile.name} ({profile.cpu_model}, "
+          f"{profile.cpu_clock_hz / 1_000_000:g} MHz)", file=sys.stderr)
     if args.gtk:
         print(f"  Display: GTK window", file=sys.stderr)
     elif args.interactive:
@@ -1543,7 +1573,8 @@ def main(argv=None):
                        max_instructions=args.max_instructions,
                        cpu_backend=args.cpu_backend, pit_speed=args.pit_speed,
                        audio=args.gtk and not args.no_audio,
-                       trace_pole_timing=args.trace_pole_timing)
+                       trace_pole_timing=args.trace_pole_timing,
+                       machine=args.machine)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))

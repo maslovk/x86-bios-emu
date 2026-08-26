@@ -17,6 +17,16 @@ class TestPIT:
         assert pit.modes == [3, 3, 2]
         assert pit.tick_count == 0
 
+    def test_custom_input_clock_is_used(self):
+        pit = PIT(input_clk=1_000_000)
+        pit.reloads[0] = 1000
+        pit.counters[0] = 1000
+        pit.tick(0.001)
+        assert pit.counters[0] == 1000
+        pit.tick(0.001)
+        assert pit.counters[0] == 1000
+        assert pit.tick_count == 2
+
     def test_write_command_counter0(self):
         pit = PIT()
         pit.write_command(0x36)  # Counter 0, rw=3 (both bytes), mode 3 (rate gen), binary
@@ -50,6 +60,15 @@ class TestPIT:
         pit.write_counter(0, 0x34)  # High byte (rw=3 branch stores both)
         assert pit.counters[0] == 0x3450
         assert pit.reloads[0] == 0x3450
+
+    def test_write_counter_reports_only_complete_reload(self):
+        pit = PIT()
+        pit.write_command(0x36)
+        assert pit.write_counter(0, 0x50) is False
+        assert pit.write_counter(0, 0x34) is True
+
+        pit.write_command(0x14)  # low byte only
+        assert pit.write_counter(0, 0x20) is True
 
     def test_write_zero_count_means_65536(self):
         pit = PIT()
@@ -104,6 +123,16 @@ class TestPIT:
         assert pit.output(2) == 1
         pit.advance_channel2(4 / PIT.INPUT_CLK)
         assert pit.output(2) == 0
+
+    def test_channel2_preserves_fractional_clock_progress(self):
+        pit = PIT()
+        pit.write_command(0xB6)
+        pit.write_counter(2, 8)
+        pit.write_counter(2, 0)
+        pit.advance_channel2(0.5 / PIT.INPUT_CLK)
+        assert pit.counters[2] == 8
+        pit.advance_channel2(0.5 / PIT.INPUT_CLK)
+        assert pit.counters[2] == 7
 
     def test_reset_counter0(self):
         pit = PIT()

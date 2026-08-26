@@ -386,6 +386,9 @@ class CCPU(CPU):
                 self.io.video.graphics_dirty = True
                 dirty[0] = 0
 
+        self.last_instruction_cycles = self.cycles_per_instruction
+        self.cycle_count += count * self.cycles_per_instruction
+
         if self._pending_interrupt is not None:
             # BIOS/DOS handlers operate on the Python memory/register view.
             self._sync_from_uc()

@@ -40,7 +40,7 @@ class PCSpeaker:
         reload = self.pit.reloads[2]
         if not reload or not (self._gate & 3) == 3:
             return None
-        frequency = self.pit.INPUT_CLK / reload
+        frequency = self.pit.input_clk / reload
         if frequency < 20 or frequency > self.SAMPLE_RATE / 2:
             return None
         amplitude = 7000

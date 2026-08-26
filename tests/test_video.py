@@ -586,6 +586,39 @@ class TestIO:
         assert io._pit_pending_irqs == [0]
         assert pic.irr == 0x01
 
+    def test_emulated_time_tick_advances_both_pit_clock_domains(self):
+        video = Video()
+        pit = PIT()
+        pic = PIC()
+        io = IO(video, Keyboard(), Disk(), Serial(), pit=pit, pic=pic)
+        io.use_emulated_time = True
+        pit.reloads[0] = 10
+        pit.counters[0] = 10
+        pit.write_command(0xB6)
+        pit.write_counter(2, 10)
+        pit.write_counter(2, 0)
+
+        io.tick(10 / pit.input_clk)
+
+        assert pit.counters[2] == 10
+        assert io._pit_pending_irqs == [0]
+        assert pic.irr & 0x01
+
+    def test_emulated_time_port61_does_not_add_wall_clock(self, monkeypatch):
+        video = Video()
+        pit = PIT()
+        io = IO(video, Keyboard(), Disk(), Serial(), pit=pit)
+        io.use_emulated_time = True
+        pit.write_command(0xB6)
+        pit.write_counter(2, 1000 & 0xFF)
+        pit.write_counter(2, 1000 >> 8)
+        io._pit2_last_update = 0.0
+        monkeypatch.setattr(time, 'monotonic', lambda: 100.0)
+
+        io.inb(0x61)
+
+        assert pit.counters[2] == 1000
+
     def test_port61_exposes_pit_channel2_output(self):
         video = Video()
         pit = PIT()
@@ -598,3 +631,38 @@ class TestIO:
         pit.counters[2] = 4
         io._pit2_last_update = time.monotonic() + 1
         assert not (io.inb(0x61) & 0x20)
+
+    def test_port61_pit_speed_scales_channel2(self, monkeypatch):
+        monkeypatch.setattr(time, 'monotonic', lambda: 0.0001)
+
+        def channel2_counter(pit_speed):
+            pit = PIT()
+            io = IO(Video(), Keyboard(), Disk(), Serial(), pit=pit,
+                    pit_speed=pit_speed)
+            pit.write_command(0xB6)
+            pit.write_counter(2, 1000 & 0xFF)
+            pit.write_counter(2, 1000 >> 8)
+            io._pit2_last_update = 0.0
+            io.inb(0x61)
+            return pit.counters[2]
+
+        assert channel2_counter(1.0) == 881
+        assert channel2_counter(4.0) == 523
+
+    def test_programming_channel2_starts_a_new_timing_epoch(self, monkeypatch):
+        clock = [10.0]
+        monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+        pit = PIT()
+        io = IO(Video(), Keyboard(), Disk(), Serial(), pit=pit)
+        io._pit2_last_update = 0.0
+
+        io.outb(0x43, 0xB6)
+        io.outb(0x42, 0xE8)
+        assert io._pit2_last_update == 0.0
+        clock[0] = 10.1
+        io.outb(0x42, 0x03)  # 1000 clocks, loaded at t=10.1
+        assert io._pit2_last_update == 10.1
+        clock[0] = 10.1001
+        io.inb(0x61)
+
+        assert pit.counters[2] == 881

@@ -655,9 +655,20 @@ class TestInstructionCount:
         cpu.execute()
         assert cpu.insn_count == 1
 
+    def test_cycle_count_uses_profile_rate(self, cpu):
+        cpu.cycles_per_instruction = 12.0
+        cpu.cpu_clock_hz = 4_772_727
+        cpu.cs = 0; cpu.ip = 0x7C00
+        cpu.mem.write_byte(0x7C00, 0x90)
+        cpu.execute()
+        assert cpu.cycle_count == 12.0
+        assert cpu.emulated_time == pytest.approx(12 / 4_772_727)
+
     def test_status_dict(self, cpu):
         cpu.ax = 0xBEEF
         s = cpu.status()
         assert s['ax'] == 0xBEEF
         assert s['insn_count'] == 0
+        assert s['cycle_count'] == 0
+        assert s['emulated_time'] == 0
         assert all(k in s for k in ['cs', 'ip', 'flags', 'ax', 'bx', 'cx', 'dx'])

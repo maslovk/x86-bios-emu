@@ -7,6 +7,7 @@ import pytest
 from main import (BUNDLED_DOS_IMAGE, Emulator, build_argument_parser,
                   create_hard_disk_image, parse_args,
                   sanitize_snap_gtk_environment, schedule_pit_ticks)
+from machine_profiles import MACHINE_PROFILES
 from gtdisplay import (CURSOR_BLINK_INTERVAL_MS, _FUNCTION_KEY_SCANS,
                        _set1_scan_for_char)
 from hostbridge import (audit_host_directory_deletions,
@@ -40,6 +41,25 @@ def test_cpu_backend_defaults_to_reference_python():
 def test_cpu_backend_c_is_an_explicit_optional_choice():
     _parser, args = parse_args(['--cpu-backend', 'c'])
     assert args.cpu_backend == 'c'
+
+
+def test_machine_profile_is_selectable():
+    _parser, args = parse_args(['--machine', '486dx2-66'])
+    assert args.machine == '486dx2-66'
+    assert set(MACHINE_PROFILES) >= {'ibm-pc-5150', 'ibm-pc-xt', '486dx2-66'}
+
+
+def test_machine_profile_configures_emulator_pit():
+    emulator = Emulator(enable_hardware=True, machine='486dx2-66')
+    assert emulator.machine_profile.id == '486dx2-66'
+    assert emulator.pit.input_clk == 1_193_180
+    assert emulator.cpu.cpu_clock_hz == 66_000_000
+    assert emulator.cpu.cycles_per_instruction == 2.0
+
+
+def test_list_machine_profiles_is_configurable():
+    _parser, args = parse_args(['--list-machines'])
+    assert args.list_machines
 
 
 def test_pit_speed_multiplier_is_configurable():

@@ -29,6 +29,10 @@ class CPU:
         self.retry_software_interrupt = False
         self._retry_interrupt_state = None
         self.insn_count = 0
+        self.cycle_count = 0.0
+        self.last_instruction_cycles = 0.0
+        self.cpu_clock_hz = 4_772_727
+        self.cycles_per_instruction = 1.0
         # The CPU core has no implicit lifetime limit. Embedders may assign a
         # finite value for bounded tests; the emulator applies its separate
         # --max-instructions policy only to noninteractive sessions.
@@ -789,6 +793,8 @@ class CPU:
             traceback.print_exc(file=sys.stderr)
             self.halted = True
             return False
+        self.last_instruction_cycles = self.cycles_per_instruction
+        self.cycle_count += self.last_instruction_cycles
         if self._irq_shadow:
             self._irq_shadow -= 1
         # Single-step trap: fire INT 1 after the instruction if TF was set
@@ -800,6 +806,11 @@ class CPU:
         if self.step_mode:
             self._step_print(opc, save_ip)
         return True
+
+    @property
+    def emulated_time(self):
+        """Virtual seconds elapsed according to the selected CPU profile."""
+        return self.cycle_count / self.cpu_clock_hz
 
     def _step_print(self, opc, ip):
         """Print mnemonic + register state for step debugging."""
@@ -2377,4 +2388,6 @@ class CPU:
             'ds': self.ds, 'es': self.es, 'ss': self.ss,
             'flags': self.flags,
             'insn_count': self.insn_count,
+            'cycle_count': self.cycle_count,
+            'emulated_time': self.emulated_time,
         }

@@ -116,6 +116,13 @@ class TestVideo:
         assert video.palette[4] == (0x04, 0x08, 0xFC)
         assert video.graphics_dirty
 
+    def test_vga_mode13_uses_packed_256_colour_dac(self, video):
+        video.set_mode(0x13)
+        video.palette[0xA5] = (1, 2, 3)
+        assert video.graphics_rgb(0xA5) == (1, 2, 3)
+        video.graphics_write(0, 0xA5)
+        assert video.graphics_pixels()[0] == 0xA5
+
     def test_vga_attribute_palette_selects_dac_colour(self, video, io_ports):
         io_ports.outb(0x3C8, 0x2A)
         io_ports.outb(0x3C9, 0x03)

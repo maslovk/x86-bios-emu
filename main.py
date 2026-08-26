@@ -328,7 +328,7 @@ class Emulator:
                  persist=False, serial_output=True, host_dir=None,
                  host_dir_write=False, host_dir_delete=False,
                  host_dir_dos_text=False, max_instructions=10_000_000,
-                 cpu_backend='python', pit_speed=1.0,
+                 cpu_backend='python', pit_speed=1.0, audio=None,
                  trace_pole_timing=False):
         self.memory = type('Memory', (), {})()
         self.cpu_backend = normalize_backend(cpu_backend)
@@ -349,6 +349,16 @@ class Emulator:
         self.io = IO(self.video, self.kbd, self.disk, self.serial,
                      pit=self.pit, pic=self.pic, cmos=self.cmos,
                      kbd_ctrl=self.kbd_ctrl)
+        self.speaker = None
+        if audio is None:
+            audio = gtk
+        if audio and self.pit:
+            try:
+                from speaker import PCSpeaker
+                self.speaker = PCSpeaker(self.pit)
+                self.io.speaker = self.speaker
+            except Exception:
+                self.speaker = None
         self.step_mode = step_mode
         if not 0.25 <= pit_speed <= 8.0:
             raise ValueError('pit_speed must be between 0.25 and 8')
@@ -1260,6 +1270,8 @@ class Emulator:
             # Tear down the GTK window if it was opened.
             if self.gtk and self.gtk_display is not None:
                 self.gtk_display.close()
+            if self.speaker is not None:
+                self.speaker.close()
             dirty_before_persist = self._dirty_media()
             if dirty_before_persist and not self.persist:
                 print('[persist] discarded guest writes on ' +
@@ -1393,6 +1405,8 @@ always protects the bundled image and therefore cannot be used with --persist.''
                          help='use a GTK window for display and keyboard input')
     display.add_argument('--gtk-font-size', type=int, default=18, metavar='PT',
                          help='GTK font size from 6 to 72 points (default: 18)')
+    display.add_argument('--no-audio', action='store_true',
+                         help='disable optional PC speaker audio')
 
     runtime = parser.add_argument_group('runtime')
     runtime.add_argument('--cpu-backend', choices=BACKENDS, default='python',
@@ -1528,6 +1542,7 @@ def main(argv=None):
                        host_dir_dos_text=args.host_dir_dos_text,
                        max_instructions=args.max_instructions,
                        cpu_backend=args.cpu_backend, pit_speed=args.pit_speed,
+                       audio=args.gtk and not args.no_audio,
                        trace_pole_timing=args.trace_pole_timing)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:

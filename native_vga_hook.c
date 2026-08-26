@@ -9,7 +9,7 @@
 
 struct vga_state {
     uint8_t *planes[4];
-    uint8_t *seq, *gdc, *latches, *active, *dirty, *ram;
+    uint8_t *seq, *gdc, *latches, *active, *dirty, *ram, *packed, *planar;
     uint64_t fills, copies;
 };
 
@@ -120,6 +120,13 @@ static void vga_write(uc_engine *uc, uc_mem_type type, uint64_t address,
     (void)uc; (void)type;
     struct vga_state *s = user_data;
     if (!s->active[0]) return;
+    if (!s->planar[0]) {
+        for (int i = 0; i < size && address + (uint64_t)i < 0xb0000; i++)
+            s->packed[(address + (uint64_t)i - 0xa0000) & 0xffff] =
+                (uint8_t)((uint64_t)value >> (8 * i));
+        s->dirty[0] = 1;
+        return;
+    }
     if (fast_mode1_stos(uc, s, address, size)) return;
     for (int i = 0; i < size && address + (uint64_t)i < 0xb0000; i++) {
         unsigned offset = (unsigned)(address + (uint64_t)i - 0xa0000) & 0xffff;
@@ -157,7 +164,7 @@ static void vga_read(uc_engine *uc, uc_mem_type type, uint64_t address,
                      int size, int64_t value, void *user_data) {
     (void)type; (void)value;
     struct vga_state *s = user_data;
-    if (s->active[0]) fast_mode1_movs(uc, s, address, size);
+    if (s->active[0] && s->planar[0]) fast_mode1_movs(uc, s, address, size);
 }
 
 int x86_vga_install(uc_engine *uc, struct vga_state *state, uc_hook *hook) {

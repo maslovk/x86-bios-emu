@@ -15,6 +15,8 @@ class _State(ctypes.Structure):
                ('active', ctypes.POINTER(ctypes.c_ubyte)),
                ('dirty', ctypes.POINTER(ctypes.c_ubyte)),
                ('ram', ctypes.POINTER(ctypes.c_ubyte)),
+               ('packed', ctypes.POINTER(ctypes.c_ubyte)),
+               ('planar', ctypes.POINTER(ctypes.c_ubyte)),
                ('fills', ctypes.c_uint64), ('copies', ctypes.c_uint64)]
 
 
@@ -56,14 +58,17 @@ def install(uc, video, ram):
     try:
         library = _library()
         buffers = list(video.graphics_planes) + [video.seq_regs, video.gdc_regs,
-                   video.graphics_latches, video.native_graphics_active]
+                   video.graphics_latches, video.native_graphics_active,
+                   video.graphics_vram, video.native_graphics_planar]
         dirty = bytearray((0,))
         state = _State()
         for index, plane in enumerate(video.graphics_planes):
             state.planes[index] = _pointer(plane)
-        state.seq, state.gdc, state.latches, state.active = map(_pointer, buffers[4:])
+        state.seq, state.gdc, state.latches, state.active = map(_pointer, buffers[4:8])
         state.dirty = _pointer(dirty)
         state.ram = _pointer(ram)
+        state.packed = _pointer(video.graphics_vram)
+        state.planar = _pointer(video.native_graphics_planar)
         hook = ctypes.c_size_t()
         handle = getattr(uc, '_uch', None)
         if not handle or library.x86_vga_install(handle, ctypes.byref(state),

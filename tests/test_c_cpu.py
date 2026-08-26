@@ -132,6 +132,26 @@ def test_native_backend_routes_ega_vram_writes():
     assert emu.video.graphics_pixel(0, 0) == 0x0F
 
 
+def test_native_backend_routes_packed_mode13_vram_writes():
+    emu = Emulator(cpu_backend='c')
+    emu.bios.initialize()
+    emu.video.set_mode(0x13)
+    emu.mem.ram[0x100:0x10D] = bytes((
+        0xB8, 0x00, 0xA0, 0x8E, 0xC0, 0x31, 0xFF,
+        0xB0, 0xA5, 0x26, 0x88, 0x05, 0xF4,
+    ))
+    emu.cpu.cs = emu.cpu.ds = emu.cpu.ss = 0
+    emu.cpu.es = 0
+    emu.cpu.ip = 0x100
+    emu.cpu.sp = 0x7000
+    for _ in range(20):
+        emu.cpu.execute_many(1)
+        if emu.cpu.halted:
+            break
+    assert emu.cpu.halted
+    assert emu.video.graphics_pixels()[0] == 0xA5
+
+
 def test_native_vga_hook_survives_a_bios_graphics_mode_switch():
     """The hook exports the latch buffer, so mode clears must stay in-place."""
     emu = Emulator(cpu_backend='c')

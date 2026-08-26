@@ -110,6 +110,7 @@ class Video:
         # bytearray gives C a stable one-byte flag without putting a Python
         # callback on every A000h store.
         self.native_graphics_active = bytearray((0,))
+        self.native_graphics_planar = bytearray((0,))
         self.graphics_width = 80
         self.graphics_height = 25
         self.graphics_colors = 16
@@ -163,6 +164,7 @@ class Video:
         spec = self.MODES.get(self.mode)
         self.graphics_mode = spec is not None
         self.native_graphics_active[0] = int(self.graphics_mode)
+        self.native_graphics_planar[0] = int(bool(spec and spec[3]))
         if spec:
             self.graphics_width, self.graphics_height, self.graphics_colors, self._planar = spec
             self.width, self.height = self.graphics_width, self.graphics_height
@@ -361,7 +363,9 @@ class Video:
         return bytes(pixels)
 
     def graphics_rgb(self, color):
-        """Return the DAC RGB triplet selected by a 4-bit EGA pixel."""
+        """Return the DAC RGB triplet selected by a graphics pixel."""
+        if self.mode == 0x13:
+            return self.palette[color & 0xFF]
         palette = self.attr_palette[color & 0x0F] & 0x3F
         select = self.attr_color_select & 0x0F
         # Colour Select supplies DAC bits 7-6.  With P54S (attribute mode
@@ -673,6 +677,7 @@ class IO:
         self.pic = pic
         self.cmos = cmos
         self.kbd_ctrl = kbd_ctrl  # Keyboard controller (8042)
+        self.speaker = None
         self._pit_pending_irqs = []  # IRQs fired since last check
         # Last byte written to port 0x61 (speaker/timer gates).  Bit 4 is
         # the refresh-check toggle: real hardware flips it on every DRAM
@@ -800,6 +805,8 @@ class IO:
             return
         if port == 0x61:  # PIT control / speaker
             self._port61 = (self._port61 & ~0x03) | (val & 0x03)
+            if self.speaker:
+                self.speaker.set_gate(self._port61)
             return
         if port == 0x60:  # Keyboard data port
             if self.kbd_ctrl:

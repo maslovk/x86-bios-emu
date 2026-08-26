@@ -704,7 +704,8 @@ class GtkDisplay:
             pixels = video.graphics_pixels()
             data = self._graphics_surface_data
             self._graphics_surface.flush()
-            palette = tuple(video.graphics_rgb(color) for color in range(16))
+            palette = tuple(video.graphics_rgb(color)
+                            for color in range(video.graphics_colors))
             if _np is not None:
                 # Cairo RGB24 is native B,G,R,X.  Vectorized conversion keeps
                 # a changing 640x350 EGA surface below a frame interval.
@@ -720,7 +721,7 @@ class GtkDisplay:
                     packed[low] | (packed[high] << 32)
                     for high in range(16) for low in range(16)
                 ]
-            if _np is None:
+            if _np is None and video.graphics_colors == 16:
                 # Cairo RGB24 is native B,G,R,X.  Each 64-bit store updates
                 # two display pixels, avoiding temporary byte objects.
                 words = memoryview(data).cast('Q')
@@ -728,6 +729,13 @@ class GtkDisplay:
                 for index in range(len(words)):
                     offset = index * 2
                     words[index] = pairs[pixels[offset] | (pixels[offset + 1] << 4)]
+            elif _np is None:
+                # Mode 13h is packed 256-colour VGA. Keep this fallback
+                # straightforward; NumPy is used by normal installations.
+                for index, color in enumerate(pixels):
+                    red, green, blue = palette[color]
+                    offset = index * 4
+                    data[offset:offset + 4] = bytes((blue, green, red, 0))
             self._graphics_surface.mark_dirty()
             video.graphics_dirty = False
         cr.save()

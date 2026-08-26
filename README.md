@@ -640,9 +640,12 @@ python3 benchmark_topbench.py --hard-disk dos622-new.hdd \
     --machine ibm-pc-xt --cpu-backend c --steps 1500000 --json
 ```
 
-The result reports instructions, virtual seconds, video mode, halt state, and
-the score screen. The XT reference in the bundled database is TopBench score 4
-with an 8088 at 4.77 MHz; the built-in XT profile is calibrated to that score.
+The JSON result includes `metrics` when the `-i` report has completed:
+`score`, `memory_us`, `effective_addressing_us`, `opcode_us`,
+`video_adapter_us`, and `three_d_game_us`. The `--live` mode intentionally
+reports only the continuously updated headline score. The XT reference in the
+bundled database is TopBench score 4 with an 8088 at 4.77 MHz; the built-in XT
+profile is calibrated to that score.
 
 ## Testing
 

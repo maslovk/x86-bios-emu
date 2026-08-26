@@ -8,12 +8,47 @@ import argparse
 from dataclasses import replace
 import json
 import os
+import re
 
 from dosharness import DOSHarness
 from machine_profiles import MACHINE_PROFILES, get_machine_profile
 
 
 DEFAULT_TOPBENCH_DIR = os.path.join('DOS_tools', 'Topbench')
+
+
+_TOPBENCH_METRIC_PATTERNS = {
+    'score': r'^\s*Score:\s*(?P<value>\d+)\b',
+    'memory_us': r'^\s*Memory:\s*(?P<value>\d+)\s*(?:us|µs|\xB5s)\b',
+    'effective_addressing_us': (
+        r'^\s*Effective addressing:\s*(?P<value>\d+)\s*'
+        r'(?:us|µs|\xB5s)\b'),
+    'opcode_us': r'^\s*Opcode exercise:\s*(?P<value>\d+)\s*(?:us|µs|\xB5s)\b',
+    'video_adapter_us': (
+        r'^\s*Vid adapter speed:\s*(?P<value>\d+)\s*'
+        r'(?:us|µs|\xB5s)\b'),
+    'three_d_game_us': (
+        r'^\s*3DGame opcode exercise:\s*(?P<value>\d+)\s*'
+        r'(?:us|µs|\xB5s)\b'),
+}
+
+
+def parse_topbench_metrics(screen):
+    """Extract the measurements printed by TopBench's ``-i`` mode.
+
+    TopBench uses a text-mode screen and the microsecond suffix can arrive
+    from the VGA text buffer as either ``us`` or one of several Unicode
+    micro-sign spellings.  Missing lines are intentionally omitted: this
+    keeps ``-l`` results useful while making incomplete ``-i`` runs obvious.
+    """
+    metrics = {}
+    for line in screen.splitlines():
+        for name, pattern in _TOPBENCH_METRIC_PATTERNS.items():
+            match = re.match(pattern, line, re.IGNORECASE)
+            if match:
+                metrics[name] = int(match.group('value'))
+                break
+    return metrics
 
 
 def build_parser():
@@ -32,6 +67,8 @@ def build_parser():
                         help='emit a machine-readable JSON result')
     parser.add_argument('--live', action='store_true',
                         help='use TopBench live score mode instead of -i')
+    parser.add_argument('--ui', action='store_true',
+                        help='run the normal TopBench UI')
     parser.add_argument('--cpi', type=float,
                         help='override profile cycles per instruction')
     return parser
@@ -62,10 +99,17 @@ def run_topbench(args):
     harness.emu.io.trace_port_values = {}
     # -i prints the measured score and exits. -l continuously displays the
     # score and is useful when diagnosing a long-running calibration phase.
-    option = '-l' if args.live else '-i'
-    harness.inject_string(f'C:\\TOPBENCH.EXE {option}\r')
+    option = '-l' if args.live else ('' if args.ui else '-i')
+    command = f'C:\\TOPBENCH.EXE {option}'.rstrip()
+    harness.inject_string(command + '\r')
     before = harness.cpu.insn_count
-    harness.run_steps(args.steps)
+    if args.ui:
+        intro_steps = min(200_000, args.steps)
+        harness.run_steps(intro_steps)
+        harness.inject_string('\r')
+        harness.run_steps(args.steps - intro_steps)
+    else:
+        harness.run_steps(args.steps)
     profile = harness.emu.machine_profile
     address = ((harness.cpu.cs << 4) + harness.cpu.ip) & 0xFFFFF
     return {
@@ -95,6 +139,7 @@ def run_topbench(args):
             in harness.emu.io.trace_port_values.items()
         },
         'screen': harness.vga_str(),
+        'metrics': parse_topbench_metrics(harness.vga_str()),
     }
 
 
@@ -111,6 +156,10 @@ def main(argv=None):
         print(f"virtual seconds: {result['emulated_time_seconds']:.3f}")
         print(f"video mode: {result['video_mode']:02X}")
         print(f"halted: {result['halted']}")
+        if result['metrics']:
+            print('metrics: ' + ', '.join(
+                f'{name}={value}'
+                for name, value in result['metrics'].items()))
         print(result['screen'])
     return 0
 

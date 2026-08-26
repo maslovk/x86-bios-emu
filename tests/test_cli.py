@@ -57,6 +57,11 @@ def test_machine_profile_configures_emulator_pit():
     assert emulator.cpu.cycles_per_instruction == 2.0
 
 
+def test_ibm_pc_xt_profile_uses_calibrated_cpi():
+    emulator = Emulator(enable_hardware=True, machine='ibm-pc-xt')
+    assert emulator.cpu.cycles_per_instruction == 16.0
+
+
 def test_list_machine_profiles_is_configurable():
     _parser, args = parse_args(['--list-machines'])
     assert args.list_machines

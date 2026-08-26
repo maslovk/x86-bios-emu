@@ -616,6 +616,8 @@ class PIT:
         self.rw_modes = [3, 0, 0]
         self._programmed_words = [0, 0, 0]
         self._write_low_pending = [False, False, False]
+        self._read_low_pending = [False, False, False]
+        self._latched_counts = [None, None, None]
         self.irq_pending = [False, False, False]
         self._tick_accumulator = 0
         self._channel2_accumulator = 0
@@ -627,12 +629,22 @@ class PIT:
             return
         rw = (val >> 4) & 3
         mode = (val >> 1) & 7
+        if rw == 0:
+            # Counter latch command: freeze one coherent 16-bit sample for
+            # the following low/high reads. A second latch before the sample
+            # is consumed is ignored by the 8253.
+            if self._latched_counts[counter] is None:
+                self._latched_counts[counter] = self.counters[counter]
+                self._read_low_pending[counter] = False
+            return
         # 8253 modes 6 and 7 are aliases for 2 and 3 respectively.
         if mode in (6, 7):
             mode -= 4
         self.modes[counter] = mode
         self.rw_modes[counter] = rw
         self._write_low_pending[counter] = False
+        self._read_low_pending[counter] = False
+        self._latched_counts[counter] = None
 
     def write_counter(self, counter, val):
         """Program one data byte at a PIT counter port.
@@ -678,7 +690,21 @@ class PIT:
             self._channel2_accumulator = 0
 
     def read_counter(self, counter):
-        return self.counters[counter] & 0xFF
+        value = self._latched_counts[counter]
+        if value is None:
+            value = self.counters[counter]
+        rw = self.rw_modes[counter]
+        if rw == 2:
+            result = (value >> 8) & 0xFF
+        elif rw == 3 and self._read_low_pending[counter]:
+            result = (value >> 8) & 0xFF
+            self._read_low_pending[counter] = False
+            self._latched_counts[counter] = None
+        else:
+            result = value & 0xFF
+            if rw == 3:
+                self._read_low_pending[counter] = True
+        return result
 
     def read_word_counter(self, counter):
         return self.counters[counter] & 0xFFFF

@@ -619,6 +619,18 @@ class TestIO:
 
         assert pit.counters[2] == 1000
 
+    def test_emulated_time_port61_reports_channel2_output(self):
+        pit = PIT()
+        io = IO(Video(), Keyboard(), Disk(), Serial(), pit=pit)
+        io.use_emulated_time = True
+        pit.write_command(0xB6)
+        pit.write_counter(2, 2)
+        pit.write_counter(2, 0)
+
+        assert io.inb(0x61) & 0x20
+        pit.counters[2] = 1
+        assert not (io.inb(0x61) & 0x20)
+
     def test_port61_exposes_pit_channel2_output(self):
         video = Video()
         pit = PIT()

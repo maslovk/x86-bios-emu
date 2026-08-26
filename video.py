@@ -721,9 +721,7 @@ class IO:
                 self.pit.advance_channel2(
                     (now - self._pit2_last_update) * self.pit_speed)
                 self._pit2_last_update = now
-                timer2 = self.pit.output(2)
-            else:
-                timer2 = 0
+            timer2 = self.pit.output(2) if self.pit else 0
             return (self._port61 & ~0x20) | (timer2 << 5)
         if port == 0x64:  # Keyboard controller status
             if self.kbd_ctrl:

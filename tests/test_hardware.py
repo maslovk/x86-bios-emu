@@ -94,6 +94,29 @@ class TestPIT:
         pit.counters[0] = 0x1234
         assert pit.read_word_counter(0) == 0x1234
 
+    def test_latched_counter_reads_coherent_low_high_bytes(self):
+        pit = PIT()
+        pit.write_command(0x36)
+        pit.write_counter(0, 0x34)
+        pit.write_counter(0, 0x12)
+        pit.counters[0] = 0x1234
+        pit.write_command(0x00)  # latch channel 0
+        pit.counters[0] = 0x5678
+        assert pit.read_counter(0) == 0x34
+        assert pit.read_counter(0) == 0x12
+
+    def test_latched_counter_is_released_after_high_byte(self):
+        pit = PIT()
+        pit.write_command(0x36)
+        pit.write_counter(0, 0x34)
+        pit.write_counter(0, 0x12)
+        pit.counters[0] = 0x1234
+        pit.write_command(0x00)
+        pit.counters[0] = 0xABCD
+        pit.read_counter(0)
+        pit.read_counter(0)
+        assert pit.read_counter(0) == 0xCD
+
     def test_default_tick_is_18hz(self):
         pit = PIT()
         fired = pit.tick(0x10000 / PIT.INPUT_CLK)

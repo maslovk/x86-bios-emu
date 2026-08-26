@@ -109,7 +109,8 @@ class DOSHarness:
 
     def __init__(self, image_path=DISK01, image_b=None, hard_disk=None,
                  host_dir=None, host_dir_write=False, boot_drive=0x00,
-                 writable=False, settle_extra=2000, cpu_backend='python'):
+                 writable=False, settle_extra=2000, cpu_backend='python',
+                 machine='generic', emulated_timing=False):
         self.image_path = image_path
         self.image_b_path = image_b
         self.hard_disk_path = hard_disk
@@ -119,6 +120,8 @@ class DOSHarness:
         self.writable = writable
         self.settle_extra = settle_extra
         self.cpu_backend = cpu_backend
+        self.machine = machine
+        self.emulated_timing = emulated_timing
 
         # Full scrollback transcript, accumulated by the Video scroll hook.
         self._scrollback = []
@@ -140,7 +143,7 @@ class DOSHarness:
                              hard_disk=load_path_hd, boot_drive=boot_drive,
                              host_dir=host_dir, host_dir_write=host_dir_write,
                              persist=host_dir_write,
-                             cpu_backend=cpu_backend)
+                             cpu_backend=cpu_backend, machine=machine)
         self.emu.bios.initialize()
         if self.emu.pic:
             self.emu.pic.initialize()
@@ -270,6 +273,7 @@ class DOSHarness:
         # Device handlers remain synchronous; only the periodic pump is
         # batched, so keyboard and PIT latency stays well below one batch.
         pit = 0
+        last_cycles = self.cpu.cycle_count
         remaining = n
         while remaining:
             if self.cpu.halted:
@@ -291,10 +295,16 @@ class DOSHarness:
             if not executed:
                 break
             remaining -= executed
-            pit += executed
-            if pit >= PIT_INSTRUCTION_QUANTUM and self.emu.pit:
-                pit %= PIT_INSTRUCTION_QUANTUM
-                self.emu.io.tick(1.0 / 18.2)
+            if self.emulated_timing and self.emu.pit:
+                current_cycles = self.cpu.cycle_count
+                self.emu.io.tick(max(0.0, current_cycles - last_cycles) /
+                                 self.cpu.cpu_clock_hz)
+                last_cycles = current_cycles
+            else:
+                pit += executed
+                if pit >= PIT_INSTRUCTION_QUANTUM and self.emu.pit:
+                    pit %= PIT_INSTRUCTION_QUANTUM
+                    self.emu.io.tick(1.0 / 18.2)
             self._pump()
         return not self.cpu.halted
 
@@ -305,6 +315,7 @@ class DOSHarness:
 
     def wait_for(self, text, max_steps=6_000_000):
         step = 0
+        last_cycles = self.cpu.cycle_count
         last_ip = None
         stuck = 0
         while step < max_steps:
@@ -325,7 +336,12 @@ class DOSHarness:
                 step += executed
             if step % 10000 == 0 and text in self.vga_str():
                 return step
-            if step % PIT_INSTRUCTION_QUANTUM == 0 and self.emu.pit:
+            if self.emulated_timing and self.emu.pit:
+                current_cycles = self.cpu.cycle_count
+                self.emu.io.tick(max(0.0, current_cycles - last_cycles) /
+                                 self.cpu.cpu_clock_hz)
+                last_cycles = current_cycles
+            elif step % PIT_INSTRUCTION_QUANTUM == 0 and self.emu.pit:
                 self.emu.io.tick(1.0 / 18.2)
             self._pump()
             cur = (self.cpu.cs << 4) + self.cpu.ip
@@ -450,6 +466,7 @@ class DOSHarness:
         stuck = 0
         next_prompt_check = 5000
         next_pit_tick = PIT_INSTRUCTION_QUANTUM
+        last_cycles = self.cpu.cycle_count
         while step < limit:
             if self.cpu.halted:
                 if self.emu.pit:
@@ -470,7 +487,12 @@ class DOSHarness:
                 return step, False
             if step >= next_prompt_check:
                 next_prompt_check += 5000
-            if step >= next_pit_tick and self.emu.pit:
+            if self.emulated_timing and self.emu.pit:
+                current_cycles = self.cpu.cycle_count
+                self.emu.io.tick(max(0.0, current_cycles - last_cycles) /
+                                 self.cpu.cpu_clock_hz)
+                last_cycles = current_cycles
+            elif step >= next_pit_tick and self.emu.pit:
                 self.emu.io.tick(1.0 / 18.2)
                 next_pit_tick += PIT_INSTRUCTION_QUANTUM
             self._pump()

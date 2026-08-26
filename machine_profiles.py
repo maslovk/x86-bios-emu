@@ -66,12 +66,20 @@ MACHINE_PROFILES = MappingProxyType({
         4_772_727, '8088', 12.0, 4_772_727, 4_772_727, 4_772_727),
     'ibm-pc-5150': MachineProfile(
         'ibm-pc-5150', 'IBM PC 5150', '8088', 4_772_727,
-        '8088', 12.0, 4_772_727, 4_772_727, video_adapter='CGA',
+        '8088', 16.0, 4_772_727, 4_772_727, video_adapter='CGA',
         benchmark_targets=MappingProxyType({'landmark_mhz': 4.77})),
     'ibm-pc-xt': MachineProfile(
         'ibm-pc-xt', 'IBM PC XT 5160', '8088', 4_772_727,
-        '8088', 12.0, 4_772_727, 4_772_727, video_adapter='CGA',
-        benchmark_targets=MappingProxyType({'landmark_mhz': 4.77})),
+        '8088', 16.0, 4_772_727, 4_772_727, video_adapter='CGA',
+        benchmark_targets=MappingProxyType({
+            'topbench_score': 4,
+            'topbench_memory': 3774,
+            'topbench_opcode': 1753,
+            'topbench_vidram': 2652,
+            'topbench_memea': 1935,
+            'topbench_3dgame': 1851,
+            'landmark_mhz': 4.77,
+        })),
     '486dx2-66': MachineProfile(
         '486dx2-66', '486DX2-66', 'i486DX2', 66_000_000,
         'i486', 2.0, 33_000_000, 8_333_333,

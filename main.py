@@ -328,7 +328,8 @@ class Emulator:
                  persist=False, serial_output=True, host_dir=None,
                  host_dir_write=False, host_dir_delete=False,
                  host_dir_dos_text=False, max_instructions=10_000_000,
-                 cpu_backend='python', pit_speed=1.0):
+                 cpu_backend='python', pit_speed=1.0,
+                 trace_pole_timing=False):
         self.memory = type('Memory', (), {})()
         self.cpu_backend = normalize_backend(cpu_backend)
         # We need a proper Memory class
@@ -352,6 +353,23 @@ class Emulator:
         if not 0.25 <= pit_speed <= 8.0:
             raise ValueError('pit_speed must be between 0.25 and 8')
         self.pit_speed = float(pit_speed)
+        self.trace_pole_timing = trace_pole_timing
+        self._timing_int1a_callers = {}
+        self._timing_trace_started = None
+        self._timing_trace_next_report = None
+        self._timing_trace_last_bda_ticks = None
+        if trace_pole_timing:
+            self.io.trace_port_accesses = {}
+            self.io.trace_port_values = {}
+            self.video.trace_graphics_writes = [0]
+            self.video.trace_graphics_write_modes = {}
+            self.video.trace_mode1_opcodes = {}
+            self.video.trace_mode1_transfers = {}
+            self.video.trace_mode1_bulk_fills = [0]
+            self.video.trace_bda_timer_reads = [0]
+        # The C backend chooses its compiled VGA hook during construction.
+        # Set tracing first so timing runs retain their instrumented Python
+        # memory path instead of silently bypassing the counters.
         self.cpu = self._new_cpu()
         if max_instructions < 1:
             raise ValueError('max-instructions must be positive')
@@ -862,6 +880,11 @@ class Emulator:
                                 and retry_state[:3] ==
                                 (n, self.cpu.cs, self.cpu.ip))
             saved_flags = retry_state[3] if continuing_retry else self.cpu.flags
+            if n == 0x1A and self.trace_pole_timing:
+                caller = (entry_cs, (entry_ip - 2) & 0xFFFF,
+                          (self.cpu.ax >> 8) & 0xFF)
+                self._timing_int1a_callers[caller] = \
+                    self._timing_int1a_callers.get(caller, 0) + 1
             self.cpu._push(self.cpu.flags)
             self.cpu.tf = False
             self.cpu.if_flag = False
@@ -903,6 +926,69 @@ class Emulator:
                 self.cpu.retry_software_interrupt = True
 
         self.cpu._do_interrupt = hooked_interrupt
+
+    def _report_pole_timing(self, now):
+        """Print one compact sample for interactive Pole timing analysis."""
+        if not self.trace_pole_timing or now < self._timing_trace_next_report:
+            return
+        self._timing_trace_next_report = now + 1.0
+        elapsed = now - self._timing_trace_started
+        ticks = self.mem.read_dword(0x046C)
+        tick_delta = (ticks - self._timing_trace_last_bda_ticks
+                      if self._timing_trace_last_bda_ticks is not None else 0)
+        self._timing_trace_last_bda_ticks = ticks
+        int1c_ip = self.mem.read_word(0x1C * 4)
+        int1c_cs = self.mem.read_word(0x1C * 4 + 2)
+        callers = sorted(self._timing_int1a_callers.items(),
+                         key=lambda item: item[1], reverse=True)[:3]
+        calls = ', '.join(
+            f'{cs:04X}:{ip:04X}/AH={ah:02X}×{count}'
+            for ((cs, ip, ah), count) in callers) or '-'
+        ports = self.io.trace_port_accesses or {}
+        watched = (0x40, 0x41, 0x42, 0x43, 0x61, 0x3DA)
+        port_text = ', '.join(
+            f'{direction}{port:03X}×{ports.get((direction, port), 0)}'
+            for port in watched for direction in ('in', 'out')
+            if ports.get((direction, port), 0)) or '-'
+        values = self.io.trace_port_values or {}
+        pit_commands = ','.join(
+            f'{value:02X}×{count}'
+            for (port, value), count in values.items() if port == 0x43) or '-'
+        graphics_writes = self.video.trace_graphics_writes[0]
+        bulk_fills = self.video.trace_mode1_bulk_fills[0]
+        bda_reads = self.video.trace_bda_timer_reads[0]
+        write_modes = self.video.trace_graphics_write_modes or {}
+        mode_text = ','.join(
+            f'{mode}×{count}' for mode, count in sorted(write_modes.items(),
+                                                         key=lambda item: str(item[0]))) or '-'
+        mode1_opcodes = self.video.trace_mode1_opcodes or {}
+        opcode_text = ','.join(
+            f'{opcode:02X}×{count}'
+            for opcode, count in sorted(mode1_opcodes.items(),
+                                        key=lambda item: item[1], reverse=True)[:6]) or '-'
+        transfers = self.video.trace_mode1_transfers or {}
+        transfer_text = ','.join(
+            f'{cs:04X}:{ip:04X}/{code}×{count}'
+            for (cs, ip, code), count in sorted(
+                transfers.items(), key=lambda item: item[1], reverse=True)[:4]) or '-'
+        print(f'[Pole timing +{elapsed:.1f}s] mode={self.video.mode:02X} '
+              f'BDA-ticks={ticks}(+{tick_delta}) INT1A={calls} '
+              f'INT1C={int1c_cs:04X}:{int1c_ip:04X} '
+              f'ports={port_text} PIT43={pit_commands} '
+              f'VGA-writes={graphics_writes} VGA-modes={mode_text} '
+              f'mode1-bulk={bulk_fills} BDA-reads={bda_reads} '
+              f'mode1-op={opcode_text} '
+              f'mode1-xfer={transfer_text}',
+              file=sys.stderr)
+        self._timing_int1a_callers.clear()
+        ports.clear()
+        values.clear()
+        self.video.trace_graphics_writes[0] = 0
+        self.video.trace_mode1_bulk_fills[0] = 0
+        self.video.trace_bda_timer_reads[0] = 0
+        write_modes.clear()
+        mode1_opcodes.clear()
+        transfers.clear()
 
     def run(self):
         """Initialize and run the emulator."""
@@ -1021,6 +1107,10 @@ class Emulator:
         pit_tick_duration = 1.0 / 18.2065  # IBM PC PIT channel 0 / 65536
         pit_interval = pit_tick_duration / self.pit_speed
         pit_next_tick = time.monotonic() + pit_interval
+        if self.trace_pole_timing:
+            self._timing_trace_started = time.monotonic()
+            self._timing_trace_next_report = self._timing_trace_started + 1.0
+            self._timing_trace_last_bda_ticks = self.mem.read_dword(0x046C)
         gtk_last_frame = 0.0
         gtk_poll_counter = 0
         # Native graphics batches can complete far faster than text-mode DOS
@@ -1060,6 +1150,7 @@ class Emulator:
                     if elapsed_ticks:
                         for _ in range(elapsed_ticks):
                             self.io.tick(pit_tick_duration)
+                self._report_pole_timing(time.monotonic())
 
                 # Check for pending IRQs and dispatch
                 if self.pic:
@@ -1311,6 +1402,8 @@ always protects the bundled image and therefore cannot be used with --persist.''
                          help='noninteractive instruction limit (default: 10000000)')
     runtime.add_argument('--pit-speed', type=float, default=1.0, metavar='N',
                          help='PIT/timer speed multiplier, 0.25..8 (default: 1)')
+    runtime.add_argument('--trace-pole-timing', action='store_true',
+                         help='print BIOS timer and VGA timing activity each second')
     serial = runtime.add_mutually_exclusive_group()
     serial.add_argument('--serial', dest='serial_output', action='store_true',
                         default=True,
@@ -1431,7 +1524,8 @@ def main(argv=None):
                        host_dir_delete=args.host_dir_delete,
                        host_dir_dos_text=args.host_dir_dos_text,
                        max_instructions=args.max_instructions,
-                       cpu_backend=args.cpu_backend, pit_speed=args.pit_speed)
+                       cpu_backend=args.cpu_backend, pit_speed=args.pit_speed,
+                       trace_pole_timing=args.trace_pole_timing)
         emu.run()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))

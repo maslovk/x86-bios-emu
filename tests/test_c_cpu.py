@@ -132,6 +132,17 @@ def test_native_backend_routes_ega_vram_writes():
     assert emu.video.graphics_pixel(0, 0) == 0x0F
 
 
+def test_native_vga_hook_survives_a_bios_graphics_mode_switch():
+    """The hook exports the latch buffer, so mode clears must stay in-place."""
+    emu = Emulator(cpu_backend='c')
+    emu.bios.initialize()
+    if emu.cpu._native_vga_hook is not None:
+        emu.video.set_mode(0x10)
+        assert emu.video.native_graphics_active[0] == 1
+        emu.video.set_mode(3)
+        assert emu.video.native_graphics_active[0] == 0
+
+
 def test_native_backend_uses_reference_path_for_vga_latched_writes():
     emu = Emulator(cpu_backend='c')
     emu.bios.initialize()
@@ -191,7 +202,7 @@ def test_native_backend_uses_larger_batches_for_safe_graphics():
     emu.video.set_mode(0x10)
     assert emu.cpu.preferred_batch_size() == 1024
     emu.video.gdc_regs[5] = 1
-    assert emu.cpu.preferred_batch_size() == 128
+    assert emu.cpu.preferred_batch_size() == 1024
 
 
 def test_native_backend_falls_back_for_vga_latch_copy_mode():
@@ -246,6 +257,29 @@ def test_native_backend_bulk_copies_rep_movs_in_vga_latch_mode():
     assert emu.cpu.di == 6
     assert [list(plane[4:6]) for plane in emu.video.graphics_planes] == [
         [0xA5, 0x5A], [0x3C, 0xC3], [0x0F, 0xF0], [0x96, 0x69]]
+
+
+def test_native_backend_bulk_fills_rep_stos_in_vga_latch_mode():
+    emu = Emulator(cpu_backend='c')
+    emu.bios.initialize()
+    emu.video.set_mode(0x10)
+    emu.video.gdc_regs[5] = 1
+    emu.video.seq_regs[2] = 0x0F
+    emu.video.graphics_latches[:] = [0xA5, 0x3C, 0x0F, 0x96]
+    emu.mem.ram[0x100:0x103] = bytes((0xF3, 0xAA, 0xF4))
+    emu.cpu.cs = emu.cpu.ss = 0
+    emu.cpu.es = 0xA000
+    emu.cpu.ip = 0x100
+    emu.cpu.sp = 0x7000
+    emu.cpu.cx = 2
+    emu.cpu.di = 4
+
+    emu.cpu.execute_many(4)
+
+    assert emu.cpu.cx == 0
+    assert emu.cpu.di == 6
+    assert [list(plane[4:6]) for plane in emu.video.graphics_planes] == [
+        [0xA5, 0xA5], [0x3C, 0x3C], [0x0F, 0x0F], [0x96, 0x96]]
 
 
 def test_native_backend_recovers_from_unicorn_invalid_legacy_encoding():

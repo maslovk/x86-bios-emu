@@ -719,6 +719,22 @@ class CPU:
         self.cx = 0
         return True
 
+    def _fast_vga_mode1_stos(self, width, count):
+        """Accelerate forward REP STOS fills wholly inside planar VRAM."""
+        if (not self._rep_prefix or self.df or count <= 0
+                or not getattr(self.io.video, 'graphics_mode', False)):
+            return False
+        destination = self._phys(self.es, self.di)
+        if not 0xA0000 <= destination < 0xB0000:
+            return False
+        length = count * width
+        if not self.io.video.graphics_fill_mode1(
+                destination - 0xA0000, length):
+            return False
+        self.di = (self.di + length) & 0xFFFF
+        self.cx = 0
+        return True
+
     # ── Main execute loop ──────────────────────────────────────────
 
     def execute(self):
@@ -1529,6 +1545,8 @@ class CPU:
         if opc == 0xAA:
             inc = 1 if not self.df else -1
             count = self._string_repeat_count()
+            if self._fast_vga_mode1_stos(1, count):
+                return
             for _ in range(count):
                 self._writeb(self._phys(self.es, self.di), self.ax & 0xFF)
                 self.di = (self.di + inc) & 0xFFFF
@@ -1540,6 +1558,8 @@ class CPU:
         if opc == 0xAB:
             inc = 2 if not self.df else -2
             count = self._string_repeat_count()
+            if self._fast_vga_mode1_stos(2, count):
+                return
             for _ in range(count):
                 self._writew(self._phys(self.es, self.di), self.ax)
                 self.di = (self.di + inc) & 0xFFFF

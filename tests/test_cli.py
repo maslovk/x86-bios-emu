@@ -47,6 +47,11 @@ def test_pit_speed_multiplier_is_configurable():
     assert args.pit_speed == 2.0
 
 
+def test_pole_timing_trace_is_configurable():
+    _parser, args = parse_args(['--trace-pole-timing'])
+    assert args.trace_pole_timing is True
+
+
 def test_emulator_python_backend_is_explicit_and_resettable():
     emulator = Emulator(enable_hardware=False, cpu_backend='python')
     assert emulator.cpu.__class__.__module__ == 'cpu'

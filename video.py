@@ -6,6 +6,7 @@ VGA text-mode video (80x25) and I/O port emulation.
 
 import os
 import sys
+import time
 
 try:  # Optional fast path for large EGA/VGA framebuffer expansion.
     import numpy as _np
@@ -105,6 +106,10 @@ class Video:
         self.cur_y = 0
         self.mode = 3
         self.graphics_mode = False
+        # Shared with the optional native Unicorn VGA write hook.  A
+        # bytearray gives C a stable one-byte flag without putting a Python
+        # callback on every A000h store.
+        self.native_graphics_active = bytearray((0,))
         self.graphics_width = 80
         self.graphics_height = 25
         self.graphics_colors = 16
@@ -114,14 +119,20 @@ class Video:
         # VRAM or palette state changes; merely repainting a window must not
         # re-expand the complete planar framebuffer.
         self.graphics_dirty = True
+        self.trace_graphics_writes = None
+        self.trace_graphics_write_modes = None
+        self.trace_mode1_opcodes = None
+        self.trace_mode1_transfers = None
+        self.trace_mode1_bulk_fills = None
+        self.trace_bda_timer_reads = None
         self.seq_index = 2
-        self.seq_regs = [0, 0, 0, 0, 0]
+        self.seq_regs = bytearray(5)
         self.gdc_index = 8
-        self.gdc_regs = [0] * 16
+        self.gdc_regs = bytearray(16)
         self.gdc_regs[8] = 0xFF
         # A VGA memory read loads all four plane bytes into these latches.
         # Graphics-controller write modes combine new CPU data with them.
-        self.graphics_latches = [0, 0, 0, 0]
+        self.graphics_latches = bytearray(4)
         # VGA attribute-controller palette registers.  The 16 EGA pixel
         # values reach the DAC through this extra indirection.
         self.attr_index = 0
@@ -151,6 +162,7 @@ class Video:
         self.mode = mode & 0xFF
         spec = self.MODES.get(self.mode)
         self.graphics_mode = spec is not None
+        self.native_graphics_active[0] = int(self.graphics_mode)
         if spec:
             self.graphics_width, self.graphics_height, self.graphics_colors, self._planar = spec
             self.width, self.height = self.graphics_width, self.graphics_height
@@ -167,7 +179,11 @@ class Video:
         for plane in self.graphics_planes:
             plane[:] = b'\0' * len(plane)
         self.graphics_vram[:] = b'\0' * len(self.graphics_vram)
-        self.graphics_latches[:] = [0, 0, 0, 0]
+        # This buffer can be exported to the compiled Unicorn hook.  Assign
+        # individual bytes rather than a slice, whose resize-capable bytearray
+        # operation is rejected while a C buffer export exists.
+        for plane in range(4):
+            self.graphics_latches[plane] = 0
         self.graphics_dirty = True
 
     def graphics_read(self, offset):
@@ -193,6 +209,9 @@ class Video:
         if not self._planar:
             self.graphics_vram[offset] = value
             self.graphics_dirty = True
+            if self.trace_graphics_write_modes is not None:
+                self.trace_graphics_write_modes['packed'] = \
+                    self.trace_graphics_write_modes.get('packed', 0) + 1
             return
         bit_mask = self.gdc_regs[8] & 0xFF
         set_reset = self.gdc_regs[0] & 0x0F
@@ -202,6 +221,9 @@ class Video:
         if rotate:
             value = ((value >> rotate) | (value << (8 - rotate))) & 0xFF
         write_mode = self.gdc_regs[5] & 3
+        if self.trace_graphics_write_modes is not None:
+            self.trace_graphics_write_modes[write_mode] = \
+                self.trace_graphics_write_modes.get(write_mode, 0) + 1
 
         def logical(source, latch):
             operation = (rotate_function >> 3) & 3
@@ -232,6 +254,8 @@ class Video:
                 result = ((latch & ~mask) | (logical(source, latch) & mask))
             self.graphics_planes[plane][offset] = result & 0xFF
         self.graphics_dirty = True
+        if self.trace_graphics_writes is not None:
+            self.trace_graphics_writes[0] += 1
 
     def graphics_copy_mode1(self, source, destination, count):
         """Bulk-copy a forward, non-overlapping planar write-mode-1 blit.
@@ -257,6 +281,36 @@ class Video:
         for plane, memory in enumerate(self.graphics_planes):
             self.graphics_latches[plane] = memory[final]
         self.graphics_dirty = True
+        if self.trace_graphics_writes is not None:
+            self.trace_graphics_writes[0] += count
+        if self.trace_graphics_write_modes is not None:
+            self.trace_graphics_write_modes[1] = \
+                self.trace_graphics_write_modes.get(1, 0) + count
+        if self.trace_mode1_bulk_fills is not None:
+            self.trace_mode1_bulk_fills[0] += 1
+        return True
+
+    def graphics_fill_mode1(self, destination, count):
+        """Fill planar VRAM from the current latches in write mode 1.
+
+        ``REP STOSB/W`` does not use its CPU data in this mode: every store
+        writes the previously loaded four latches.  Pole's drum renderer uses
+        exactly this operation for horizontal strips, so apply it plane-wise
+        instead of interpreting one store at a time.
+        """
+        if (not self._planar or (self.gdc_regs[5] & 3) != 1 or count <= 0
+                or destination < 0 or destination + count > 0x10000):
+            return False
+        for plane, memory in enumerate(self.graphics_planes):
+            if self.seq_regs[2] & (1 << plane):
+                memory[destination:destination + count] = bytes((
+                    self.graphics_latches[plane],)) * count
+        self.graphics_dirty = True
+        if self.trace_graphics_writes is not None:
+            self.trace_graphics_writes[0] += count
+        if self.trace_graphics_write_modes is not None:
+            self.trace_graphics_write_modes[1] = \
+                self.trace_graphics_write_modes.get(1, 0) + count
         return True
 
     def graphics_pixel(self, x, y):
@@ -625,11 +679,20 @@ class IO:
         # refresh cycle (~15 us), and legacy timing loops (DOS 5 IO.SYS
         # keyboard init, BIOS beep waits) poll it until it changes.
         self._port61 = 0x00
+        self._pit2_last_update = time.monotonic()
         # Ports not handled by a modeled device are recorded for diagnosing
         # legacy guests (notably SCP/WD1791 disk drivers).
         self.unhandled_ports = set()
+        # Optional per-port counters used by the interactive timing tracer.
+        # Kept disabled by default so normal I/O remains allocation-free.
+        self.trace_port_accesses = None
+        self.trace_port_values = None
 
     def inb(self, port):
+        if self.trace_port_accesses is not None:
+            key = ('in', port & 0xFFFF)
+            self.trace_port_accesses[key] = \
+                self.trace_port_accesses.get(key, 0) + 1
         # SCP support-card timer/control registers.  Legacy SCP IOSYS polls
         # these during initialization; report an idle/ready value so it does
         # not spin forever when the optional hardware is absent.
@@ -645,7 +708,14 @@ class IO:
             # Toggle the refresh-check bit on each read so DRAM-refresh
             # timing loops observe a change (see __init__).
             self._port61 ^= 0x10
-            return self._port61
+            if self.pit:
+                now = time.monotonic()
+                self.pit.advance_channel2(now - self._pit2_last_update)
+                self._pit2_last_update = now
+                timer2 = self.pit.output(2)
+            else:
+                timer2 = 0
+            return (self._port61 & ~0x20) | (timer2 << 5)
         if port == 0x64:  # Keyboard controller status
             if self.kbd_ctrl:
                 return self.kbd_ctrl.read_status()
@@ -719,6 +789,13 @@ class IO:
         return lo | (hi << 8)
 
     def outb(self, port, val):
+        if self.trace_port_accesses is not None:
+            key = ('out', port & 0xFFFF)
+            self.trace_port_accesses[key] = \
+                self.trace_port_accesses.get(key, 0) + 1
+        if self.trace_port_values is not None:
+            key = (port & 0xFFFF, val & 0xFF)
+            self.trace_port_values[key] = self.trace_port_values.get(key, 0) + 1
         if port in (0xF4, 0xF5):
             return
         if port == 0x61:  # PIT control / speaker

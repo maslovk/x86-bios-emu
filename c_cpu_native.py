@@ -12,7 +12,7 @@ import ctypes
 try:
     from unicorn import (Uc, UcError, UC_ARCH_X86, UC_MODE_16,
                          UC_HOOK_BLOCK, UC_HOOK_INSN, UC_HOOK_INTR,
-                         UC_HOOK_MEM_WRITE,
+                         UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
                          UC_PROT_ALL)
     from unicorn.x86_const import (
         UC_X86_INS_IN, UC_X86_INS_OUT,
@@ -30,6 +30,8 @@ except ImportError as exc:  # pragma: no cover - installed with Unicorn in dev
     raise ImportError('the C backend requires the optional capstone package') from exc
 
 from cpu import CPU
+from native_vga_hook import (install as install_native_vga_hook,
+                             install_block_recorder)
 
 
 # Interrupts whose Python handlers can write arbitrary guest memory (disk
@@ -89,17 +91,41 @@ class CCPU(CPU):
             0, len(self._ram), UC_PROT_ALL,
             ctypes.addressof(self._ram_buffer))
         self._pending_interrupt = None
+        self._native_vram_read_fallback = False
+        self._native_vram_stos_fallback = False
         self._last_reg_values = None
         self._last_block = None
         self._decoder = Cs(CS_ARCH_X86, CS_MODE_16)
 
         self._uc.hook_add(UC_HOOK_INTR, self._on_interrupt)
-        self._uc.hook_add(UC_HOOK_BLOCK, self._on_block)
+        self._native_block_recorder = install_block_recorder(self._uc)
+        if self._native_block_recorder is None:
+            self._uc.hook_add(UC_HOOK_BLOCK, self._on_block)
         self._uc.hook_add(
             UC_HOOK_INSN, self._on_in, aux1=UC_X86_INS_IN)
         self._uc.hook_add(
             UC_HOOK_INSN, self._on_out, aux1=UC_X86_INS_OUT)
-        self._uc.hook_add(UC_HOOK_MEM_WRITE, self._on_mem_write)
+        # Native writes can apply the current graphics latches correctly, but
+        # a mode-1 A000h read must reload them through Video.graphics_read().
+        # Limit this hook to the VGA aperture: ordinary RAM reads stay wholly
+        # inside Unicorn.
+        self._uc.hook_add(
+            UC_HOOK_MEM_READ, self._on_vram_read,
+            begin=0xA0000, end=0xAFFFF)
+        # Some DOS games bypass INT 1Ah and inspect the BDA tick counter
+        # directly. This tiny range is inert unless timing tracing is active.
+        self._uc.hook_add(
+            UC_HOOK_MEM_READ, self._on_bda_timer_read,
+            begin=0x046C, end=0x046F)
+        # Pole spends most of its time in write-mode-1 A000h blits.  A Python
+        # Unicorn memory callback per byte dominates that workload, so use a
+        # compiled hook when available. Trace mode deliberately keeps the
+        # instrumented Python path.
+        self._native_vga_hook = None
+        if not getattr(self.io.video, 'trace_graphics_writes', None):
+            self._native_vga_hook = install_native_vga_hook(self._uc, self.io.video)
+        if self._native_vga_hook is None:
+            self._uc.hook_add(UC_HOOK_MEM_WRITE, self._on_mem_write)
 
     # ── State synchronization ──────────────────────────────────────
 
@@ -169,6 +195,9 @@ class CCPU(CPU):
         block provides a trusted decoding boundary, allowing Capstone to
         identify the instruction that ended at the current linear address.
         """
+        if self._native_block_recorder is not None:
+            native = self._native_block_recorder[1]
+            self._last_block = (native.address, native.size)
         if self._last_block is None:
             return False
         current = ((self.cs << 4) + self.ip) & 0xFFFFF
@@ -201,6 +230,28 @@ class CCPU(CPU):
             uc.emu_stop()
         return 0
 
+    def _on_vram_read(self, uc, access, address, size, value,
+                      user_data=None):
+        """Fall back only for a latch-loading mode-1 VGA read.
+
+        ``UC_HOOK_MEM_READ`` runs before the memory access. Stopping here
+        leaves IP at the read instruction; execute_many then runs precisely
+        that instruction through the reference CPU, which reloads all four
+        VGA latches. Subsequent mode-1 stores remain native and consume those
+        latches through the existing write hook.
+        """
+        video = self.io.video
+        if (video.graphics_mode and video._planar
+                and (video.gdc_regs[5] & 3) == 1):
+            self._native_vram_read_fallback = True
+            uc.emu_stop()
+
+    def _on_bda_timer_read(self, uc, access, address, size, value,
+                           user_data=None):
+        counter = getattr(self.io.video, 'trace_bda_timer_reads', None)
+        if counter is not None:
+            counter[0] += 1
+
     def _on_mem_write(self, uc, access, address, size, value, user_data=None):
         if (0xA0000 <= address < 0xB0000
                 and getattr(self.io.video, 'graphics_mode', False)):
@@ -222,16 +273,16 @@ class CCPU(CPU):
         """Whether native A000h writes cannot observe VGA latches.
 
         Modes 0, 2, and 3 operate on destination latches, which the native
-        write callback can load exactly from the target byte.  Mode 1 copies
-        a source latch loaded by a preceding VRAM read, so it stays on the
-        reference path.
+        write callback can load exactly from the target byte. Mode 1 executes
+        natively too; its aperture reads stop at the dedicated read hook and
+        reload the source latch through one reference instruction.
         """
         video = self.io.video
         if not video.graphics_mode:
             return True
         if not video._planar:
             return True
-        return (video.gdc_regs[5] & 3) != 1
+        return True
 
     def preferred_batch_size(self):
         """Use larger native chunks for bulk graphics without slowing input."""
@@ -268,18 +319,8 @@ class CCPU(CPU):
         if count <= 0 or self.halted or self.insn_count >= self.max_insns:
             return 0
         count = min(int(count), self.max_insns - self.insn_count)
-        if (getattr(self.io.video, 'graphics_mode', False)
-                and not self._graphics_native_safe()):
-            # A native A000h read bypasses Video.graphics_read(), so Unicorn
-            # cannot maintain the four VGA latches required by write mode 1.
-            # Run only this controller-dependent path through the reference
-            # CPU; ordinary DOS code remains native.
-            executed = 0
-            while executed < count and CPU.execute(self):
-                executed += 1
-            self._uc.ctl_flush_tb()
-            return executed
         self._pending_interrupt = None
+        self._native_vram_read_fallback = False
         self._last_block = None
         self._sync_to_uc()
         start = ((self.cs << 4) + self.ip) & 0xFFFFF
@@ -304,6 +345,22 @@ class CCPU(CPU):
                 return 1
             self.halted = True
             return 0
+
+        if self._native_vram_read_fallback:
+            self._sync_from_uc()
+            self._native_vram_read_fallback = False
+            self._uc.ctl_flush_tb()
+            if CPU.execute(self):
+                self.insn_count += 1
+                return 1
+            self.halted = True
+            return 0
+
+        if self._native_vga_hook is not None:
+            dirty = self._native_vga_hook[3]
+            if dirty[0]:
+                self.io.video.graphics_dirty = True
+                dirty[0] = 0
 
         if self._pending_interrupt is not None:
             # BIOS/DOS handlers operate on the Python memory/register view.

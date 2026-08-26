@@ -96,6 +96,15 @@ class TestPIT:
             pit.tick(0.1)
         assert pit.tick_count >= 5
 
+    def test_channel2_square_wave_output_changes_with_counter(self):
+        pit = PIT()
+        pit.write_command(0xB6)  # channel 2, low/high, mode 3
+        pit.write_counter(2, 8)
+        pit.write_counter(2, 0)
+        assert pit.output(2) == 1
+        pit.advance_channel2(4 / PIT.INPUT_CLK)
+        assert pit.output(2) == 0
+
     def test_reset_counter0(self):
         pit = PIT()
         pit.reloads[0] = 0x1234

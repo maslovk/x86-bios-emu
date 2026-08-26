@@ -615,6 +615,7 @@ class PIT:
         self._write_low_pending = [False, False, False]
         self.irq_pending = [False, False, False]
         self._tick_accumulator = 0
+        self._channel2_accumulator = 0
         self._ticks = 0
 
     def write_command(self, val):
@@ -674,34 +675,67 @@ class PIT:
     def latch_counter(self, counter):
         pass
 
+    def output(self, counter):
+        """Return the current OUT level for a programmed PIT channel.
+
+        The PC speaker/timer gate exposes channel 2 on port 61h bit 5.  DOS
+        games commonly use this as a cheap sub-tick clock, independently of
+        IRQ0 and the BIOS 18.2 Hz tick counter.
+        """
+        reload = self.reloads[counter]
+        if not reload:
+            return 0
+        count = self.counters[counter] or self._ZERO_COUNT
+        if self.modes[counter] == 3:  # square wave: high first half
+            high = (reload + 1) // 2
+            elapsed = (reload - count) % reload
+            return int(elapsed < high)
+        if self.modes[counter] == 2:  # rate generator: brief low terminal
+            return int(count != 1)
+        return 1
+
+    def _advance_counter(self, counter, clocks, fired=None):
+        reload = self.reloads[counter]
+        if not reload or not clocks:
+            return
+        count = self.counters[counter] or self._ZERO_COUNT
+        if clocks < count:
+            self.counters[counter] = count - clocks
+            return
+        # First terminal count consumes ``count`` clocks; subsequent periods
+        # consume the programmed reload. Preserve the residual count even
+        # when a delayed host poll spans multiple periods.
+        after_first = clocks - count
+        periods = 1 + (after_first // reload)
+        remainder = after_first % reload
+        self.counters[counter] = reload if remainder == 0 else reload - remainder
+        if counter == 0:
+            self._ticks += periods
+        self.irq_pending[counter] = True
+        if fired is not None:
+            fired.append(counter)
+
+    def advance_channel2(self, dt):
+        """Advance the speaker/timer channel at sub-IRQ0 resolution."""
+        self._channel2_accumulator += max(0.0, dt) * self.INPUT_CLK
+        clocks = int(self._channel2_accumulator)
+        self._channel2_accumulator -= clocks
+        self._advance_counter(2, clocks)
+
     def tick(self, dt):
-        """Advance PIT. Returns list of fired IRQs."""
+        """Advance IRQ-driven PIT channels. Returns fired IRQs.
+
+        Channel 2 is sampled via port 61h and is advanced there at the much
+        finer cadence required by games that use it as a delay clock.
+        """
         self._tick_accumulator += dt * self.INPUT_CLK
         clocks = int(self._tick_accumulator)
         self._tick_accumulator -= clocks
         if not clocks:
             return []
         fired = []
-        for i in range(3):
-            reload = self.reloads[i]
-            if not reload:
-                continue
-            count = self.counters[i] or self._ZERO_COUNT
-            if clocks < count:
-                self.counters[i] = count - clocks
-                continue
-
-            # First terminal count consumes ``count`` clocks; subsequent
-            # periods consume the programmed reload.  Preserve the residual
-            # count even when a delayed host poll spans multiple periods.
-            after_first = clocks - count
-            periods = 1 + (after_first // reload)
-            remainder = after_first % reload
-            self.counters[i] = reload if remainder == 0 else reload - remainder
-            if i == 0:
-                self._ticks += periods
-            self.irq_pending[i] = True
-            fired.append(i)
+        for i in range(2):
+            self._advance_counter(i, clocks, fired)
         return fired
 
     @property

@@ -1,6 +1,7 @@
 """Unit tests for video.py — VGA, Serial, IO, Keyboard, Disk."""
 
 import pytest
+import time
 import sys
 import os
 
@@ -141,6 +142,15 @@ class TestVideo:
         assert video.graphics_copy_mode1(4, 8, 2)
         assert [list(plane[8:10]) for plane in video.graphics_planes] == [
             [0xA5, 0x5A], [0x3C, 0xC3], [0x0F, 0xF0], [0x96, 0x69]]
+
+    def test_vga_mode1_bulk_fill_preserves_latches(self, video):
+        video.set_mode(0x10)
+        video.gdc_regs[5] = 1
+        video.seq_regs[2] = 0x0F
+        video.graphics_latches[:] = [0xA5, 0x3C, 0x0F, 0x96]
+        assert video.graphics_fill_mode1(8, 2)
+        assert [list(plane[8:10]) for plane in video.graphics_planes] == [
+            [0xA5, 0xA5], [0x3C, 0x3C], [0x0F, 0x0F], [0x96, 0x96]]
 
     def test_putc_normal(self, video):
         video.cur_x = 0; video.cur_y = 0
@@ -568,3 +578,16 @@ class TestIO:
 
         assert io._pit_pending_irqs == [0]
         assert pic.irr == 0x01
+
+    def test_port61_exposes_pit_channel2_output(self):
+        video = Video()
+        pit = PIT()
+        io = IO(video, Keyboard(), Disk(), Serial(), pit=pit)
+        pit.write_command(0xB6)
+        pit.write_counter(2, 8)
+        pit.write_counter(2, 0)
+        io._pit2_last_update = time.monotonic()
+        assert io.inb(0x61) & 0x20
+        pit.counters[2] = 4
+        io._pit2_last_update = time.monotonic()
+        assert not (io.inb(0x61) & 0x20)

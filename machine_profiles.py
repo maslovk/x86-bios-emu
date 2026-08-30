@@ -24,6 +24,7 @@ class MachineProfile:
     pit_clock_hz: int = 1_193_180
     video_adapter: str = 'CGA'
     memory_wait_states: int = 0
+    prefetch_wait_cycles: int = 0
     io_wait_states: int = 0
     vram_wait_cycles: int = 0
     cache_enabled: bool = False
@@ -36,7 +37,8 @@ class MachineProfile:
             raise ValueError('cycles_per_instruction must be positive')
         if self.pit_clock_hz <= 0:
             raise ValueError('PIT clock must be positive')
-        for name in ('memory_wait_states', 'io_wait_states', 'vram_wait_cycles'):
+        for name in ('memory_wait_states', 'prefetch_wait_cycles',
+                     'io_wait_states', 'vram_wait_cycles'):
             if getattr(self, name) < 0:
                 raise ValueError(f'{name} cannot be negative')
 
@@ -54,6 +56,7 @@ class MachineProfile:
             'video': {'adapter': self.video_adapter,
                       'vram_wait_cycles': self.vram_wait_cycles},
             'memory': {'wait_states': self.memory_wait_states,
+                       'prefetch_wait_cycles': self.prefetch_wait_cycles,
                        'cache_enabled': self.cache_enabled},
             'io_wait_states': self.io_wait_states,
             'benchmark_targets': dict(self.benchmark_targets),
@@ -71,6 +74,9 @@ MACHINE_PROFILES = MappingProxyType({
     'ibm-pc-xt': MachineProfile(
         'ibm-pc-xt', 'IBM PC XT 5160', '8088', 4_772_727,
         '8088', 16.0, 4_772_727, 4_772_727, video_adapter='CGA',
+        memory_wait_states=0,
+        vram_wait_cycles=21,
+        prefetch_wait_cycles=0,
         benchmark_targets=MappingProxyType({
             'topbench_score': 4,
             'topbench_memory': 3774,

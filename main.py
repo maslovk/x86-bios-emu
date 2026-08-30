@@ -357,6 +357,9 @@ class Emulator:
         self.io = IO(self.video, self.kbd, self.disk, self.serial,
                      pit=self.pit, pic=self.pic, cmos=self.cmos,
                      kbd_ctrl=self.kbd_ctrl, pit_speed=self.pit_speed)
+        self.io.ram_wait_cycles = self.machine_profile.memory_wait_states
+        self.io.prefetch_wait_cycles = self.machine_profile.prefetch_wait_cycles
+        self.io.vram_wait_cycles = self.machine_profile.vram_wait_cycles
         self.io.use_emulated_time = True
         self.speaker = None
         if audio is None:
@@ -521,6 +524,9 @@ class Emulator:
         cpu.cpu_clock_hz = self.machine_profile.cpu_clock_hz
         cpu.timing_model = self.machine_profile.timing_model
         cpu.cycles_per_instruction = self.machine_profile.cycles_per_instruction
+        cpu.vram_wait_cycles = self.machine_profile.vram_wait_cycles
+        cpu.ram_wait_cycles = self.machine_profile.memory_wait_states
+        cpu.prefetch_wait_cycles = self.machine_profile.prefetch_wait_cycles
         cpu.step_mode = self.step_mode
         return cpu
 

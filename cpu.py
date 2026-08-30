@@ -33,6 +33,9 @@ class CPU:
         self.last_instruction_cycles = 0.0
         self.cpu_clock_hz = 4_772_727
         self.cycles_per_instruction = 1.0
+        self.ram_wait_cycles = 0
+        self.prefetch_wait_cycles = 0
+        self.vram_wait_cycles = 0
         # The CPU core has no implicit lifetime limit. Embedders may assign a
         # finite value for bounded tests; the emulator applies its separate
         # --max-instructions policy only to noninteractive sessions.
@@ -193,7 +196,13 @@ class CPU:
         return ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
 
     def _readb(self, a):
-        if 0xA0000 <= (a & 0xFFFFF) < 0xB0000 \
+        address = a & 0xFFFFF
+        if 0xB8000 <= address < 0xB9000:
+            self.cycle_count += self.vram_wait_cycles
+        elif not (0xA0000 <= address < 0xB0000
+                  and getattr(self.io.video, 'graphics_mode', False)):
+            self.cycle_count += self.ram_wait_cycles
+        if 0xA0000 <= address < 0xB0000 \
                 and getattr(self.io.video, 'graphics_mode', False):
             return self.io.video.graphics_read(a - 0xA0000)
         if self._ram is not None:
@@ -201,6 +210,10 @@ class CPU:
         return self.mem.read_byte(a)
 
     def _readw(self, a):
+        address = a & 0xFFFFF
+        if not (0xA0000 <= address < 0xB0000
+                and getattr(self.io.video, 'graphics_mode', False)):
+            self.cycle_count += 2 * self.ram_wait_cycles
         if 0xA0000 <= (a & 0xFFFFF) < 0xB0000 \
                 and getattr(self.io.video, 'graphics_mode', False):
             return self._readb(a) | (self._readb(a + 1) << 8)
@@ -210,7 +223,13 @@ class CPU:
         return self.mem.read_word(a)
 
     def _writeb(self, a, v):
-        if 0xA0000 <= (a & 0xFFFFF) < 0xB0000 \
+        address = a & 0xFFFFF
+        if 0xB8000 <= address < 0xB9000:
+            self.cycle_count += self.vram_wait_cycles
+        elif not (0xA0000 <= address < 0xB0000
+                  and getattr(self.io.video, 'graphics_mode', False)):
+            self.cycle_count += self.ram_wait_cycles
+        if 0xA0000 <= address < 0xB0000 \
                 and getattr(self.io.video, 'graphics_mode', False):
             self.io.video.graphics_write(a - 0xA0000, v)
             return
@@ -220,6 +239,10 @@ class CPU:
             self.mem.write_byte(a, v)
 
     def _writew(self, a, v):
+        address = a & 0xFFFFF
+        if not (0xA0000 <= address < 0xB0000
+                and getattr(self.io.video, 'graphics_mode', False)):
+            self.cycle_count += 2 * self.ram_wait_cycles
         if 0xA0000 <= (a & 0xFFFFF) < 0xB0000 \
                 and getattr(self.io.video, 'graphics_mode', False):
             self._writeb(a, v)
@@ -233,6 +256,7 @@ class CPU:
             self.mem.write_word(a, v)
 
     def _fetchb(self):
+        self.cycle_count += self.prefetch_wait_cycles
         if self._ram is not None:
             v = self._ram[((self.cs << 4) + self.ip) & 0xFFFFF]
         else:
@@ -241,6 +265,7 @@ class CPU:
         return v
 
     def _fetchw(self):
+        self.cycle_count += 2 * self.prefetch_wait_cycles
         if self._ram is not None:
             a = ((self.cs << 4) + self.ip) & 0xFFFFF
             v = self._ram[a] | (self._ram[(a + 1) & 0xFFFFF] << 8)

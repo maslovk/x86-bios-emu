@@ -13,6 +13,7 @@ try:
     from unicorn import (Uc, UcError, UC_ARCH_X86, UC_MODE_16,
                          UC_HOOK_BLOCK, UC_HOOK_INSN, UC_HOOK_INTR,
                          UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
+                         UC_HOOK_MEM_FETCH,
                          UC_PROT_ALL)
     from unicorn.x86_const import (
         UC_X86_INS_IN, UC_X86_INS_OUT,
@@ -77,6 +78,9 @@ class CCPU(CPU):
 
     def __init__(self, memory, io_ports):
         super().__init__(memory, io_ports)
+        self.ram_wait_cycles = getattr(io_ports, 'ram_wait_cycles', 0)
+        self.prefetch_wait_cycles = getattr(io_ports, 'prefetch_wait_cycles', 0)
+        self.vram_wait_cycles = getattr(io_ports, 'vram_wait_cycles', 0)
         if self._ram is None or len(self._ram) != 0x100000:
             raise RuntimeError('the C backend requires a flat 1 MiB memory buffer')
 
@@ -112,6 +116,19 @@ class CCPU(CPU):
         self._uc.hook_add(
             UC_HOOK_MEM_READ, self._on_vram_read,
             begin=0xA0000, end=0xAFFFF)
+        self._uc.hook_add(
+            UC_HOOK_MEM_READ, self._on_text_vram_read,
+            begin=0xB8000, end=0xB8FFF)
+        if (self.ram_wait_cycles or self.prefetch_wait_cycles):
+            self._uc.hook_add(
+                UC_HOOK_MEM_READ, self._on_ram_read,
+                begin=0x00000, end=0x9FFFF)
+            self._uc.hook_add(
+                UC_HOOK_MEM_READ, self._on_ram_read,
+                begin=0xB9000, end=0xFFFFF)
+            self._uc.hook_add(
+                UC_HOOK_MEM_FETCH, self._on_fetch,
+                begin=0x00000, end=0xFFFFF)
         # Some DOS games bypass INT 1Ah and inspect the BDA tick counter
         # directly. This tiny range is inert unless timing tracing is active.
         self._uc.hook_add(
@@ -122,7 +139,8 @@ class CCPU(CPU):
         # compiled hook when available. Trace mode deliberately keeps the
         # instrumented Python path.
         self._native_vga_hook = None
-        if not getattr(self.io.video, 'trace_graphics_writes', None):
+        if (not getattr(self.io.video, 'trace_graphics_writes', None)
+                and not getattr(self, 'vram_wait_cycles', 0)):
             self._native_vga_hook = install_native_vga_hook(
                 self._uc, self.io.video, self._ram)
         if self._native_vga_hook is None:
@@ -276,7 +294,24 @@ class CCPU(CPU):
         if counter is not None:
             counter[0] += 1
 
+    def _on_text_vram_read(self, uc, access, address, size, value,
+                           user_data=None):
+        self.cycle_count += size * getattr(self, 'vram_wait_cycles', 0)
+
+    def _on_ram_read(self, uc, access, address, size, value,
+                     user_data=None):
+        self.cycle_count += size * getattr(self, 'ram_wait_cycles', 0)
+
+    def _on_fetch(self, uc, access, address, size, value, user_data=None):
+        self.cycle_count += size * getattr(self, 'prefetch_wait_cycles', 0)
+
     def _on_mem_write(self, uc, access, address, size, value, user_data=None):
+        if 0xB8000 <= address < 0xB9000:
+            self.cycle_count += size * getattr(self, 'vram_wait_cycles', 0)
+            return
+        if not (0xA0000 <= address < 0xB0000
+                and getattr(self.io.video, 'graphics_mode', False)):
+            self.cycle_count += size * getattr(self, 'ram_wait_cycles', 0)
         if (0xA0000 <= address < 0xB0000
                 and getattr(self.io.video, 'graphics_mode', False)):
             for i in range(size):

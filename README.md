@@ -298,6 +298,9 @@ python3 main.py --dos --gtk              # Bundled DOS 3.3 in one GTK command
 python3 main.py --dos --host-dir ./dos-files --gtk  # Read-only host folder as B:
 python3 main.py --dos --host-dir ./DOS_sources/v1.25/source --host-dir-dos-text --gtk
 python3 main.py --dos --host-dir ./dos-files --host-dir-write --persist --gtk
+python3 main.py --hard-disk dos622-new.hdd --boot-hard-disk \
+  --host-mount D=./DOS_sources/TASM --host-mount E=./DOS_sources/VC_source --gtk
+./scripts/build_volkov                 # Build VC.COM and VC.OVL in the emulator
 python3 main.py --dos --cpu-backend python --gtk  # Explicit reference CPU
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 python3 main.py --create-hard-disk harddisk.img --hard-disk-cylinders 306
@@ -365,6 +368,7 @@ reference implementation.
 | `--floppy-b IMG` | Load a second floppy image as drive B: (enables `DIR B:`, `COPY B:..`, DISKCOPY/DISKCOMP) |
 | `--hard-disk IMG` | Attach an exact 1..1024-cylinder C/4/17 raw hard-disk image as BIOS drive 80h (tested at 306 cylinders/FAT12 and 615 cylinders/FAT16) |
 | `--host-dir DIR` | Expose a host folder as read-only DOS drive B: |
+| `--host-mount DRIVE=DIR` | Expose one or more host folders as DOS drives D: through Z: (requires `--hard-disk`; repeatable, contiguous from D:) |
 | `--host-dir-dos-text` | Normalize known host text files to DOS CR/LF in the guest image (requires `--host-dir`; host files stay unchanged) |
 | `--host-dir-write` | Enable explicit host-folder write-back (requires `--persist`) |
 | `--host-dir-delete` | Delete host files removed by DOS (requires both write-back flags) |

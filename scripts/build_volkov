@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Build Volkov Commander inside the emulator using separate DOS drives.
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_dir=$(cd -- "$script_dir/.." && pwd)
+emulator=${EMULATOR_PYTHON:-python3}
+hard_disk=${1:-"$repo_dir/dos622-new.hdd"}
+tasm_dir=${VC_TASM_DIR:-"$repo_dir/DOS_sources/TASM"}
+source_dir=${VC_SOURCE_DIR:-"$repo_dir/DOS_sources/VC_source"}
+link_dir=${VC_LINK_DIR:-"/tmp/volkov-link-tools"}
+
+if [[ -z "${VC_LINK_DIR:-}" ]]; then
+    mkdir -p "$link_dir"
+    cp "$repo_dir/DOS_sources/v4.0/src/TOOLS/LINK.EXE" \
+       "$repo_dir/DOS_sources/v4.0/src/TOOLS/EXE2BIN.EXE" "$link_dir/"
+fi
+
+for path in "$hard_disk" "$tasm_dir" "$source_dir" "$link_dir"; do
+    if [[ ! -e "$path" ]]; then
+        echo "build_volkov: missing path: $path" >&2
+        exit 2
+    fi
+done
+
+cd "$repo_dir"
+
+# The initial CRs answer the DOS date/time prompts when they are shown.  The
+# remaining commands are consumed by COMMAND.COM in order.  Keep this in
+# terminal mode: GTK has no host-side command injection path.
+commands=$'\r\rD:\rPATH D:\\;F:\\;C:\\DOS\rE:\r'
+commands+=$'TASM /z/m9/kh10000 VC\r'
+commands+=$'F:\\LINK.EXE VC.OBJ,VC.EXE;\r'
+commands+=$'F:\\EXE2BIN.EXE VC.EXE VC.COM\r'
+commands+=$'TASMX /z/m9/kh10000 VCOVL\r'
+commands+=$'F:\\LINK.EXE VCOVL.OBJ,VC.OVL;\r'
+commands+=$'DIR VC.COM\rDIR VC.OVL\rEXIT\r'
+
+printf '%s' "$commands" | timeout --signal=INT --kill-after=10 \
+    "${VC_BUILD_TIMEOUT:-600}" "$emulator" main.py \
+    --cpu-backend c \
+    --hard-disk "$hard_disk" \
+    --boot-hard-disk \
+    --host-mount "D=$tasm_dir" \
+    --host-mount "E=$source_dir" \
+    --host-dir-write \
+    --persist \
+    --interactive \
+    --no-serial \
+    --max-instructions 500000000
+
+if [[ ! -f "$source_dir/VC.COM" || ! -f "$source_dir/VC.OVL" ]]; then
+    echo "build_volkov: build failed; VC.COM or VC.OVL was not produced" >&2
+    exit 1
+fi
+
+echo "Volkov Commander build finished; outputs are in: $source_dir"

@@ -73,6 +73,30 @@ def test_pit_speed_multiplier_is_configurable():
     assert args.pit_speed == 2.0
 
 
+def test_multiple_host_mounts_parse_as_contiguous_drive_letters(tmp_path):
+    d = tmp_path / 'tools'
+    e = tmp_path / 'src'
+    d.mkdir()
+    e.mkdir()
+    disk = tmp_path / 'disk.img'
+    disk.write_bytes(b'\0' * (4 * 17 * 512))
+    _parser, args = parse_args([
+        '--hard-disk', str(disk),
+        '--host-mount', f'D={d}', '--host-mount', f'E={e}'])
+    assert args.host_mounts == {'D': str(d), 'E': str(e)}
+
+
+def test_host_mounts_are_exposed_as_bios_hard_disks(tmp_path):
+    image = tmp_path / 'disk.img'
+    create_hard_disk_image(str(image), cylinders=1)
+    folder = tmp_path / 'tools'
+    folder.mkdir()
+    emulator = Emulator(enable_hardware=False, hard_disk=str(image),
+                         host_mounts={'D': str(folder)})
+    assert emulator.bios.extra_hard_disks[0x81] is emulator.host_mount_disks['D']
+    assert emulator.host_mount_disks['D'].hard_disk
+
+
 def test_pole_timing_trace_is_configurable():
     _parser, args = parse_args(['--trace-pole-timing'])
     assert args.trace_pole_timing is True
@@ -91,7 +115,7 @@ def test_emulator_python_backend_is_explicit_and_resettable():
     (['--gtk-font-size', '73'], '--gtk-font-size must be between 6 and 72'),
     (['--pit-speed', '9'], '--pit-speed must be between 0.25 and 8'),
     (['--dos', '--persist'], '--dos protects the bundled image'),
-    (['--host-dir-dos-text'], '--host-dir-dos-text requires --host-dir DIR'),
+        (['--host-dir-dos-text'], '--host-dir-dos-text requires a host directory'),
     (['--floppy', 'does-not-exist.img'], '--floppy: file not found'),
 ])
 def test_invalid_options_report_concise_errors(argv, message, capsys):
@@ -403,11 +427,10 @@ def test_pit_scheduler_uses_wall_clock_and_bounds_catchup():
     assert deadline == 10.0 + interval
 
 
-def test_host_dir_cli_rejects_writes_and_second_floppy(capsys, tmp_path):
-    with pytest.raises(SystemExit) as error:
-        parse_args(['--host-dir', str(tmp_path), '--persist'])
-    assert error.value.code == 2
-    assert 'read-only' in capsys.readouterr().err
+def test_host_dir_cli_allows_persistence_and_rejects_second_floppy(capsys, tmp_path):
+    _parser, args = parse_args(['--host-dir', str(tmp_path),
+                                '--host-dir-write', '--persist'])
+    assert args.host_dir == str(tmp_path)
 
     with pytest.raises(SystemExit) as error:
         parse_args(['--host-dir', str(tmp_path), '--floppy-b', 'other.img'])

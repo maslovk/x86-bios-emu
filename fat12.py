@@ -84,6 +84,10 @@ class DirEntry:
 #            num_fats, root_entries, sectors_per_fat, media,
 #            sectors_per_track, heads, label).
 _DOS_MEDIA_GEOMETRIES = {
+    5760: dict(bytes_per_sector=512, sectors_per_cluster=2,
+               reserved_sectors=1, num_fats=2, root_entries=512,
+               sectors_per_fat=9,  media=0xF0, sectors_per_track=36,
+               heads=2, label='2.88MB 3.5"'),
     2880: dict(bytes_per_sector=512, sectors_per_cluster=1,
                reserved_sectors=1, num_fats=2, root_entries=224,
                sectors_per_fat=9,  media=0xF0, sectors_per_track=18,

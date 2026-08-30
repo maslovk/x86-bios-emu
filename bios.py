@@ -14,13 +14,14 @@ class BIOS:
 
     def __init__(self, memory, video, keyboard, disk, pit=None, pic=None,
                  cmos=None, kbd_ctrl=None, disk_b=None, serial=None,
-                 hard_disk=None, boot_drive=0x00):
+                 hard_disk=None, boot_drive=0x00, extra_hard_disks=None):
         self.mem = memory
         self.video = video
         self.kbd = keyboard
         self.disk = disk          # drive 0 (A:)
         self.disk_b = disk_b      # drive 1 (B:), or None
         self.hard_disk = hard_disk  # BIOS drive 80h, or None
+        self.extra_hard_disks = dict(extra_hard_disks or {})
         self.boot_drive = boot_drive
         self.pit = pit
         self.pic = pic
@@ -676,13 +677,15 @@ class BIOS:
     }
 
     def _disk_for(self, dl):
-        """Return the Disk for BIOS drive ``dl`` (00h, 01h, or 80h)."""
+        """Return the Disk for a BIOS drive number."""
         if dl == 0x00:
             return self.disk
         if dl == 0x01 and self.disk_b is not None:
             return self.disk_b
         if dl == 0x80 and self.hard_disk is not None:
             return self.hard_disk
+        if dl >= 0x81:
+            return self.extra_hard_disks.get(dl)
         return None
 
     @property
@@ -691,7 +694,9 @@ class BIOS:
 
     @property
     def _num_hard_drives(self):
-        return 1 if self.hard_disk is not None else 0
+        drives = ([0x80] if self.hard_disk is not None else [])
+        drives.extend(self.extra_hard_disks)
+        return len(drives)
 
     def _disk_geometry(self, disk=None):
         """Return (sectors_per_track, max_cyl, max_head) for the given disk."""

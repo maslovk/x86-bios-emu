@@ -23,8 +23,8 @@ def _dos_text_bytes(name, data):
         b'\n', b'\r\n')
 
 
-def build_host_directory_disk(directory, dos_text=False):
-    """Build a 1.44MB FAT12 disk containing regular host files.
+def build_host_directory_disk(directory, dos_text=False, size=1440 * 1024):
+    """Build a FAT12 disk containing regular host files.
 
     When ``dos_text`` is true, recognized text extensions are normalized to
     DOS CR/LF records in the guest image; host files are never modified.
@@ -57,11 +57,16 @@ def build_host_directory_disk(directory, dos_text=False):
     """Build the blank image, then populate files/directories."""
 
     with tempfile.NamedTemporaryFile(suffix='.img') as blank:
-        make_blank_image(blank.name, size=1440 * 1024)
+        make_blank_image(blank.name, size=size)
         raw = Path(blank.name).read_bytes()
 
-    disk = Disk(2880, cylinders=80, heads=2, sectors_per_track=18)
-    for index in range(2880):
+    total_sectors = size // 512
+    geometry = ((80, 2, 18) if total_sectors == 2880
+                else (80, 2, 36) if total_sectors == 5760
+                else (None, None, None))
+    disk = Disk(total_sectors, cylinders=geometry[0], heads=geometry[1],
+                sectors_per_track=geometry[2])
+    for index in range(total_sectors):
         disk.sectors[index][:] = raw[index * 512:(index + 1) * 512]
     # Keep the BIOS geometry/media descriptor in sync with the BPB.  The
     # default Disk descriptor (F9) describes a different legacy floppy even

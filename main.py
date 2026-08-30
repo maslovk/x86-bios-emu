@@ -11,7 +11,7 @@ import os
 import argparse
 
 from cpu_backend import BACKENDS, create_cpu, normalize_backend
-from video import Video, IO, Keyboard, Disk, Serial
+from video import Video, IO, Keyboard, Disk, DiskView, Serial
 from bios import BIOS
 from hardware import PIT, PIC, CMOS, KeyboardController
 from fat12 import FAT12, FAT12Error
@@ -330,7 +330,8 @@ class Emulator:
                  host_dir_write=False, host_dir_delete=False,
                  host_dir_dos_text=False, max_instructions=10_000_000,
                  cpu_backend='python', pit_speed=1.0, audio=None,
-                 trace_pole_timing=False, machine='generic'):
+                 trace_pole_timing=False, machine='generic',
+                 host_mounts=None):
         self.memory = type('Memory', (), {})()
         self.cpu_backend = normalize_backend(cpu_backend)
         # We need a proper Memory class
@@ -395,7 +396,8 @@ class Emulator:
         self.max_instructions = max_instructions
         self.bios = BIOS(self.mem, self.video, self.kbd, self.disk,
                          pit=self.pit, pic=self.pic, cmos=self.cmos,
-                         kbd_ctrl=self.kbd_ctrl, serial=self.serial)
+                         kbd_ctrl=self.kbd_ctrl, serial=self.serial,
+                         extra_hard_disks={})
         self.boot_file = boot_file
         self.interactive = interactive or gtk   # --gtk implies interactive
         self.enable_hardware = enable_hardware
@@ -449,6 +451,9 @@ class Emulator:
         self.host_dir_dos_text = host_dir_dos_text
         self.host_dir_snapshot = {}
         self.host_dir_delete = host_dir_delete
+        self.host_mounts = dict(host_mounts or {})
+        self.host_mount_disks = {}
+        self.host_mount_snapshots = {}
         self.fat = None
         # Original (pre-padding) sector count of the loaded image, so --persist
         # writes back exactly the image's on-disk size instead of the 1.44MB
@@ -468,6 +473,7 @@ class Emulator:
         self._hard_disk_sectors = None
         if hard_disk:
             self._load_hard_disk(hard_disk)
+        self._load_host_mounts()
         self.bios.boot_drive = self.boot_drive
         if self.gtk_display is not None:
             self.gtk_display.set_media_status(self._media_status())
@@ -540,7 +546,9 @@ class Emulator:
         return '  '.join((
             label('A', self.floppy_image, self.disk),
             label('B', getattr(self, 'floppy_b_image', None), self.disk_b),
-            label('C', self.hard_disk_image, self.hard_disk)))
+            label('C', self.hard_disk_image, self.hard_disk),
+            *[label(letter, path, self.host_mount_disks.get(letter))
+              for letter, path in sorted(self.host_mounts.items())]))
 
     def _close_warning(self):
         """Return a GTK close warning only when non-persistent writes exist."""
@@ -564,6 +572,8 @@ class Emulator:
             dirty.append('B:')
         if self.hard_disk and self.hard_disk.dirty:
             dirty.append('C:')
+        dirty.extend(f'{letter}:' for letter, disk in self.host_mount_disks.items()
+                     if disk.dirty)
         return dirty
 
     def _create_memory(self):
@@ -705,6 +715,53 @@ class Emulator:
         print(f"  Host folder B: {os.path.abspath(path)} ({mode})",
               file=sys.stderr)
 
+    def _load_host_mounts(self):
+        """Attach host folders as DOS hard-disk letters D: through Z:."""
+        for index, (letter, path) in enumerate(sorted(self.host_mounts.items())):
+            filesystem = build_host_directory_disk(
+                path, dos_text=self.host_dir_dos_text, size=2880 * 1024)
+            disk = self._make_partitioned_host_disk(filesystem)
+            disk.read_only = not self.host_dir_write
+            bios_drive = 0x81 + index
+            self.host_mount_disks[letter] = disk
+            self.host_mount_snapshots[letter] = snapshot_host_directory(path)
+            self.bios.extra_hard_disks[bios_drive] = disk
+            mode = 'write-back enabled' if self.host_dir_write else 'read-only FAT12'
+            print(f"  Host folder {letter}: {os.path.abspath(path)} ({mode})",
+                  file=sys.stderr)
+        # DOS also consults the BIOS Data Area fixed-disk count during
+        # initialization, before it starts probing INT 13h drive numbers.
+        if self.host_mount_disks:
+            self.mem.write_byte(0x00475, self.bios._num_hard_drives)
+
+    @staticmethod
+    def _make_partitioned_host_disk(filesystem):
+        """Wrap a FAT12 host image in a DOS-visible hard-disk partition."""
+        partition_sectors = len(filesystem.sectors)
+        heads, spt = 4, 17
+        cylinders = (partition_sectors + 1 + heads * spt - 1) // (heads * spt)
+        total = cylinders * heads * spt
+        disk = Disk(total, cylinders=cylinders, heads=heads,
+                    sectors_per_track=spt, hard_disk=True)
+        # One primary FAT12 partition starts at LBA 1.  DOS needs the MBR
+        # partition table even though the filesystem itself is FAT12.
+        entry = 446
+        disk.sectors[0][entry + 1:entry + 4] = bytes((0, 2, 0))
+        disk.sectors[0][entry + 4] = 0x01
+        end_lba = partition_sectors
+        end_cyl, rem = divmod(end_lba, heads * spt)
+        end_head, end_sector = divmod(rem, spt)
+        end_sector += 1
+        disk.sectors[0][entry + 5:entry + 8] = bytes(
+            (end_head, end_sector | ((end_cyl >> 2) & 0xC0), end_cyl & 0xFF))
+        disk.sectors[0][entry + 8:entry + 12] = (1).to_bytes(4, 'little')
+        disk.sectors[0][entry + 12:entry + 16] = partition_sectors.to_bytes(4, 'little')
+        disk.sectors[0][510:512] = b'\x55\xAA'
+        for index, sector in enumerate(filesystem.sectors, start=1):
+            disk.sectors[index][:] = sector
+        disk.dirty = False
+        return disk
+
     def refresh_host_dir(self):
         """Rebuild the read-only host-folder disk currently attached as B:."""
         if not self.host_dir:
@@ -740,7 +797,10 @@ class Emulator:
         return True
 
     def _persist_host_dir(self):
-        if not self.host_dir_write or not self.host_dir or not self.disk_b:
+        if not self.host_dir_write:
+            return
+        if not self.host_dir or not self.disk_b:
+            self._persist_extra_host_mounts()
             return
         if not self.disk_b.dirty:
             return
@@ -769,8 +829,31 @@ class Emulator:
                 for path in preserved:
                     print(f'  [persist] preserved {path}', file=sys.stderr)
         except (OSError, ValueError, FAT12Error) as exc:
-            print(f'[persist] host-folder write failed: {exc}', file=sys.stderr)
+            print(f'[persist] host-folder B write failed: {exc}', file=sys.stderr)
 
+        self._persist_extra_host_mounts()
+
+    def _persist_extra_host_mounts(self):
+        """Write dirty D:..Z: host mounts back to their folders."""
+        for letter, disk in self.host_mount_disks.items():
+            if not self.host_dir_write or not disk.dirty:
+                continue
+            path = self.host_mounts[letter]
+            try:
+                changed, conflicts = sync_host_directory_disk(
+                    DiskView(disk, 1, len(disk.sectors) - 1), path,
+                    self.host_mount_snapshots[letter])
+                disk.dirty = False
+                print(f'[persist] host-folder {letter}: {len(changed)} file(s) '
+                      f'updated in {path}', file=sys.stderr)
+                if conflicts:
+                    print(f'[persist] skipped {len(conflicts)} host conflict(s) '
+                          f'on {letter}:', file=sys.stderr)
+                    for conflict in conflicts:
+                        print(f'  [persist] conflict: {conflict}', file=sys.stderr)
+            except (OSError, ValueError, FAT12Error) as exc:
+                print(f'[persist] host-folder {letter} write failed: {exc}',
+                      file=sys.stderr)
     def _load_hard_disk(self, path: str):
         """Load a raw legacy-CHS hard-disk image as BIOS drive 80h."""
         try:
@@ -1420,6 +1503,9 @@ always protects the bundled image and therefore cannot be used with --persist.''
                               '(default: 306, about 10 MB)')
     storage.add_argument('--host-dir', metavar='DIR',
                          help='expose a host folder read-only as DOS drive B:')
+    storage.add_argument('--host-mount', action='append', metavar='DRIVE=DIR',
+                         default=[],
+                         help='expose a host folder as DOS drive D:..Z:; repeatable')
     storage.add_argument('--host-dir-dos-text', action='store_true',
                          help='normalize known host text files to DOS CR/LF')
     storage.add_argument('--host-dir-write', action='store_true',
@@ -1480,7 +1566,8 @@ def parse_args(argv=None):
                      'if you want --persist')
     if args.create_hard_disk:
         conflicting = []
-        if args.boot or args.dos or args.floppy or args.floppy_b or args.host_dir:
+        if (args.boot or args.dos or args.floppy or args.floppy_b
+                or args.host_dir or args.host_mount):
             conflicting.append('boot media')
         if args.hard_disk or args.boot_hard_disk:
             conflicting.append('--hard-disk/--boot-hard-disk')
@@ -1498,17 +1585,34 @@ def parse_args(argv=None):
     if args.host_dir:
         if args.floppy_b:
             parser.error('--host-dir cannot be combined with --floppy-b')
-        if args.persist:
-            parser.error('--host-dir is read-only and cannot be used with --persist')
         if not os.path.isdir(args.host_dir):
             parser.error(f'--host-dir: directory not found: {args.host_dir}')
+    mounts = {}
+    for spec in args.host_mount:
+        if '=' not in spec:
+            parser.error('--host-mount must use DRIVE=DIR')
+        drive, path = spec.split('=', 1)
+        drive = drive.upper()
+        if len(drive) != 1 or not 'D' <= drive <= 'Z':
+            parser.error('--host-mount drive must be a letter from D: to Z:')
+        if drive in mounts:
+            parser.error(f'--host-mount: duplicate drive {drive}:')
+        if not os.path.isdir(path):
+            parser.error(f'--host-mount {drive}: directory not found: {path}')
+        mounts[drive] = path
+    if mounts and not args.hard_disk:
+        parser.error('--host-mount requires --hard-disk so DOS can assign D: onward')
+    expected = [chr(ord('D') + i) for i in range(len(mounts))]
+    if sorted(mounts) != expected:
+        parser.error('--host-mount drives must be contiguous starting at D:')
+    args.host_mounts = mounts
     if args.host_dir_write:
-        if not args.host_dir:
-            parser.error('--host-dir-write requires --host-dir DIR')
+        if not args.host_dir and not mounts:
+            parser.error('--host-dir-write requires --host-dir DIR or --host-mount')
         if not args.persist:
             parser.error('--host-dir-write requires --persist')
-    if args.host_dir_dos_text and not args.host_dir:
-        parser.error('--host-dir-dos-text requires --host-dir DIR')
+    if args.host_dir_dos_text and not args.host_dir and not mounts:
+        parser.error('--host-dir-dos-text requires a host directory')
     if args.host_dir_delete:
         if not args.host_dir_write:
             parser.error('--host-dir-delete requires --host-dir-write')
@@ -1583,6 +1687,7 @@ def main(argv=None):
                        host_dir_write=args.host_dir_write,
                        host_dir_delete=args.host_dir_delete,
                        host_dir_dos_text=args.host_dir_dos_text,
+                       host_mounts=args.host_mounts,
                        max_instructions=args.max_instructions,
                        cpu_backend=args.cpu_backend, pit_speed=args.pit_speed,
                        audio=args.gtk and not args.no_audio,

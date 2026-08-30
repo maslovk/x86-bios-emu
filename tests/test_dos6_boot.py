@@ -1,4 +1,4 @@
-"""Integration tests for the MS-DOS 6.22 boot from DOS6_22/disk01.img.
+"""Integration tests for the MS-DOS 6.22 boot from DOS6_22/Disk1.img.
 
 MS-DOS 6.22 ships on EXEPACK-compressed Setup diskettes (1.44 MB, media
 0xF0).  SYSINIT's bit-stream decompressor is a dense consumer of DEC/SHR/
@@ -26,12 +26,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from dosharness import DOSHarness, REPO_ROOT
 
-DOS6_DISK1 = os.path.join(REPO_ROOT, 'DOS6_22', 'disk01.img')
+DOS6_DISK1 = os.path.join(REPO_ROOT, 'DOS6_22', 'Disk1.img')
 
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(not os.path.exists(DOS6_DISK1),
-                       reason='DOS6_22/disk01.img not present'),
+                       reason='DOS6_22/Disk1.img not present'),
 ]
 
 
@@ -40,8 +40,11 @@ class TestDOS6Boot:
 
     def test_boot_reaches_setup_welcome(self):
         h = DOSHarness(image_path=DOS6_DISK1)
-        h.wait_for('Starting MS-DOS', max_steps=6_000_000)
-        h.run_steps(6_000_000)
+        # Setup paces the dialog text with INT 08h timer ticks; with the
+        # harness's instruction-quantum timing that legitimately costs a
+        # few million instructions, so wait for the asserted text instead
+        # of a fixed step budget after the early banner.
+        h.wait_for('does not have a hard disk', max_steps=20_000_000)
         screen = h.vga_str()
         assert 'MS-DOS 6.22 Setup' in screen
         # The blank-hardware dialog is the expected first stop without a
@@ -56,7 +59,11 @@ class TestDOS6Boot:
             create_hard_disk_image(hdd, cylinders=306)
             h = DOSHarness(image_path=DOS6_DISK1, hard_disk=hdd,
                             writable=True)
-            h.wait_for('Welcome to Setup', max_steps=12_000_000)
+            # Wait for the full prompt, not the headline: Setup types its
+            # screens character-by-character paced by timer ticks (see the
+            # sibling test above and tests/test_dos5_boot.py).
+            h.wait_for('To set up MS-DOS now, press ENTER',
+                       max_steps=20_000_000)
             screen = h.vga_str()
             assert 'MS-DOS 6.22 Setup' in screen
             assert 'To set up MS-DOS now, press ENTER' in screen

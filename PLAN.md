@@ -564,7 +564,7 @@ the emulator without changing guest compatibility.
   marked in GTK, non-persistent shutdowns warn before discarding writes, and
   Reset reinitializes memory, CPU, BIOS, IRQ state, and boot execution.
 
-## Phase L — Host-folder FAT bridge (Milestone 1 in progress)
+## Phase L — Host-folder FAT bridge (complete)
 
 Goal: make a host directory visible to DOS without manually editing floppy
 images. The bridge will be a virtual read-only FAT drive, not a direct host
@@ -620,6 +620,15 @@ The read-only criterion is covered by
 `test_host_folder_bridge_rejects_guest_writes`.
 Explicit write-back is covered by
 `test_host_folder_bridge_writes_back_guest_file`.
+
+### Post-milestone — extra host drives D: through Z:
+
+`--host-mount DRIVE=DIR` exposes additional host folders as partitioned
+FAT12 hard disks at BIOS drives 81h onward (MBR-wrapped by
+`Emulator._make_partitioned_host_disk`), contiguous from D:, with the same
+opt-in `--host-dir-write --persist` write-back path. `scripts/build_volkov`
+uses it to assemble and link Volkov Commander with real TASM inside the
+emulator.
 
 ---
 

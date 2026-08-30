@@ -36,8 +36,13 @@ class TestDOS5Boot:
     """MS-DOS 5.00 boot from the historical Setup system disk."""
 
     def boot_to_welcome(self):
+        # Wait for the full prompt, not just the headline: after the BIOS
+        # began reporting a VGA display combination (INT 10h AH=1Ah BL=08h)
+        # MS-DOS 5 Setup renders the welcome paragraph character-by-character
+        # through INT 10h AH=0Eh, so "Welcome to Setup" becomes visible while
+        # "To continue Setup, press ENTER" is still being written.
         h = DOSHarness(image_path=DOS5_DISK1)
-        h.wait_for('Welcome to Setup', max_steps=6_000_000)
+        h.wait_for('To continue Setup, press ENTER', max_steps=6_000_000)
         return h
 
     def test_boot_reaches_setup_welcome(self):

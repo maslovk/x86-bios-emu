@@ -1123,7 +1123,7 @@ class Emulator:
 
         step = 0
         last_display = 0
-        last_ip = None
+        last_state = None
         stuck_count = 0
         stuck_since = time.monotonic()
         # Keep the PIT's simulated hardware elapsed time independent from
@@ -1244,13 +1244,20 @@ class Emulator:
                 self._schedule_keyboard_irq()
 
                 # Detect infinite loops
-                cur_ip = (self.cpu.cs << 4) + self.cpu.ip
+                # A decompressor or installer can legitimately execute the
+                # same instruction address for a long time while advancing
+                # registers. Treat only a genuinely unchanged CPU state as
+                # an infinite loop; checking IP alone aborts valid DOS
+                # programs such as the After Dark installer.
+                cur_state = tuple(getattr(self.cpu, name) for name in (
+                    'cs', 'ip', 'ax', 'bx', 'cx', 'dx', 'si', 'di', 'bp',
+                    'sp', 'flags'))
                 if self.cpu._retry_interrupt_state is not None:
                     # A blocking BIOS call intentionally remains on its INT
                     # instruction while the main loop pumps external input.
                     stuck_count = 0
                     stuck_since = time.monotonic()
-                elif cur_ip == last_ip:
+                elif cur_state == last_state:
                     stuck_count += 1
                     if time.monotonic() - stuck_since > STUCK_LOOP_SECONDS:
                         self.stop_reason = 'stuck instruction loop'
@@ -1260,7 +1267,7 @@ class Emulator:
                 else:
                     stuck_count = 0
                     stuck_since = time.monotonic()
-                last_ip = cur_ip
+                last_state = cur_state
 
                 # Display video every 5000 instructions (terminal path only).
                 # In GTK mode the per-batch pump() above already queued a

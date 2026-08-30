@@ -108,14 +108,16 @@ class DOSHarness:
     """
 
     def __init__(self, image_path=DISK01, image_b=None, hard_disk=None,
-                 host_dir=None, host_dir_write=False, boot_drive=0x00,
-                 writable=False, settle_extra=2000, cpu_backend='python',
-                 machine='generic', emulated_timing=False):
+                 host_dir=None, host_dir_write=False, host_mounts=None,
+                 boot_drive=0x00, writable=False, settle_extra=2000,
+                 cpu_backend='python', machine='generic',
+                 emulated_timing=False):
         self.image_path = image_path
         self.image_b_path = image_b
         self.hard_disk_path = hard_disk
         self.host_dir = host_dir
         self.host_dir_write = host_dir_write
+        self.host_mounts = dict(host_mounts or {})
         self.boot_drive = boot_drive
         self.writable = writable
         self.settle_extra = settle_extra
@@ -142,6 +144,7 @@ class DOSHarness:
                              floppy_image=load_path, floppy_b=load_path_b,
                              hard_disk=load_path_hd, boot_drive=boot_drive,
                              host_dir=host_dir, host_dir_write=host_dir_write,
+                             host_mounts=dict(host_mounts or {}),
                              persist=host_dir_write,
                              cpu_backend=cpu_backend, machine=machine)
         self.emu.bios.initialize()

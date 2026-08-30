@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
 # Build Volkov Commander inside the emulator using separate DOS drives.
+#
+# VC.COM (the 9 KB loader stub) assembles and links fully in-emulator with
+# the real-mode TASM 4.1 / MS LINK 3.65 toolchain.  VC.OVL (the actual
+# overlay program, ~846 KB of source) needs TASMX: Borland's protected-mode
+# assembler.  Upstream MAKE.BAT uses TASMX for exactly this reason, and
+# real-mode TASM runs out of memory regardless of /kh, /z, or CONFIG.SYS
+# tuning (verified: "Remaining memory: 48 bytes / Fatal Out of memory").
+# TASMX requires a 16-bit DPMI host, which needs 286 protected mode —
+# not implemented by this real-mode emulator.  Set VC_TRY_OVL=1 to attempt
+# the VCOVL build anyway (e.g. once protected mode arrives).
+#
+# The session ends by itself: when piped stdin is exhausted and DOS blocks
+# at a prompt waiting for a key that can never arrive, the emulator exits
+# cleanly (stop reason "stdin closed"), so the timeout is only a safety net.
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -9,6 +23,7 @@ hard_disk=${1:-"$repo_dir/dos622-new.hdd"}
 tasm_dir=${VC_TASM_DIR:-"$repo_dir/DOS_sources/TASM"}
 source_dir=${VC_SOURCE_DIR:-"$repo_dir/DOS_sources/VC_source"}
 link_dir=${VC_LINK_DIR:-"/tmp/volkov-link-tools"}
+try_ovl=${VC_TRY_OVL:-0}
 
 if [[ -z "${VC_LINK_DIR:-}" ]]; then
     mkdir -p "$link_dir"
@@ -27,14 +42,18 @@ cd "$repo_dir"
 
 # The initial CRs answer the DOS date/time prompts when they are shown.  The
 # remaining commands are consumed by COMMAND.COM in order.  Keep this in
-# terminal mode: GTK has no host-side command injection path.
+# terminal mode: GTK has no host-side command injection path.  The trailing
+# DIR is the last command: after it, DOS blocks at the prompt and the
+# emulator ends the session on exhausted stdin (no EXIT, which would reboot).
 commands=$'\r\rD:\rPATH D:\\;F:\\;C:\\DOS\rE:\r'
 commands+=$'TASM /z/m9/kh10000 VC\r'
 commands+=$'F:\\LINK.EXE VC.OBJ,VC.EXE;\r'
 commands+=$'F:\\EXE2BIN.EXE VC.EXE VC.COM\r'
-commands+=$'TASMX /z/m9/kh10000 VCOVL\r'
-commands+=$'F:\\LINK.EXE VCOVL.OBJ,VC.OVL;\r'
-commands+=$'DIR VC.COM\rDIR VC.OVL\rEXIT\r'
+if [[ "$try_ovl" == "1" ]]; then
+    commands+=$'TASM /z/m9/kh10000 VCOVL\r'
+    commands+=$'F:\\LINK.EXE VCOVL.OBJ,VC.OVL;\r'
+fi
+commands+=$'DIR VC.COM\rDIR VC.OVL\r'
 
 printf '%s' "$commands" | timeout --signal=INT --kill-after=10 \
     "${VC_BUILD_TIMEOUT:-600}" "$emulator" main.py \
@@ -43,15 +62,26 @@ printf '%s' "$commands" | timeout --signal=INT --kill-after=10 \
     --boot-hard-disk \
     --host-mount "D=$tasm_dir" \
     --host-mount "E=$source_dir" \
+    --host-mount "F=$link_dir" \
     --host-dir-write \
     --persist \
     --interactive \
     --no-serial \
     --max-instructions 500000000
 
-if [[ ! -f "$source_dir/VC.COM" || ! -f "$source_dir/VC.OVL" ]]; then
-    echo "build_volkov: build failed; VC.COM or VC.OVL was not produced" >&2
-    exit 1
+status=0
+if [[ ! -f "$source_dir/VC.COM" ]]; then
+    echo "build_volkov: VC.COM was not produced; the loader build failed" >&2
+    status=1
+else
+    echo "build_volkov: VC.COM (loader) built in $source_dir"
 fi
-
-echo "Volkov Commander build finished; outputs are in: $source_dir"
+if [[ "$try_ovl" == "1" && ! -f "$source_dir/VC.OVL" ]]; then
+    echo "build_volkov: VC.OVL was not produced." >&2
+    echo "  Expected today: real-mode TASM 4.1 exhausts 640K assembling the" >&2
+    echo "  ~846 KB VCOVL source. Upstream requires TASMX, a 16-bit DPMI" >&2
+    echo "  client, which needs 286 protected mode — unsupported by this" >&2
+    echo "  real-mode emulator. See the header comment of this script." >&2
+    status=1
+fi
+exit "$status"

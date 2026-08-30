@@ -97,6 +97,21 @@ def test_host_mounts_are_exposed_as_bios_hard_disks(tmp_path):
     assert emulator.host_mount_disks['D'].hard_disk
 
 
+def test_dos_harness_passes_host_mounts_through(tmp_path):
+    from dosharness import DOSHarness
+    image = tmp_path / 'disk.img'
+    create_hard_disk_image(str(image), cylinders=1)
+    folder = tmp_path / 'tools'
+    folder.mkdir()
+    (folder / 'HELLO.TXT').write_text('hi\r\n')
+    harness = DOSHarness(image_path=None, hard_disk=str(image),
+                         boot_drive=0x80, host_mounts={'D': str(folder)})
+    disk = harness.emu.bios.extra_hard_disks[0x81]
+    assert disk is harness.emu.host_mount_disks['D']
+    assert disk.hard_disk
+    harness.cleanup()
+
+
 def test_pole_timing_trace_is_configurable():
     _parser, args = parse_args(['--trace-pole-timing'])
     assert args.trace_pole_timing is True

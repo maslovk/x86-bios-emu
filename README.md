@@ -300,7 +300,8 @@ python3 main.py --dos --host-dir ./DOS_sources/v1.25/source --host-dir-dos-text 
 python3 main.py --dos --host-dir ./dos-files --host-dir-write --persist --gtk
 python3 main.py --hard-disk dos622-new.hdd --boot-hard-disk \
   --host-mount D=./DOS_sources/TASM --host-mount E=./DOS_sources/VC_source --gtk
-./scripts/build_volkov                 # Build VC.COM and VC.OVL in the emulator
+./scripts/build_volkov                 # Build Volkov Commander's VC.COM loader in the emulator
+# (VC.OVL needs TASMX/16-bit DPMI, i.e. 286 protected mode — see scripts/build_volkov)
 python3 main.py --dos --cpu-backend python --gtk  # Explicit reference CPU
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window
 python3 main.py --create-hard-disk harddisk.img --hard-disk-cylinders 306
@@ -418,6 +419,11 @@ The emulator supports two VGA output paths:
   isn't a TTY so output stays readable in pipes/logs.  With `--interactive`,
   xterm-compatible arrows, navigation keys, F1-F12, Shift+Tab, modified keys,
   Alt shortcuts, Enter, and Backspace are translated to DOS BIOS key events.
+  Scripted (piped) sessions end cleanly once stdin is exhausted: the emulator
+  detects DOS's INT 28h idle calls (or a blocking BIOS key read) with no key
+  queued and exits with stop reason `stdin closed`, so piped command batches
+  such as `scripts/build_volkov` terminate on their own instead of spinning
+  until an external timeout. A real TTY (Ctrl+D) is unaffected.
 - **GTK** (`--gtk` / `-g`) — opens a real `Gtk.DrawingArea` window, paints
   each cell's CGA background + foreground colour, and captures key presses
   as physical set-1 make/break scan codes through the keyboard controller.

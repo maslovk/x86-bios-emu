@@ -45,6 +45,9 @@ def schedule_pit_ticks(now, deadline, interval):
 # elapsed time rather than by loop iterations so timer-driven DOS programs do
 # not get mistaken for a hung emulator.
 STUCK_LOOP_SECONDS = 0.25
+# INT 28h idle calls after stdin EOF before a scripted session is considered
+# complete (COMMAND.COM polls INT 16h AH=01h and calls INT 28h while waiting).
+_STDIN_EOF_IDLE_CALLS = 4096
 
 
 def sanitize_snap_gtk_environment(environ=None, executable=None):
@@ -400,6 +403,8 @@ class Emulator:
                          extra_hard_disks={})
         self.boot_file = boot_file
         self.interactive = interactive or gtk   # --gtk implies interactive
+        self._stdin_eof = False
+        self._int28_idle_calls = 0
         self.enable_hardware = enable_hardware
         # Second floppy drive (B:); populated by _load_floppy_b() below.
         self.disk_b = None
@@ -535,6 +540,25 @@ class Emulator:
         cpu.prefetch_wait_cycles = self.machine_profile.prefetch_wait_cycles
         cpu.step_mode = self.step_mode
         return cpu
+
+    def _stdin_session_complete(self):
+        """True when a scripted (piped) session has nothing left to do.
+
+        The guest is considered parked when either it blocks inside a BIOS
+        read (retry-interrupt state, e.g. INT 16h AH=00h) or it has issued a
+        sustained burst of DOS INT 28h idle calls (COMMAND.COM's CON driver
+        polls INT 16h AH=01h and calls INT 28h between polls), and in both
+        cases no key remains queued in the keyboard controller.
+        """
+        if self.kbd_ctrl:
+            output_pending = bool(self.kbd_ctrl.read_status() & 0x01)
+        else:
+            output_pending = self.kbd.key_pressed()
+        if output_pending:
+            return False
+        if self.cpu._retry_interrupt_state is not None:
+            return True
+        return self._int28_idle_calls >= _STDIN_EOF_IDLE_CALLS
 
     def _media_status(self):
         """Return compact GUI media labels, marking guest-dirty devices."""
@@ -978,6 +1002,12 @@ class Emulator:
         bios_ref = self.bios
 
         def hooked_interrupt(n):
+            # INT 28h is DOS's idle call: it fires while the foreground
+            # process waits for console input that is not yet available.
+            # Once piped stdin is exhausted this marks "the scripted
+            # session is complete".
+            if self._stdin_eof and n == 0x28:
+                self._int28_idle_calls += 1
             # Push flags, CS, IP (standard INT behavior)
             entry_cs, entry_ip = self.cpu.cs, self.cpu.ip
             stub = bios_ref.ivt_stubs.get(n)
@@ -1307,8 +1337,15 @@ class Emulator:
                         key_events = []
                         if select.select([sys.stdin], [], [], 0)[0]:
                             data = _os.read(self._term_fd, 64)
-                            key_events.extend(
-                                terminal_keyboard.feed(data, now))
+                            if data:
+                                key_events.extend(
+                                    terminal_keyboard.feed(data, now))
+                            elif not sys.stdin.isatty():
+                                # Piped input is exhausted (readable but
+                                # zero bytes).  On a real TTY an EOF read
+                                # (Ctrl+D) is transient, so only scripted
+                                # input latches the flag.
+                                self._stdin_eof = True
                         key_events.extend(terminal_keyboard.flush(now))
                         for kind, value in key_events:
                             if kind == ASCII:
@@ -1322,6 +1359,15 @@ class Emulator:
                                 self.kbd.buffer.append((value, 0))
                     except (OSError, ValueError):
                         pass
+                    if self._stdin_eof and self._stdin_session_complete():
+                        # No further input can ever arrive; the guest has
+                        # been idling on console-input waits ever since.
+                        # Ending here takes the normal exit path (media
+                        # persist, summaries) instead of spinning until an
+                        # external timeout.
+                        self.stop_reason = 'stdin closed'
+                        print('[stdin closed]', file=sys.stderr)
+                        break
 
                 # Keyboard controller: inject scan codes → raise IRQ 1
                 self._schedule_keyboard_irq()

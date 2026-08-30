@@ -672,3 +672,45 @@ emulator.
 | MS-DOS 4.00 boot (DOS4/OPERATI3) | 2 | test_dos4_boot.py | ✅ boots to `A>`; DIR/ECHO/external programs (fixed by equipment-word bit 0) |
 | MS-DOS 5.00 boot (DOS5/Disk01 Setup disk) | 2 | test_dos5_boot.py | ✅ boots to Setup welcome; flows through configuration into install (fixed by 0xF9 geometry pin, port 61h toggle, INT 16h blocking) |
 | MS-DOS 6.22 boot (DOS6_22/disk01 Setup disk) | 2 | test_dos6_boot.py | ✅ EXEPACK kernel decompresses; Setup welcome with/without blank HDD (fixed by TEST ModRM reg field, INC/DEC AF, logic AF clear, SHR OF) |
+
+---
+
+## Phase M — 80286 protected mode (milestone 1 complete)
+
+Goal: run 16-bit protected-mode code (ultimately Borland's DPMI host,
+which is what TASMX and later DOS extenders need) on the real-mode
+reference CPU without weakening the real-mode path.
+
+### Milestone 1 — ring-0 flat/small-model PM (complete)
+
+- MSW with `_pm` mirror; GDTR/IDTR/LDTR/TR; `0F 00`/`0F 01` groups
+  (SLDT/STR/LLDT/LTR/VERR/VERW, SGDT/SIDT/LGDT/LIDT/SMSW/LMSW), CLTS,
+  LAR/LSL, ARPL (`cpu.py`).
+- Descriptor caches keyed by selector; `_phys` translates through them
+  when PE is set; `_fetchb/_fetchw` use the CS cache base. Real-mode
+  caches are seeded at PE enable like the physical 286, so unreloaded
+  segments keep working across the switch.
+- Architectural segment loads (MOV Sreg/POP Sreg/LES/LDS/far
+  JMP/CALL/RET/IRET/INT) validate descriptors and set the Accessed bit.
+- INT dispatch through 286 interrupt/trap gates (type 6/7) with CPU
+  error codes; fault-during-fault parks the CPU instead of recursing.
+- Tests: `tests/test_protected_mode.py` (20) including a Unicorn
+  differential of the full mode switch — register- and memory-exact.
+  QEMU/TCG quirk noted: it does not set the A bit on far-jump CS loads.
+
+### Milestone 2 — DPMI prerequisites (next)
+
+- Task segments: LTR/STR with TSS descriptors, task gates, IRET with NT.
+- Call gates for CALL FAR/JMP FAR; privilege stack switches (inner-ring
+  stacks via TSS SS:SP); IOPL checks on CLI/STI/IN/OUT/PUSHF/POPF/IRET.
+- Segment-limit and expand-down checks with #SS/#GP on violation.
+- Then: boot DPMI16BI.OVL under DOS 6.22 in the emulator and validate
+  a TASMX-built program against the same source built with real-mode
+  TASM.
+
+### Ground rules
+
+- Real-mode fidelity first: every fast/slow suite must stay green; PM
+  state must be inert when PE is clear.
+- Unicorn differential for every new PM semantic; the A-bit divergence
+  is the only accepted (documented) difference.

@@ -737,7 +737,17 @@ instruction-emulation divergence against a trusted reference.
 
 ## Limitations
 
-- No protected mode support; no DMA emulation
+- Protected mode: **286 milestone 1 is implemented** — MSW/GDTR/IDTR/LDTR/TR,
+  LGDT/SGDT/LIDT/SIDT/LMSW/SMSW/LLDT/SLDT/LTR/STR/CLTS/VERR/VERW/LAR/LSL/ARPL,
+  descriptor-cache address translation after PE enable (real-mode caches are
+  seeded exactly like the physical 286), architectural Accessed-bit setting,
+  286 interrupt/trap-gate INT dispatch with error codes, and PM IRET —
+  verified register- and memory-exact against Unicorn through a full
+  mode switch (`tests/test_protected_mode.py`).  Not yet: task gates/TSS
+  switching, call gates, privilege-level stack switches, IOPL checks,
+  and segment-limit faults; all interrupt entry assumes ring 0.
+  Clearing PE via LMSW is an emulator extension (hardware needs a reset),
+  which tests use to return to real mode. No DMA emulation
 - Two floppy drives max (A: and B: via `--floppy` / `--floppy-b`) plus one
   legacy C/4/17 hard disk (up to 1024 cylinders) at BIOS drive 80h. FDISK can create a maximum-size
   active primary partition; after relaunch, DOS discovers it as C: and

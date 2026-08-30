@@ -65,6 +65,35 @@ class CPU:
         self._rep_prefix = None
         self._irq_shadow = 0
 
+        # ── 80286 protected-mode state ─────────────────────────────────
+        # MSW: bit 0 PE, 1 MP, 2 EM, 3 TS; high nibble reads as written
+        # (286 reset value 0xFFF0).  ``_pm`` mirrors the PE bit as a plain
+        # bool for the hot address-translation paths.
+        self.msw = 0xFFF0
+        self._pm = False
+        # Descriptor-table registers.  Bases are 24-bit on the 80286 and
+        # are masked into the emulator's 1 MiB physical map on use.
+        self.gdt_base = 0
+        self.gdt_limit = 0
+        self.idt_base = 0
+        self.idt_limit = 0x03FF
+        self.ldtr_selector = 0
+        self.tr_selector = 0
+        # Hidden descriptor caches, keyed by selector value.  A selector
+        # loaded into any segment register (in protected mode) is
+        # translated here once; equal selectors therefore share one
+        # translation, which matches identical descriptor-cache contents
+        # on hardware.  Entries are seeded with real-mode bases when PE is
+        # enabled so an un-reloaded segment keeps working, exactly like
+        # the 286's physical caches.
+        self._desc_cache = {}
+        # Fast linear base for instruction fetch (CS descriptor cache).
+        self._code_base = (self.cs << 4) & 0xFFFFF
+        # Fault-delivery latch: a fault raised while another fault is in
+        # flight parks the CPU (emulating the hardware's double/triple
+        # fault escalation without a reset path).
+        self._exception_active = False
+
     # ── 8-bit register properties ──────────────────────────────────
     @property
     def al(self): return self.ax & 0xFF
@@ -193,6 +222,18 @@ class CPU:
     # ── Memory access ──────────────────────────────────────────────
 
     def _phys(self, seg, off):
+        """Linear (physical, 1 MiB map) address for segment:offset.
+
+        Real mode: base = selector * 16.  Protected mode: base comes from
+        the hidden descriptor cache populated at segment-register load;
+        a segment with no translation (null selector loaded into DS/ES
+        and then used) faults with ``#GP``.
+        """
+        if self._pm:
+            desc = self._desc_cache.get(seg)
+            if desc is None:
+                self._raise_gp(0)
+            return (desc[0] + (off & 0xFFFF)) & 0xFFFFF
         return ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
 
     def _readb(self, a):
@@ -257,20 +298,22 @@ class CPU:
 
     def _fetchb(self):
         self.cycle_count += self.prefetch_wait_cycles
+        base = self._code_base if self._pm else (self.cs << 4)
         if self._ram is not None:
-            v = self._ram[((self.cs << 4) + self.ip) & 0xFFFFF]
+            v = self._ram[(base + self.ip) & 0xFFFFF]
         else:
-            v = self._readb(self._phys(self.cs, self.ip))
+            v = self._readb((base + self.ip) & 0xFFFFF)
         self.ip = (self.ip + 1) & 0xFFFF
         return v
 
     def _fetchw(self):
         self.cycle_count += 2 * self.prefetch_wait_cycles
+        base = self._code_base if self._pm else (self.cs << 4)
         if self._ram is not None:
-            a = ((self.cs << 4) + self.ip) & 0xFFFFF
+            a = (base + self.ip) & 0xFFFFF
             v = self._ram[a] | (self._ram[(a + 1) & 0xFFFFF] << 8)
         else:
-            v = self._readw(self._phys(self.cs, self.ip))
+            v = self._readw((base + self.ip) & 0xFFFFF)
         self.ip = (self.ip + 2) & 0xFFFF
         return v
 
@@ -717,10 +760,190 @@ class CPU:
 
     # ── Segment setters ────────────────────────────────────────────
 
-    def _set_es(self, v): self.es = v
-    def _set_cs(self, v): self.cs = v
-    def _set_ss(self, v): self.ss = v
-    def _set_ds(self, v): self.ds = v
+    def _set_es(self, v): self._load_sreg('es', v)
+    def _set_cs(self, v): self._load_sreg('cs', v)
+    def _set_ss(self, v):
+        self._load_sreg('ss', v)
+    def _set_ds(self, v): self._load_sreg('ds', v)
+
+    # ── 80286 protected mode: descriptors ───────────────────────────
+
+    # Access-byte type bits (S=1 segments): bit 3 = code, bit 2 =
+    # conforming (code) / expand-down (data), bit 1 = readable (code) /
+    # writable (data), bit 0 = accessed.  The classic ring-0 descriptors
+    # are 0x9A (execute/read code) and 0x92 (read/write data).
+    AR_CODE = 0x08
+    AR_RDWR = 0x02
+
+    def _load_sreg(self, name, value):
+        """Architectural segment-register load.
+
+        In real mode this is a plain assignment (and keeps the CS fetch
+        base in sync).  In protected mode the selector is translated
+        through the GDT/LDT into a descriptor-cache entry; ``#GP`` faults
+        on invalid selectors or descriptor types.
+        """
+        value &= 0xFFFF
+        if not self._pm:
+            setattr(self, name, value)
+            if name == 'cs':
+                self._code_base = (value << 4) & 0xFFFFF
+            return
+        desc = self._translate_selector(value)
+        ar = desc[2]
+        is_code = (ar & 0x18) == 0x18
+        if name == 'cs':
+            if not is_code:
+                self._raise_gp(value & 0xFFFC)
+        elif name == 'ss':
+            # SS requires a writable data segment.
+            if (ar & 0x18) != 0x10 or not (ar & self.AR_RDWR):
+                self._raise_gp(value & 0xFFFC)
+        else:
+            # DS/ES accept any data segment or readable code; a null
+            # selector is loadable and faults only on use.
+            if value & 0xFFFC and is_code and not (ar & self.AR_RDWR):
+                self._raise_gp(value & 0xFFFC)
+        # Architectural segment loads set the Accessed bit (type bit 0)
+        # in the descriptor itself, as the 286 does.
+        if not (desc[2] & 0x01):
+            desc = (desc[0], desc[1], desc[2] | 0x01, desc[3])
+            self._writeb(desc[3] + 5, desc[2])
+        setattr(self, name, value)
+        self._desc_cache[value] = desc
+        if name == 'cs':
+            self._code_base = desc[0] & 0xFFFFF
+
+    def _translate_selector(self, sel):
+        """Return (base, limit, access, descriptor_address) for a selector.
+
+        ``#GP`` for out-of-table indices or bad descriptor types and
+        ``#NP`` for a not-present segment.  The 286 descriptor layout is
+        limit:16 base:24 with a 386-style extension byte left at zero.
+        The descriptor's linear address is returned so architectural
+        loads can set the Accessed bit in the table itself.
+        """
+        index = sel >> 3
+        if sel & 0x04:
+            table_base, table_limit = self._ldt_base(), self._ldt_limit()
+        else:
+            table_base, table_limit = self.gdt_base, self.gdt_limit
+        addr = table_base + index * 8
+        if index == 0 or addr + 7 > table_base + table_limit:
+            self._raise_gp(sel & 0xFFFC)
+        raw = bytes(self._readb((addr + i) & 0xFFFFF) for i in range(8))
+        limit = raw[0] | (raw[1] << 8)
+        base = raw[2] | (raw[3] << 8) | (raw[4] << 16)
+        access = raw[5]
+        if not (access & 0x80):
+            self._raise_np(sel & 0xFFFC)
+        return (base & 0xFFFFF, limit, access, addr & 0xFFFFF)
+
+    def _ldt_base(self):
+        desc = self._desc_cache.get(self.ldtr_selector)
+        return desc[0] if desc else self.gdt_base
+
+    def _ldt_limit(self):
+        desc = self._desc_cache.get(self.ldtr_selector)
+        return desc[1] if desc else 0
+
+    def _seed_real_mode_caches(self):
+        """Seed descriptor caches for the current selectors on PE enable.
+
+        The physical 286 keeps its descriptor caches across the switch, so
+        segments not yet reloaded still address real-mode style (base =
+        selector * 16, limit 64 KiB).  Mirroring that keeps the transition
+        seamless until the guest installs proper selectors.
+        """
+        for name in ('cs', 'ds', 'es', 'ss'):
+            sel = getattr(self, name)
+            self._desc_cache[sel] = ((sel << 4) & 0xFFFFF, 0xFFFF,
+                                     0x93 if name != 'cs' else 0x9B)
+
+    def _set_msw(self, value):
+        """Write MSW (LMSW / privileged loads).
+
+        The 286 cannot clear PE without a reset; the emulator permits it
+        (flushing the descriptor caches) so tests can return to real mode.
+        """
+        value &= 0xFFFF
+        was_pm = self._pm
+        self.msw = (self.msw & 0xFFF0) | (value & 0x000F)
+        self._pm = bool(self.msw & 0x0001)
+        if self._pm and not was_pm:
+            self._seed_real_mode_caches()
+            # The CS cache now holds the real-mode base; keep the fetch
+            # fast-path in sync (external code may have written CS
+            # directly while in real mode).
+            self._code_base = (self.cs << 4) & 0xFFFFF
+        elif not self._pm and was_pm:
+            self._desc_cache.clear()
+            self._code_base = (self.cs << 4) & 0xFFFFF
+
+    def _raise_gp(self, error_code=0):
+        """Raise ``#GP`` (INT 13) with the 286 error code."""
+        self._do_exception(13, error_code)
+
+    def _raise_np(self, error_code=0):
+        self._do_exception(11, error_code)
+
+    def _raise_ss(self, error_code=0):
+        self._do_exception(12, error_code)
+
+    def _do_exception(self, n, error_code):
+        """CPU exception delivery: like an interrupt plus error code.
+
+        The error code is pushed above IP/CS/FLAGS, so the handler pops it
+        before IRET.  A fault raised while another fault is being
+        delivered would double- then triple-fault on hardware; the
+        emulator parks deterministically instead of recursing.  With no
+        Python-side dispatcher installed (bare CPU in unit tests), the
+        CPU halts like ``_raise_divide_error``.
+        """
+        if self._exception_active:
+            self.halted = True
+            return
+        self._exception_active = True
+        try:
+            self._do_interrupt(n, error_code=error_code)
+        finally:
+            self._exception_active = False
+
+    def _peek_selector(self, sel):
+        """Non-faulting ``_translate_selector`` for VERR/VERW/LAR/LSL.
+
+        Returns None for any invalid index, table bound, type, or
+        not-present condition instead of raising.
+        """
+        index = sel >> 3
+        if index == 0:
+            return None
+        if sel & 0x04:
+            table_base, table_limit = self._ldt_base(), self._ldt_limit()
+        else:
+            table_base, table_limit = self.gdt_base, self.gdt_limit
+        addr = table_base + index * 8
+        if addr + 7 > table_base + table_limit:
+            return None
+        raw = bytes(self._readb((addr + i) & 0xFFFFF) for i in range(8))
+        if not (raw[5] & 0x80):
+            return None
+        base = raw[2] | (raw[3] << 8) | (raw[4] << 16)
+        return (base & 0xFFFFF, raw[0] | (raw[1] << 8), raw[5])
+
+    def _verify_selector(self, sel, write=False):
+        """VERR/VERW: True when the selector addresses a usable segment."""
+        desc = self._peek_selector(sel)
+        if desc is None or not (desc[2] & 0x10):
+            return False                      # system or invalid
+        ar = desc[2]
+        if ar & self.AR_CODE:                 # code
+            if write:
+                return False
+            return bool(ar & self.AR_RDWR)
+        if write:
+            return bool(ar & self.AR_RDWR)
+        return True
 
     def _arm_irq_shadow(self):
         """Suppress maskable IRQ delivery until after the following instruction."""
@@ -1088,15 +1311,15 @@ class CPU:
 
         # PUSH/POP segment registers
         if opc == 0x06: self._push(self.es); return
-        if opc == 0x07: self.es = self._pop(); return
+        if opc == 0x07: self._set_es(self._pop()); return
         if opc == 0x0E: self._push(self.cs); return
         if opc == 0x16: self._push(self.ss); return
         if opc == 0x17:
-            self.ss = self._pop()
+            self._set_ss(self._pop())
             self._arm_irq_shadow()
             return
         if opc == 0x1E: self._push(self.ds); return
-        if opc == 0x1F: self.ds = self._pop(); return
+        if opc == 0x1F: self._set_ds(self._pop()); return
 
         # Segment prefixes (handled in execute() loop now)
 
@@ -1188,6 +1411,29 @@ class CPU:
         # 58-5F POP r16
         if 0x58 <= opc <= 0x5F:
             self._set_reg16(opc - 0x58, self._pop()); return
+
+        # 63 ARPL r/m16, r16 — adjust requested privilege level
+        if opc == 0x63:
+            mod, reg, rm = self._decode_modrm()
+            if mod == 3:
+                dest = self._get_reg16(rm)
+            else:
+                # Read-modify-write: decode the effective address exactly
+                # once; a second _ea call would consume the displacement
+                # again and skip into the next instruction.
+                addr = self._ea(mod, rm)
+                dest = self._readw(addr)
+            rpl = self._get_reg16(reg) & 0x0003
+            if (dest & 0x0003) < rpl:
+                adjusted = (dest & 0xFFFC) | rpl
+                if mod == 3:
+                    self._set_reg16(rm, adjusted)
+                else:
+                    self._writew(addr, adjusted)
+                self.zf = True
+            else:
+                self.zf = False
+            return
 
         # 60 PUSHA
         if opc == 0x60:
@@ -1453,7 +1699,7 @@ class CPU:
             seg = self._fetchw()
             self._push(self.cs)
             self._push(self.ip)
-            self.cs = seg
+            self._set_cs(seg)
             self.ip = off
             return
 
@@ -1718,11 +1964,11 @@ class CPU:
             if opc == 0xC4:
                 # LES AX, m32
                 self._set_reg16(reg, low)
-                self.es = high
+                self._set_es(high)
             else:
                 # LDS r16, m32
                 self._set_reg16(reg, low)
-                self.ds = high
+                self._set_ds(high)
             return
 
         # C6 MOV r/m8, imm8
@@ -1770,7 +2016,7 @@ class CPU:
         # CB RETF
         if opc == 0xCB:
             self.ip = self._pop()
-            self.cs = self._pop()
+            self._set_cs(self._pop())
             return
 
         # CA RETF imm16
@@ -1780,7 +2026,7 @@ class CPU:
         if opc == 0xCA:
             extra = self._fetchw()
             self.ip = self._pop()
-            self.cs = self._pop()
+            self._set_cs(self._pop())
             self.sp = (self.sp + extra) & 0xFFFF
             return
 
@@ -1803,8 +2049,10 @@ class CPU:
 
         # CF IRET
         if opc == 0xCF:
+            # 286 IRET with NT set performs a task return (later
+            # milestone); the plain path pops IP, CS, FLAGS.
             self.ip = self._pop()
-            self.cs = self._pop()
+            self._set_cs(self._pop())
             self.flags = self._pop()
             return
 
@@ -1910,7 +2158,7 @@ class CPU:
             off = self._fetchw()
             seg = self._fetchw()
             self.ip = off
-            self.cs = seg
+            self._set_cs(seg)
             return
 
         # EB JMP short
@@ -1987,9 +2235,100 @@ class CPU:
                 val = 1 if cond_map[idx] else 0
                 self._ea_write_byte(mod, rm, val)
                 return
-            elif opc2 == 0x01:
+            elif opc2 == 0x00:
+                # 286 segment/control group: SLDT/STR/LLDT/LTR/VERR/VERW
                 mod, reg, rm = self._decode_modrm()
-                self._skip_disp(mod, rm)
+                if reg in (0, 1):          # SLDT / STR
+                    self._ea_write_word(
+                        mod, rm,
+                        self.ldtr_selector if reg == 0 else self.tr_selector)
+                elif reg == 2:             # LLDT r/m16
+                    sel = self._ea_word(mod, rm)
+                    if sel & 0xFFFC:
+                        desc = self._translate_selector(sel)
+                        if (desc[2] & 0x1F) != 0x02:
+                            self._raise_gp(sel & 0xFFFC)  # not an LDT
+                        self._desc_cache[sel] = desc
+                    self.ldtr_selector = sel
+                elif reg == 3:             # LTR r/m16
+                    sel = self._ea_word(mod, rm)
+                    desc = self._translate_selector(sel)
+                    if (desc[2] & 0x1D) != 0x01:
+                        self._raise_gp(sel & 0xFFFC)  # not a TSS
+                    self._desc_cache[sel] = desc
+                    self.tr_selector = sel
+                elif reg in (4, 5):         # VERR / VERW r/m16
+                    sel = self._ea_word(mod, rm)
+                    self.zf = self._verify_selector(sel, write=(reg == 5))
+                else:
+                    if self.debug:
+                        print(f"[UNKNOWN 0F 00 /{reg}] at "
+                              f"{self.cs:04X}:{self.ip:04X}")
+                return
+            elif opc2 == 0x01:
+                # 286 table/MSW group: SGDT/SIDT/LGDT/LIDT/SMSW/LMSW
+                mod, reg, rm = self._decode_modrm()
+                if reg in (0, 1):          # SGDT / SIDT m16&24
+                    if mod == 3:
+                        self._raise_gp(0)
+                    base, limit = ((self.gdt_base, self.gdt_limit)
+                                   if reg == 0
+                                   else (self.idt_base, self.idt_limit))
+                    addr = self._ea(mod, rm)
+                    self._writew(addr, limit)
+                    self._writeb((addr + 2) & 0xFFFFF, base & 0xFF)
+                    self._writeb((addr + 3) & 0xFFFFF, (base >> 8) & 0xFF)
+                    self._writeb((addr + 4) & 0xFFFFF, (base >> 16) & 0xFF)
+                elif reg == 2:             # LGDT m16&24
+                    if mod == 3:
+                        self._raise_gp(0)
+                    addr = self._ea(mod, rm)
+                    self.gdt_limit = self._readw(addr)
+                    self.gdt_base = self._readb((addr + 2) & 0xFFFFF) \
+                        | (self._readb((addr + 3) & 0xFFFFF) << 8) \
+                        | (self._readb((addr + 4) & 0xFFFFF) << 16)
+                elif reg == 3:             # LIDT m16&24
+                    if mod == 3:
+                        self._raise_gp(0)
+                    addr = self._ea(mod, rm)
+                    self.idt_limit = self._readw(addr)
+                    self.idt_base = self._readb((addr + 2) & 0xFFFFF) \
+                        | (self._readb((addr + 3) & 0xFFFFF) << 8) \
+                        | (self._readb((addr + 4) & 0xFFFFF) << 16)
+                elif reg == 4:             # SMSW r/m16
+                    self._ea_write_word(mod, rm, self.msw)
+                elif reg == 6:             # LMSW r/m16
+                    self._set_msw(self._ea_word(mod, rm))
+                else:
+                    if self.debug:
+                        print(f"[UNKNOWN 0F 01 /{reg}] at "
+                              f"{self.cs:04X}:{self.ip:04X}")
+                return
+            elif opc2 == 0x02:
+                # LAR r16, r/m16 — load access rights
+                mod, reg, rm = self._decode_modrm()
+                sel = self._ea_word(mod, rm)
+                desc = self._peek_selector(sel)
+                if desc is not None and (desc[2] & 0x10):
+                    self._set_reg16(reg, desc[2] & 0xFF)
+                    self.zf = True
+                else:
+                    self.zf = False
+                return
+            elif opc2 == 0x03:
+                # LSL r16, r/m16 — load segment limit
+                mod, reg, rm = self._decode_modrm()
+                sel = self._ea_word(mod, rm)
+                desc = self._peek_selector(sel)
+                if desc is not None and (desc[2] & 0x10):
+                    self._set_reg16(reg, desc[1])
+                    self.zf = True
+                else:
+                    self.zf = False
+                return
+            elif opc2 == 0x06:
+                # CLTS — clear the task-switched bit
+                self.msw &= ~0x0008
                 return
             elif opc2 in (0x05, 0x07, 0x08, 0x30, 0x31, 0x32):
                 return
@@ -2258,7 +2597,7 @@ class CPU:
                     seg = self._readw((addr + 2) & 0xFFFFF)
                 self._push(self.cs)
                 self._push(self.ip)
-                self.cs = seg
+                self._set_cs(seg)
                 self.ip = off
             elif reg == 4:  # JMP near
                 self.ip = target
@@ -2270,7 +2609,7 @@ class CPU:
                     off = self._readw(addr)
                     seg = self._readw((addr + 2) & 0xFFFFF)
                 self.ip = off
-                self.cs = seg
+                self._set_cs(seg)
             elif reg == 6:  # PUSH
                 if mod == 3:
                     self._push(target)
@@ -2283,16 +2622,55 @@ class CPU:
             print(f"[UNKNOWN OPCODE] {opc:#04X} at CS:IP={self.cs:04X}:{self.ip-1:04X}")
         self.halted = True
 
-    def _do_interrupt(self, n):
-        """Handle software interrupt."""
+    def _do_interrupt(self, n, error_code=None):
+        """Handle a software interrupt / exception entry.
+
+        Real mode reads the IVT directly.  Protected mode walks the IDT:
+        286 interrupt gates (type 6) clear IF, trap gates (type 7) do not;
+        both clear TF, and a CPU-supplied ``error_code`` is pushed above
+        IP/CS/FLAGS for the handler to pop before IRET.  Task gates and
+        privilege stack switches are later milestones; this path assumes
+        the interrupt is serviced at the current privilege level.
+        """
+        if not self._pm:
+            self._push(self.flags)
+            self.tf = False
+            self.if_flag = False
+            self._push(self.cs)
+            self._push(self.ip)
+            vec = n * 4
+            self.ip = self._readw(vec)
+            self.cs = self._readw(vec + 2)
+            return
+        gate_addr = self.idt_base + n * 8
+        if n * 8 + 7 > self.idt_limit:
+            self._raise_gp((n << 3) | 2)
+        gate = bytes(self._readb((gate_addr + i) & 0xFFFFF)
+                     for i in range(8))
+        access = gate[5]
+        gate_type = access & 0x0F
+        if not (access & 0x80) or gate_type not in (0x06, 0x07):
+            # Absent/invalid gate.  Hardware would double- then triple-fault
+            # into a reset; without task-gate support the deterministic
+            # emulator answer is to park the CPU (matching the bare-CPU
+            # divide-error behaviour) rather than recurse through #NP.
+            if self.debug:
+                print(f"[PM] no usable IDT gate for INT {n:02X}; halting",
+                      file=sys.stderr)
+            self.halted = True
+            return
+        sel = gate[2] | (gate[3] << 8)
+        offset = gate[0] | (gate[1] << 8)
         self._push(self.flags)
         self.tf = False
-        self.if_flag = False
+        if gate_type == 0x06:
+            self.if_flag = False
         self._push(self.cs)
         self._push(self.ip)
-        vec = n * 4
-        self.ip = self._readw(vec)
-        self.cs = self._readw(vec + 2)
+        if error_code is not None:
+            self._push(error_code)
+        self._load_sreg('cs', sel)
+        self.ip = offset
 
     def _do_shift(self, opc):
         """D0-D3 shift/rotate instructions."""

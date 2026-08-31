@@ -1001,7 +1001,7 @@ class Emulator:
         """Route CPU software interrupts to BIOS handlers directly."""
         bios_ref = self.bios
 
-        def hooked_interrupt(n):
+        def hooked_interrupt(n, error_code=None, software=False):
             # INT 28h is DOS's idle call: it fires while the foreground
             # process waits for console input that is not yet available.
             # Once piped stdin is exhausted this marks "the scripted

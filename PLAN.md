@@ -698,12 +698,34 @@ reference CPU without weakening the real-mode path.
   differential of the full mode switch — register- and memory-exact.
   QEMU/TCG quirk noted: it does not set the A bit on far-jump CS loads.
 
-### Milestone 2 — DPMI prerequisites (next)
+### Milestone 2 — privilege model (complete)
 
-- Task segments: LTR/STR with TSS descriptors, task gates, IRET with NT.
-- Call gates for CALL FAR/JMP FAR; privilege stack switches (inner-ring
-  stacks via TSS SS:SP); IOPL checks on CLI/STI/IN/OUT/PUSHF/POPF/IRET.
-- Segment-limit and expand-down checks with #SS/#GP on violation.
+- CPL tracking (non-conforming CS loads take the selector's ring;
+  conforming code inherits the caller's CPL).
+- IOPL enforcement: CLI/STI/IN/OUT are #GP when CPL is outer than IOPL;
+  PUSHF pushes IOPL as zeros from outer rings; POPF/IRET cannot change
+  IOPL outside ring 0 nor IF when CPL is outer than IOPL; HLT is
+  privileged.
+- Segment-limit faults: byte-level limit checks in `_phys` with
+  expand-down data support, #SS (with the SS selector) for stack
+  push/pop violations.  Word accesses straddling the limit remain a
+  documented gap.
+- Ring transitions: 286 call gates (DPL rules, target canonicalisation,
+  parameter copying, TSS SSn:SPn stack switch), inner-ring interrupt
+  entry with saved outer SS:SP, and outer-ring RETF/IRET returns.
+  Direct far JMP/CALL require DPL == CPL (a ring can never transfer
+  outward directly); SS loads require DPL == RPL == CPL.
+- Tests: `tests/test_protected_mode2.py` (19) — byte-exact stack-frame
+  assertions for gate/INT transitions, plus a Unicorn differential of
+  PM execution under descriptor addressing.  Unicorn-16 cannot decode
+  LTR, dispatch IDT gates, or use 16-bit call gates consistently, so
+  gates and privilege transitions are unit-tested rather than
+  differentially compared.
+
+### Milestone 3 — DPMI prerequisites (next)
+
+- Task segments: task gates, IRET with NT, TSS register save/restore.
+- Segment-limit word-boundary checks; 386-style granularity if needed.
 - Then: boot DPMI16BI.OVL under DOS 6.22 in the emulator and validate
   a TASMX-built program against the same source built with real-mode
   TASM.

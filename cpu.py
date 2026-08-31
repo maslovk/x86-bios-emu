@@ -93,6 +93,10 @@ class CPU:
         # flight parks the CPU (emulating the hardware's double/triple
         # fault escalation without a reset path).
         self._exception_active = False
+        # Current privilege level: in real mode always 0; in protected
+        # mode it is the RPL of the loaded CS selector (conforming code
+        # segments inherit the caller's CPL).
+        self._cpl = 0
 
     # ── 8-bit register properties ──────────────────────────────────
     @property
@@ -227,14 +231,37 @@ class CPU:
         Real mode: base = selector * 16.  Protected mode: base comes from
         the hidden descriptor cache populated at segment-register load;
         a segment with no translation (null selector loaded into DS/ES
-        and then used) faults with ``#GP``.
+        and then used) faults with ``#GP``.  Byte-level limit checks
+        raise ``#GP(selector)`` for data/code segments and ``#SS`` for
+        stack operations (checked in ``_push``/``_pop``); word accesses
+        that straddle the limit are a documented milestone-2 gap.
         """
         if self._pm:
             desc = self._desc_cache.get(seg)
             if desc is None:
                 self._raise_gp(0)
-            return (desc[0] + (off & 0xFFFF)) & 0xFFFFF
+            off &= 0xFFFF
+            ar = desc[2]
+            if (ar & 0x18) == 0x10 and (ar & 0x04):
+                # Expand-down data: valid offsets are limit+1 .. 0xFFFF.
+                if off <= desc[1]:
+                    self._raise_gp(seg & 0xFFFC)
+            elif off > desc[1]:
+                self._raise_gp(seg & 0xFFFC)
+            return (desc[0] + off) & 0xFFFFF
         return ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
+
+    def _stack_check(self, off):
+        """``#SS(selector)`` when SP-relative access exceeds the SS limit."""
+        desc = self._desc_cache.get(self.ss)
+        if desc is None:
+            self._raise_ss(self.ss & 0xFFFC)
+        ar = desc[2]
+        if (ar & 0x18) == 0x10 and (ar & 0x04):
+            if off <= desc[1]:
+                self._raise_ss(self.ss & 0xFFFC)
+        elif off > desc[1]:
+            self._raise_ss(self.ss & 0xFFFC)
 
     def _readb(self, a):
         address = a & 0xFFFFF
@@ -404,10 +431,17 @@ class CPU:
     # ── Stack ──────────────────────────────────────────────────────
 
     def _push(self, val):
-        self.sp = (self.sp - 2) & 0xFFFF
+        new_sp = (self.sp - 2) & 0xFFFF
+        if self._pm:
+            self._stack_check(new_sp)
+            self._stack_check((new_sp + 1) & 0xFFFF)
+        self.sp = new_sp
         self._writew(self._phys(self.ss, self.sp), val & 0xFFFF)
 
     def _pop(self):
+        if self._pm:
+            self._stack_check(self.sp)
+            self._stack_check((self.sp + 1) & 0xFFFF)
         val = self._readw(self._phys(self.ss, self.sp))
         self.sp = (self.sp + 2) & 0xFFFF
         return val
@@ -796,13 +830,21 @@ class CPU:
             if not is_code:
                 self._raise_gp(value & 0xFFFC)
         elif name == 'ss':
-            # SS requires a writable data segment.
+            # SS is the strict one: writable data with DPL == CPL and
+            # selector RPL == CPL (a mismatch is #GP, not merely outer).
             if (ar & 0x18) != 0x10 or not (ar & self.AR_RDWR):
+                self._raise_gp(value & 0xFFFC)
+            if self._pm and (((ar >> 5) & 3) != self._cpl
+                             or (value & 3) != self._cpl):
                 self._raise_gp(value & 0xFFFC)
         else:
             # DS/ES accept any data segment or readable code; a null
             # selector is loadable and faults only on use.
             if value & 0xFFFC and is_code and not (ar & self.AR_RDWR):
+                self._raise_gp(value & 0xFFFC)
+            if (self._pm and value & 0xFFFC
+                    and not is_code
+                    and ((ar >> 5) & 3) < max(self._cpl, value & 3)):
                 self._raise_gp(value & 0xFFFC)
         # Architectural segment loads set the Accessed bit (type bit 0)
         # in the descriptor itself, as the 286 does.
@@ -810,9 +852,17 @@ class CPU:
             desc = (desc[0], desc[1], desc[2] | 0x01, desc[3])
             self._writeb(desc[3] + 5, desc[2])
         setattr(self, name, value)
+        # Architectural segment loads set the Accessed bit (type bit 0)
+        # in the descriptor itself, as the 286 does.
+        if not (desc[2] & 0x01):
+            desc = (desc[0], desc[1], desc[2] | 0x01, desc[3])
+            self._writeb(desc[3] + 5, desc[2])
         self._desc_cache[value] = desc
         if name == 'cs':
             self._code_base = desc[0] & 0xFFFFF
+            if not ((desc[2] & 0x18) == 0x18 and (desc[2] & 0x04)):
+                # Non-conforming code: CPL follows the selector's RPL.
+                self._cpl = value & 0x0003
 
     def _translate_selector(self, sel):
         """Return (base, limit, access, descriptor_address) for a selector.
@@ -859,6 +909,159 @@ class CPU:
             sel = getattr(self, name)
             self._desc_cache[sel] = ((sel << 4) & 0xFFFFF, 0xFFFF,
                                      0x93 if name != 'cs' else 0x9B)
+
+    def _tss_word(self, offset):
+        """Read a word from the current TSS (286 layout)."""
+        desc = self._desc_cache.get(self.tr_selector)
+        if desc is None:
+            self._raise_gp(self.tr_selector & 0xFFFC)
+        return self._readw((desc[0] + offset) & 0xFFFFF)
+
+    def _ring_stack_from_tss(self, ring):
+        """Read the ring's SS:SP from the TSS (286: SP0@2 SS0@4, ...)."""
+        return (self._tss_word(4 + 4 * ring),   # SS
+                self._tss_word(2 + 4 * ring))   # SP
+
+    def _enter_ring(self, ring, new_cs):
+        """Switch privilege: load CS first, then the TSS ring stack.
+
+        The CS load drops CPL to the target ring so the TSS stack
+        selector passes its DPL check at the new privilege level — the
+        order hardware uses, avoiding the outer-ring SS DPL fault.
+        """
+        new_ss, new_sp = self._ring_stack_from_tss(ring)
+        self._load_sreg('cs', new_cs)
+        self._set_ss(new_ss)
+        self.sp = new_sp
+
+    def _far_transfer(self, sel, off, is_call):
+        """Far JMP/CALL through a selector, honouring 286 call gates.
+
+        A direct code selector transfers as in milestone 1 (with the
+        standard DPL checks).  A call-gate descriptor (system type 4)
+        transfers to its target selector/offset; when the target is more
+        privileged, the stack switches to the ring's TSS stack, the
+        caller's SS:SP is pushed (after the parameter words for CALL),
+        then the return address.
+        """
+        if not self._pm:
+            if is_call:
+                self._push(self.cs)
+                self._push(self.ip)
+            self._set_cs(sel)
+            self.ip = off
+            return
+        index = sel >> 3
+        if index == 0:
+            self._raise_gp(0)
+        table_base = (self._ldt_base() if sel & 0x04 else self.gdt_base)
+        table_limit = (self._ldt_limit() if sel & 0x04 else self.gdt_limit)
+        gate_addr = table_base + index * 8
+        if gate_addr + 7 > table_base + table_limit:
+            self._raise_gp(sel & 0xFFFC)
+        gate = bytes(self._readb((gate_addr + i) & 0xFFFFF)
+                     for i in range(8))
+        access = gate[5]
+        if (access & 0x1F) == 0x04:            # 286 call gate
+            if not (access & 0x80):
+                self._raise_np(sel & 0xFFFC)
+            if ((access >> 5) & 3) < max(self._cpl, sel & 3):
+                self._raise_gp(sel & 0xFFFC)   # gate DPL too inner
+            target_sel = gate[2] | (gate[3] << 8)
+            target_off = gate[0] | (gate[1] << 8)
+            param_words = gate[4] & 0x1F
+            desc = self._translate_selector(target_sel)
+            if not ((desc[2] & 0x18) == 0x18):
+                self._raise_gp(target_sel & 0xFFFC)  # not code
+            target_dpl = (desc[2] >> 5) & 3
+            conforming = ((desc[2] & 0x1C) == 0x1C)
+            if not conforming and target_sel & 3 and (target_sel & 3) != target_dpl:
+                self._raise_gp(target_sel & 0xFFFC)
+            gate_dpl = (access >> 5) & 3
+            if conforming:
+                pass                          # any CPL may enter
+            elif is_call:
+                # CALL through a gate may stay or go inner, but never
+                # through a gate that is less privileged than the target.
+                if target_dpl > gate_dpl:
+                    self._raise_gp(target_sel & 0xFFFC)
+            else:
+                # JMP through a gate targets the gate's own ring (or a
+                # conforming segment handled above).
+                if target_dpl != gate_dpl:
+                    self._raise_gp(target_sel & 0xFFFC)
+            if not conforming:
+                # Canonicalise the target selector: the CPU forces CS RPL
+                # to the target ring, so CPL lands on the target DPL.
+                target_sel = (target_sel & 0xFFFC) | target_dpl
+            if is_call:
+                old_cs, old_ip = self.cs, self.ip
+                if not conforming and target_dpl < self._cpl:
+                    # Inner-ring call: privilege change first, then the
+                    # TSS stack, then parameters and the return frame.
+                    saved_ss, saved_sp = self.ss, self.sp
+                    self._enter_ring(target_dpl, target_sel)
+                    for i in range(param_words - 1, -1, -1):
+                        word = self._readw(self._phys(saved_ss,
+                                                      (saved_sp + 2 * i)
+                                                      & 0xFFFF))
+                        self._push(word)
+                    self._push(saved_ss)
+                    self._push(saved_sp)
+                else:
+                    self._load_sreg('cs', target_sel)
+                self._push(old_cs)
+                self._push(old_ip)
+            else:
+                self._load_sreg('cs', target_sel)
+            self.ip = target_off
+            return
+        # Plain code-descriptor transfer.
+        desc = self._translate_selector(sel)
+        if not ((desc[2] & 0x18) == 0x18):
+            self._raise_gp(sel & 0xFFFC)
+        dpl = (desc[2] >> 5) & 3
+        conforming = ((desc[2] & 0x1C) == 0x1C)
+        if not conforming and dpl != self._cpl:
+            # A direct far transfer can never change rings; use a gate
+            # to go inner or RETF/IRET to return outer.
+            self._raise_gp(sel & 0xFFFC)
+        if conforming and dpl > self._cpl:
+            self._raise_gp(sel & 0xFFFC)
+        if is_call:
+            self._push(self.cs)
+            self._push(self.ip)
+        self._load_sreg('cs', sel)
+        self.ip = off
+
+    def _iopl(self):
+        """The IOPL field of the flags word."""
+        return (self.flags >> 12) & 3
+
+    def _check_io_privilege(self):
+        """``#GP(0)`` when I/O-sensitive instructions are not permitted.
+
+        On the 80286 there is no I/O permission bitmap: CPL must be
+        numerically no higher (outer) than IOPL.
+        """
+        if self._pm and self._cpl > self._iopl():
+            self._raise_gp(0)
+
+    def _pop_flags(self, value):
+        """POPF/IRET flag loading with 286 privilege gating.
+
+        Only ring 0 may change IOPL; IF may be changed when CPL is no
+        higher (outer) than IOPL.  Other flag bits load unconditionally.
+        """
+        value &= 0xFFFF
+        if not self._pm or self._cpl == 0:
+            self.flags = value
+            return
+        old = self.flags
+        if self._cpl > self._iopl():
+            value = (value & ~0x0200) | (old & 0x0200)   # keep IF
+        value = (value & ~0x3000) | (old & 0x3000)       # keep IOPL
+        self.flags = value
 
     def _set_msw(self, value):
         """Write MSW (LMSW / privileged loads).
@@ -955,6 +1158,7 @@ class CPU:
     def _fast_vga_mode1_movs(self, width, count):
         """Accelerate forward REP MOVS blits wholly inside planar VRAM."""
         if (not self._rep_prefix or self.df or count <= 0
+                or self.io is None
                 or not getattr(self.io.video, 'graphics_mode', False)):
             return False
         source = self._phys(self._default_data_seg(), self.si)
@@ -1697,17 +1901,19 @@ class CPU:
         if opc == 0x9A:
             off = self._fetchw()
             seg = self._fetchw()
-            self._push(self.cs)
-            self._push(self.ip)
-            self._set_cs(seg)
-            self.ip = off
+            self._far_transfer(seg, off, is_call=True)
             return
 
         # 9C PUSHF
-        if opc == 0x9C: self._push(self.flags); return
+        if opc == 0x9C:
+            word = self.flags
+            if self._pm and self._cpl > self._iopl():
+                word &= ~0x3000        # IOPL reads as 00 from outer rings
+            self._push(word)
+            return
 
         # 9D POPF
-        if opc == 0x9D: self.flags = self._pop(); return
+        if opc == 0x9D: self._pop_flags(self._pop()); return
 
         # 9E SAHF — load AH into flags low byte
         if opc == 0x9E:
@@ -2016,7 +2222,15 @@ class CPU:
         # CB RETF
         if opc == 0xCB:
             self.ip = self._pop()
-            self._set_cs(self._pop())
+            ret_cs = self._pop()
+            if self._pm and (ret_cs & 3) > self._cpl:
+                outer_sp = self._pop()
+                outer_ss = self._pop()
+                self._set_cs(ret_cs)
+                self._set_ss(outer_ss)
+                self.sp = outer_sp
+            else:
+                self._set_cs(ret_cs)
             return
 
         # CA RETF imm16
@@ -2026,34 +2240,54 @@ class CPU:
         if opc == 0xCA:
             extra = self._fetchw()
             self.ip = self._pop()
-            self._set_cs(self._pop())
-            self.sp = (self.sp + extra) & 0xFFFF
+            ret_cs = self._pop()
+            if self._pm and (ret_cs & 3) > self._cpl:
+                # Outer-ring return: the caller's SS:SP sits below the
+                # return address on the current (inner) stack.
+                outer_sp = self._pop()
+                outer_ss = self._pop()
+                self._set_cs(ret_cs)
+                self._set_ss(outer_ss)
+                self.sp = (outer_sp + extra) & 0xFFFF
+            else:
+                self._set_cs(ret_cs)
+                self.sp = (self.sp + extra) & 0xFFFF
             return
 
         # CC INT3
         if opc == 0xCC:
-            self._do_interrupt(3)
+            self._do_interrupt(3, software=True)
             return
 
         # CD INT n
         if opc == 0xCD:
             n = self._fetchb()
-            self._do_interrupt(n)
+            self._do_interrupt(n, software=True)
             return
 
         # CE INTO
         if opc == 0xCE:
             if self.of:
-                self._do_interrupt(4)
+                self._do_interrupt(4, software=True)
             return
 
         # CF IRET
         if opc == 0xCF:
-            # 286 IRET with NT set performs a task return (later
-            # milestone); the plain path pops IP, CS, FLAGS.
             self.ip = self._pop()
-            self._set_cs(self._pop())
-            self.flags = self._pop()
+            ret_cs = self._pop()
+            # Returning to an outer ring also restores the outer stack.
+            if self._pm and (ret_cs & 3) > self._cpl:
+                flags = self._pop()
+                outer_sp = self._pop()
+                outer_ss = self._pop()
+                self._set_cs(ret_cs)
+                self._pop_flags(flags)
+                self._set_ss(outer_ss)
+                self.sp = outer_sp
+            else:
+                flags = self._pop()
+                self._set_cs(ret_cs)
+                self._pop_flags(flags)
             return
 
         # D0-D3 SHIFT/ROTATE
@@ -2157,8 +2391,7 @@ class CPU:
         if opc == 0xEA:
             off = self._fetchw()
             seg = self._fetchw()
-            self.ip = off
-            self._set_cs(seg)
+            self._far_transfer(seg, off, is_call=False)
             return
 
         # EB JMP short
@@ -2170,47 +2403,55 @@ class CPU:
 
         # E4 IN AL, imm8
         if opc == 0xE4:
+            self._check_io_privilege()
             port = self._fetchb()
             self.al = self.io.inb(port)
             return
 
         # E5 IN AX, imm8
         if opc == 0xE5:
+            self._check_io_privilege()
             port = self._fetchb()
             self.ax = self.io.inw(port)
             return
 
         # E6 OUT imm8, AL
         if opc == 0xE6:
+            self._check_io_privilege()
             port = self._fetchb()
             self.io.outb(port, self.al)
             return
 
         # E7 OUT imm8, AX
         if opc == 0xE7:
+            self._check_io_privilege()
             port = self._fetchb()
             self.io.outw(port, self.ax)
             return
 
         # EC IN AL, DX
         if opc == 0xEC:
+            self._check_io_privilege()
             port = self.dx
             self.ax = (self.ax & 0xFF00) | self.io.inb(port)
             return
 
         # ED IN AX, DX
         if opc == 0xED:
+            self._check_io_privilege()
             port = self.dx
             self.ax = self.io.inw(port)
             return
 
         # EE OUT DX, AL
         if opc == 0xEE:
+            self._check_io_privilege()
             self.io.outb(self.dx, self.ax & 0xFF)
             return
 
         # EF OUT DX, AX
         if opc == 0xEF:
+            self._check_io_privilege()
             self.io.outw(self.dx, self.ax)
             return
 
@@ -2351,6 +2592,8 @@ class CPU:
 
         # F4 HLT
         if opc == 0xF4:
+            if self._pm and self._cpl > 0:
+                self._raise_gp(0)      # HLT is privileged
             self.halted = True
             return
 
@@ -2521,10 +2764,14 @@ class CPU:
             return
 
         # FA CLI
-        if opc == 0xFA: self.if_flag = False; return
+        if opc == 0xFA:
+            self._check_io_privilege()
+            self.if_flag = False
+            return
 
         # FB STI
         if opc == 0xFB:
+            self._check_io_privilege()
             self.if_flag = True
             self._arm_irq_shadow()
             return
@@ -2595,10 +2842,7 @@ class CPU:
                 else:
                     off = self._readw(addr)
                     seg = self._readw((addr + 2) & 0xFFFFF)
-                self._push(self.cs)
-                self._push(self.ip)
-                self._set_cs(seg)
-                self.ip = off
+                self._far_transfer(seg, off, is_call=True)
             elif reg == 4:  # JMP near
                 self.ip = target
             elif reg == 5:  # JMP far
@@ -2608,8 +2852,7 @@ class CPU:
                 else:
                     off = self._readw(addr)
                     seg = self._readw((addr + 2) & 0xFFFFF)
-                self.ip = off
-                self._set_cs(seg)
+                self._far_transfer(seg, off, is_call=False)
             elif reg == 6:  # PUSH
                 if mod == 3:
                     self._push(target)
@@ -2622,7 +2865,7 @@ class CPU:
             print(f"[UNKNOWN OPCODE] {opc:#04X} at CS:IP={self.cs:04X}:{self.ip-1:04X}")
         self.halted = True
 
-    def _do_interrupt(self, n, error_code=None):
+    def _do_interrupt(self, n, error_code=None, software=False):
         """Handle a software interrupt / exception entry.
 
         Real mode reads the IVT directly.  Protected mode walks the IDT:
@@ -2659,17 +2902,36 @@ class CPU:
                       file=sys.stderr)
             self.halted = True
             return
+        if software and ((access >> 5) & 3) < self._cpl:
+            # ``INT n`` requires a gate DPL no more privileged than CPL;
+            # hardware IRQs and CPU exceptions enter regardless of DPL.
+            self._raise_gp((n << 3) | 2)
         sel = gate[2] | (gate[3] << 8)
         offset = gate[0] | (gate[1] << 8)
+        target = self._translate_selector(sel)
+        target_dpl = (target[2] >> 5) & 3
+        # Canonicalise: the CPU forces CS RPL to the target ring.
+        sel = (sel & 0xFFFC) | target_dpl
+        old_cs, old_ip = self.cs, self.ip
+        switched = False
+        if self._pm and target_dpl < self._cpl:
+            # Inner-ring entry: privilege change + TSS stack first, then
+            # save the interrupted stack below the return frame.
+            saved_ss, saved_sp = self.ss, self.sp
+            self._enter_ring(target_dpl, sel)      # loads CS
+            switched = True
+            self._push(saved_ss)
+            self._push(saved_sp)
         self._push(self.flags)
         self.tf = False
         if gate_type == 0x06:
             self.if_flag = False
-        self._push(self.cs)
-        self._push(self.ip)
+        self._push(old_cs)
+        self._push(old_ip)
         if error_code is not None:
             self._push(error_code)
-        self._load_sreg('cs', sel)
+        if not switched:
+            self._load_sreg('cs', sel)
         self.ip = offset
 
     def _do_shift(self, opc):

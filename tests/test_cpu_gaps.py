@@ -1583,7 +1583,7 @@ class TestIntChainStubIret:
         # and returns control to the instruction after `CD n`, i.e. the
         # stub's IRET at stub+2.  Leaving CS:IP untouched achieves that,
         # since the CPU has already advanced IP past the 2-byte CD.
-        cpu._do_interrupt = lambda n: None
+        cpu._do_interrupt = lambda n, error_code=None, software=False: None
 
     def test_pushf_callf_stub_iret_consumes_flags(self):
         cpu = _make_cpu(ram=0x100000)

@@ -743,9 +743,14 @@ instruction-emulation divergence against a trusted reference.
   seeded exactly like the physical 286), architectural Accessed-bit setting,
   286 interrupt/trap-gate INT dispatch with error codes, and PM IRET —
   verified register- and memory-exact against Unicorn through a full
-  mode switch (`tests/test_protected_mode.py`).  Not yet: task gates/TSS
-  switching, call gates, privilege-level stack switches, IOPL checks,
-  and segment-limit faults; all interrupt entry assumes ring 0.
+  mode switch (`tests/test_protected_mode.py`).  Milestone 2 adds the
+  privilege model: CPL tracking, IOPL enforcement on CLI/STI/IN/OUT/
+  PUSHF/POPF/IRET (and privileged HLT), segment-limit faults with
+  expand-down data, 286 call gates with parameter copying, TSS-based
+  inner-ring stack switches for interrupt entry, and outer-ring
+  RETF/IRET returns (`tests/test_protected_mode2.py`).  Not yet: task
+  gates/TSS switching and word-boundary limit checks; interrupt entry
+  supports same-ring and inner-ring targets.
   Clearing PE via LMSW is an emulator extension (hardware needs a reset),
   which tests use to return to real mode. No DMA emulation
 - Two floppy drives max (A: and B: via `--floppy` / `--floppy-b`) plus one

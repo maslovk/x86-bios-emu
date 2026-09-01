@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Run the slow (real-DOS-boot) test suite in parallel across CPU cores.
+#
+# The DOS-boot tests are independent (each boots a temp copy of its image),
+# so they parallelise cleanly with pytest-xdist.  One exception runs
+# serially afterwards: tests/test_dos5_boot.py drives Setup with
+# wall-clock-timed background key injection (DOSHarness.inject_background),
+# which degrades under CPU contention.
+#
+# Usage: scripts/run-slow [extra pytest args...]
+#   SLOW_WORKERS=N   override worker count (default: nproc - 1, min 1)
+set -euo pipefail
+
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_dir"
+
+if ! python3 -c 'import xdist' 2>/dev/null; then
+    echo "run-slow: pytest-xdist is required: python3 -m pip install --user pytest-xdist" >&2
+    exit 2
+fi
+
+nproc=$(nproc 2>/dev/null || echo 1)
+workers=${SLOW_WORKERS:-$((nproc > 1 ? nproc - 1 : 1))}
+if ((workers < 1)); then workers=1; fi
+
+echo "run-slow: ${workers} workers (+ serial DOS5 timing tests)" >&2
+
+python3 -m pytest -q -m slow -n "$workers" --dist loadscope \
+    --ignore=tests/test_dos5_boot.py "$@"
+python3 -m pytest -q tests/test_dos5_boot.py -m slow "$@"

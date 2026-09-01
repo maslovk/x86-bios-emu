@@ -671,8 +671,12 @@ python3 benchmark_topbench.py --hard-disk dos622-new.hdd \
 
 ```bash
 python3 -m pytest -q -m "not slow"      # fast tests (1389 tests, ~13s)
-python3 -m pytest -q -m slow            # DOS boot/tool integration tests (84 tests)
-python3 -m pytest -q                    # all 1473 tests
+python3 -m pytest -q -m slow            # DOS boot/tool integration tests (93 tests)
+                                         # or: ./scripts/run-slow (nproc-1 workers;
+                                         # DOS 5 Setup's wall-clock key injection
+                                         # runs serially to avoid contention flakes)
+python3 -m pytest -q                    # all 1780 tests
+./scripts/run-slow                       # slow suite in parallel (needs pytest-xdist)
 python3 -m pytest tests/test_shift_flags.py -q   # shift/XLAT/LAHF/REPE regression (21 tests)
 python3 -m pytest tests/test_dos_boot.py -q -m slow  # DOS boot + commands
 ```

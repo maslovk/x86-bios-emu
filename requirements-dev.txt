@@ -4,3 +4,4 @@
 # Install with:  pip install -r requirements-dev.txt
 unicorn>=2.1
 capstone>=5.0
+pytest-xdist   # parallel slow-suite runner (scripts/run-slow)

@@ -722,13 +722,31 @@ reference CPU without weakening the real-mode path.
   gates and privilege transitions are unit-tested rather than
   differentially compared.
 
-### Milestone 3 — DPMI prerequisites (next)
+### Milestone 3 — tasks and limit completeness (complete)
 
-- Task segments: task gates, IRET with NT, TSS register save/restore.
-- Segment-limit word-boundary checks; 386-style granularity if needed.
-- Then: boot DPMI16BI.OVL under DOS 6.22 in the emulator and validate
-  a TASMX-built program against the same source built with real-mode
-  TASM.
+- Hardware task switching (`cpu.py::_do_task_switch`): direct far
+  JMP/CALL to a TSS selector, task gates in the GDT and IDT, and
+  IRET-with-NT returns.  The outgoing task's dynamic set saves to its
+  TSS; the busy-bit discipline follows the 286 rules (new entries
+  reject a busy TSS; jmp/int/iret clear the outgoing task's busy bit
+  while call/int leave it nested; IRET may return to the still-busy
+  caller).  Back-link + NT record nesting; LTR marks its TSS busy.
+- Word-boundary limit checks: every word operand (ModR/M EAs, string
+  MOVSW/CMPSW/LODSW/STOSW/SCASW, call-gate parameter copies) validates
+  both bytes against the segment limit before access.
+- Tests: `tests/test_protected_mode3.py` (10) — register-image
+  round-trips through nested task calls, INT task gates, busy-bit
+  transitions, and straddling word operands.
+
+### Milestone 4 — DPMI host (next)
+
+- Boot DPMI16BI.OVL under DOS 6.22 in the emulator; it becomes the
+  privileged-mode DPMI server.  Needs: INT 31h service surface (the
+  host provides it, the emulator only needs the CPU), DOS extender
+  client loading, and possibly 386-style granularity for >1 MiB
+  clients — assess once the host boots.
+- Then: build VC.OVL with TASMX and compare against the real-mode
+  TASM loader build.
 
 ### Ground rules
 

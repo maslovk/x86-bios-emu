@@ -748,9 +748,11 @@ instruction-emulation divergence against a trusted reference.
   PUSHF/POPF/IRET (and privileged HLT), segment-limit faults with
   expand-down data, 286 call gates with parameter copying, TSS-based
   inner-ring stack switches for interrupt entry, and outer-ring
-  RETF/IRET returns (`tests/test_protected_mode2.py`).  Not yet: task
-  gates/TSS switching and word-boundary limit checks; interrupt entry
-  supports same-ring and inner-ring targets.
+  RETF/IRET returns (`tests/test_protected_mode2.py`).  Milestone 3
+  adds hardware task switching — direct TSS JMP/CALL, task gates in the
+  GDT and IDT, IRET-with-NT returns with the full busy-bit discipline
+  and TSS register save/restore — plus word-boundary segment-limit
+  checks for every word operand (`tests/test_protected_mode3.py`).
   Clearing PE via LMSW is an emulator extension (hardware needs a reset),
   which tests use to return to real mode. No DMA emulation
 - Two floppy drives max (A: and B: via `--floppy` / `--floppy-b`) plus one

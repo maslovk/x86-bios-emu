@@ -225,6 +225,16 @@ class CPU:
 
     # ── Memory access ──────────────────────────────────────────────
 
+    def _physw(self, seg, off):
+        """Physical address of a word operand at segment:offset.
+
+        Both bytes must lie within the segment limit in protected mode
+        (the second byte's check raises ``#GP`` before any access).
+        """
+        if self._pm:
+            self._phys(seg, (off + 1) & 0xFFFF)
+        return self._phys(seg, off)
+
     def _phys(self, seg, off):
         """Linear (physical, 1 MiB map) address for segment:offset.
 
@@ -368,8 +378,8 @@ class CPU:
         elif mod == 2:
             self.ip = (self.ip + 2) & 0xFFFF
 
-    def _ea(self, mod, rm, seg=None):
-        """Effective address (physical)."""
+    def _ea(self, mod, rm, seg=None, wide=False):
+        """Effective address (physical; ``wide`` bounds-checks byte 2)."""
         if mod == 3:
             raise RuntimeError("_ea called with mod=3")
         # Determine segment: override > explicit > BP→SS > DS
@@ -401,6 +411,10 @@ class CPU:
         else:
             base = self.bx
         disp = self._read_disp(mod, rm)
+        if wide and self._pm:
+            # A word operand must fit entirely inside the segment: the
+            # second byte's limit check raises #GP before the access.
+            self._phys(seg, (base + disp + 1) & 0xFFFF)
         return self._phys(seg, base + disp)
 
     def _ea_byte(self, mod, rm, seg=None):
@@ -411,7 +425,7 @@ class CPU:
     def _ea_word(self, mod, rm, seg=None):
         if mod == 3:
             return self._get_reg16(rm)
-        return self._readw(self._ea(mod, rm, seg))
+        return self._readw(self._ea(mod, rm, seg, wide=True))
 
     def _ea_write_byte(self, mod, rm, val, seg=None):
         if mod == 3:
@@ -423,7 +437,7 @@ class CPU:
         if mod == 3:
             self._set_reg16(rm, val)
         else:
-            self._writew(self._ea(mod, rm, seg), val)
+            self._writew(self._ea(mod, rm, seg, wide=True), val)
 
     def _default_data_seg(self):
         return self._seg_override if self._seg_override is not None else self.ds
@@ -917,6 +931,142 @@ class CPU:
             self._raise_gp(self.tr_selector & 0xFFFC)
         return self._readw((desc[0] + offset) & 0xFFFFF)
 
+    def _write_tss_word(self, offset, value):
+        """Write a word into the current TSS (286 layout)."""
+        desc = self._desc_cache.get(self.tr_selector)
+        if desc is None:
+            self._raise_gp(self.tr_selector & 0xFFFC)
+        self._writew((desc[0] + offset) & 0xFFFFF, value & 0xFFFF)
+
+    # 286 TSS field offsets (dynamic set saved/restored on task switch).
+    TSS_BACKLINK = 0x00
+    TSS_IP = 0x0E
+    TSS_FLAGS = 0x10
+    TSS_AX = 0x12
+    TSS_CX = 0x14
+    TSS_DX = 0x16
+    TSS_BX = 0x18
+    TSS_SP = 0x1A
+    TSS_BP = 0x1C
+    TSS_SI = 0x1E
+    TSS_DI = 0x20
+    TSS_ES = 0x22
+    TSS_CS = 0x24
+    TSS_SS = 0x26
+    TSS_DS = 0x28
+    TSS_LDT = 0x2A
+
+    def _save_task_state(self):
+        """Write the dynamic register set into the current TSS."""
+        self._write_tss_word(self.TSS_IP, self.ip)
+        self._write_tss_word(self.TSS_FLAGS, self.flags)
+        self._write_tss_word(self.TSS_AX, self.ax)
+        self._write_tss_word(self.TSS_CX, self.cx)
+        self._write_tss_word(self.TSS_DX, self.dx)
+        self._write_tss_word(self.TSS_BX, self.bx)
+        self._write_tss_word(self.TSS_SP, self.sp)
+        self._write_tss_word(self.TSS_BP, self.bp)
+        self._write_tss_word(self.TSS_SI, self.si)
+        self._write_tss_word(self.TSS_DI, self.di)
+        self._write_tss_word(self.TSS_ES, self.es)
+        self._write_tss_word(self.TSS_CS, self.cs)
+        self._write_tss_word(self.TSS_SS, self.ss)
+        self._write_tss_word(self.TSS_DS, self.ds)
+
+    def _peek_descriptor_for(self, sel):
+        """Non-faulting descriptor fetch by selector (None if unusable)."""
+        if not (sel & 0xFFFC):
+            return None
+        index = sel >> 3
+        if sel & 0x04:
+            table_base, table_limit = self._ldt_base(), self._ldt_limit()
+        else:
+            table_base, table_limit = self.gdt_base, self.gdt_limit
+        addr = table_base + index * 8
+        if addr + 7 > table_base + table_limit:
+            return None
+        raw = bytes(self._readb((addr + i) & 0xFFFFF) for i in range(8))
+        if not (raw[5] & 0x80):
+            return None
+        return (raw[2] | (raw[3] << 8) | (raw[4] << 16),
+                raw[0] | (raw[1] << 8), raw[5], addr & 0xFFFFF)
+
+    def _set_tss_busy(self, sel, busy):
+        """Flip the busy bit (type 1 <-> 3) of a TSS descriptor."""
+        desc = self._peek_descriptor_for(sel)
+        if desc is None:
+            return
+        access = (desc[2] | 0x02) if busy else (desc[2] & ~0x02)
+        self._writeb(desc[3] + 5, access)
+        self._desc_cache[sel] = (desc[0], desc[1], access, desc[3])
+
+    def _load_task_state(self):
+        """Load the dynamic register set from the current TSS."""
+        self.ax = self._tss_word(self.TSS_AX)
+        self.cx = self._tss_word(self.TSS_CX)
+        self.dx = self._tss_word(self.TSS_DX)
+        self.bx = self._tss_word(self.TSS_BX)
+        self.bp = self._tss_word(self.TSS_BP)
+        self.si = self._tss_word(self.TSS_SI)
+        self.di = self._tss_word(self.TSS_DI)
+        self.es = self._tss_word(self.TSS_ES)
+        self.cs = self._tss_word(self.TSS_CS)
+        self.ss = self._tss_word(self.TSS_SS)
+        self.ds = self._tss_word(self.TSS_DS)
+        self.sp = self._tss_word(self.TSS_SP)
+        self.ip = self._tss_word(self.TSS_IP)
+        self.flags = self._tss_word(self.TSS_FLAGS)
+        self._cpl = self.cs & 3
+        # Refresh the descriptor caches for the loaded selectors; where a
+        # descriptor is missing fall back to real-mode-style bases so the
+        # guest can resume even with a minimal TSS image.
+        for sel in (self.cs, self.ds, self.es, self.ss):
+            if sel not in self._desc_cache:
+                desc = self._peek_descriptor_for(sel)
+                if desc is None:
+                    desc = ((sel << 4) & 0xFFFFF, 0xFFFF, 0x93, 0)
+                self._desc_cache[sel] = desc
+        self._code_base = self._desc_cache[self.cs][0]
+
+    def _do_task_switch(self, tss_sel, source):
+        """Perform a 286 hardware task switch.
+
+        ``source`` is 'jmp', 'call', 'int', or 'iret'.  The outgoing task
+        is saved to its TSS; its busy bit clears for jmp/int/iret (a
+        'call' leaves it nested); the incoming task's busy bit sets, its
+        back-link records the outgoing TSS for call/int (so IRET with NT
+        can return), and the register set loads from the incoming TSS.
+        """
+        if tss_sel & 0x04:
+            self._raise_gp(tss_sel & 0xFFFC)   # TSS descriptors live in GDT
+        desc = self._peek_descriptor_for(tss_sel)
+        if desc is None:
+            self._raise_gp(tss_sel & 0xFFFC)
+        access = desc[2]
+        if (access & 0x1F) not in (0x01, 0x03):
+            self._raise_gp(tss_sel & 0xFFFC)   # not a TSS
+        if source != 'iret':
+            # A busy TSS rejects new entries; IRET may return to the
+            # (still busy) task it was called from.
+            if (access & 0x1F) == 0x03:
+                self._raise_gp(tss_sel & 0xFFFC)   # busy
+            if ((access >> 5) & 3) < max(self._cpl, tss_sel & 3):
+                self._raise_gp(tss_sel & 0xFFFC)   # DPL too privileged
+        old_selector = self.tr_selector
+        self._save_task_state()
+        if source in ('jmp', 'int', 'iret'):
+            self._set_tss_busy(old_selector, False)
+        self._set_tss_busy(tss_sel, True)
+        self.tr_selector = tss_sel
+        self._desc_cache[tss_sel] = self._peek_descriptor_for(tss_sel) or desc
+        self._load_task_state()
+        if source in ('call', 'int'):
+            # Nested: back-link the outgoing TSS and set NT.
+            self._write_tss_word(self.TSS_BACKLINK, old_selector)
+            self.flags |= 0x4000
+        elif source == 'iret':
+            self.flags &= ~0x4000
+
     def _ring_stack_from_tss(self, ring):
         """Read the ring's SS:SP from the TSS (286: SP0@2 SS0@4, ...)."""
         return (self._tss_word(4 + 4 * ring),   # SS
@@ -962,6 +1112,19 @@ class CPU:
         gate = bytes(self._readb((gate_addr + i) & 0xFFFFF)
                      for i in range(8))
         access = gate[5]
+        if (access & 0x1F) == 0x05:            # task gate
+            if not (access & 0x80):
+                self._raise_np(sel & 0xFFFC)
+            if ((access >> 5) & 3) < max(self._cpl, sel & 3):
+                self._raise_gp(sel & 0xFFFC)
+            self._do_task_switch(gate[2] | (gate[3] << 8),
+                                 'call' if is_call else 'jmp')
+            return
+        if (access & 0x1F) in (0x01, 0x03):
+            # Direct TSS selector: a hardware task switch (a busy TSS
+            # faults inside _do_task_switch).
+            self._do_task_switch(sel, 'call' if is_call else 'jmp')
+            return
         if (access & 0x1F) == 0x04:            # 286 call gate
             if not (access & 0x80):
                 self._raise_np(sel & 0xFFFC)
@@ -1002,7 +1165,7 @@ class CPU:
                     saved_ss, saved_sp = self.ss, self.sp
                     self._enter_ring(target_dpl, target_sel)
                     for i in range(param_words - 1, -1, -1):
-                        word = self._readw(self._phys(saved_ss,
+                        word = self._readw(self._physw(saved_ss,
                                                       (saved_sp + 2 * i)
                                                       & 0xFFFF))
                         self._push(word)
@@ -1934,7 +2097,7 @@ class CPU:
         # A1 MOV AX, [addr]
         if opc == 0xA1:
             addr = self._fetchw()
-            self.ax = self._readw(self._phys(self._default_data_seg(), addr))
+            self.ax = self._readw(self._physw(self._default_data_seg(), addr))
             return
 
         # A2 MOV [addr], AL
@@ -1946,7 +2109,7 @@ class CPU:
         # A3 MOV [addr], AX
         if opc == 0xA3:
             addr = self._fetchw()
-            self._writew(self._phys(self._default_data_seg(), addr), self.ax)
+            self._writew(self._physw(self._default_data_seg(), addr), self.ax)
             return
 
         # A4 MOVSB
@@ -1957,8 +2120,8 @@ class CPU:
             inc = 1 if not self.df else -1
             src_seg = self._default_data_seg()
             for _ in range(count):
-                s = self._phys(src_seg, self.si)
-                d = self._phys(self.es, self.di)
+                s = self._physw(src_seg, self.si)
+                d = self._physw(self.es, self.di)
                 self._writeb(d, self._readb(s))
                 self.si = (self.si + inc) & 0xFFFF
                 self.di = (self.di + inc) & 0xFFFF
@@ -1974,8 +2137,8 @@ class CPU:
             inc = 2 if not self.df else -2
             src_seg = self._default_data_seg()
             for _ in range(count):
-                s = self._phys(src_seg, self.si)
-                d = self._phys(self.es, self.di)
+                s = self._physw(src_seg, self.si)
+                d = self._physw(self.es, self.di)
                 self._writew(d, self._readw(s))
                 self.si = (self.si + inc) & 0xFFFF
                 self.di = (self.di + inc) & 0xFFFF
@@ -2013,8 +2176,8 @@ class CPU:
             if self._rep_prefix and self.cx == 0:
                 return  # REP with CX=0: no-op
             while True:
-                a = self._readw(self._phys(src_seg, self.si))
-                b = self._readw(self._phys(self.es, self.di))
+                a = self._readw(self._physw(src_seg, self.si))
+                b = self._readw(self._physw(self.es, self.di))
                 self._flags_sub16(a, b)
                 self.si = (self.si + inc) & 0xFFFF
                 self.di = (self.di + inc) & 0xFFFF
@@ -2049,7 +2212,7 @@ class CPU:
             if self._fast_vga_mode1_stos(2, count):
                 return
             for _ in range(count):
-                self._writew(self._phys(self.es, self.di), self.ax)
+                self._writew(self._physw(self.es, self.di), self.ax)
                 self.di = (self.di + inc) & 0xFFFF
                 if self._rep_prefix:
                     self.cx = (self.cx - 1) & 0xFFFF
@@ -2073,7 +2236,7 @@ class CPU:
             count = self._string_repeat_count()
             src_seg = self._default_data_seg()
             for _ in range(count):
-                self.ax = self._readw(self._phys(src_seg, self.si))
+                self.ax = self._readw(self._physw(src_seg, self.si))
                 self.si = (self.si + inc) & 0xFFFF
                 if self._rep_prefix:
                     self.cx = (self.cx - 1) & 0xFFFF
@@ -2105,7 +2268,7 @@ class CPU:
             if self._rep_prefix and self.cx == 0:
                 return  # REP with CX=0: no-op
             while True:
-                b = self._readw(self._phys(self.es, self.di))
+                b = self._readw(self._physw(self.es, self.di))
                 self._flags_sub16(self.ax, b)
                 self.di = (self.di + inc) & 0xFFFF
                 if not self._rep_prefix:
@@ -2273,6 +2436,11 @@ class CPU:
 
         # CF IRET
         if opc == 0xCF:
+            if self._pm and (self.flags & 0x4000):
+                # Nested-task return: switch back via the TSS back-link.
+                back = self._tss_word(self.TSS_BACKLINK) & 0xFFFC
+                self._do_task_switch(back, 'iret')
+                return
             self.ip = self._pop()
             ret_cs = self._pop()
             # Returning to an outer ring also restores the outer stack.
@@ -2494,8 +2662,12 @@ class CPU:
                 elif reg == 3:             # LTR r/m16
                     sel = self._ea_word(mod, rm)
                     desc = self._translate_selector(sel)
-                    if (desc[2] & 0x1D) != 0x01:
+                    if (desc[2] & 0x1F) not in (0x01, 0x03):
                         self._raise_gp(sel & 0xFFFC)  # not a TSS
+                    # LTR marks the task busy without switching to it.
+                    if (desc[2] & 0x1F) == 0x01:
+                        desc = (desc[0], desc[1], desc[2] | 0x02, desc[3])
+                        self._writeb(desc[3] + 5, desc[2])
                     self._desc_cache[sel] = desc
                     self.tr_selector = sel
                 elif reg in (4, 5):         # VERR / VERW r/m16
@@ -2892,11 +3064,16 @@ class CPU:
                      for i in range(8))
         access = gate[5]
         gate_type = access & 0x0F
+        if gate_type == 0x05 and (access & 0x80):
+            # Task gate: switch to the referenced TSS (error codes are
+            # not delivered across a task switch).
+            self._do_task_switch(gate[2] | (gate[3] << 8), 'int')
+            return
         if not (access & 0x80) or gate_type not in (0x06, 0x07):
             # Absent/invalid gate.  Hardware would double- then triple-fault
-            # into a reset; without task-gate support the deterministic
-            # emulator answer is to park the CPU (matching the bare-CPU
-            # divide-error behaviour) rather than recurse through #NP.
+            # into a reset; the deterministic emulator answer is to park
+            # the CPU (matching the bare-CPU divide-error behaviour)
+            # rather than recurse through #NP.
             if self.debug:
                 print(f"[PM] no usable IDT gate for INT {n:02X}; halting",
                       file=sys.stderr)

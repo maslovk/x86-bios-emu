@@ -115,8 +115,13 @@ class KeyboardController:
         self._ext_prefix = False
         self.irq_pending = False
         self._cmd_mode = False
+        self._await_output_port = False
+        self._output_port = 0x01      # reset released, A20 off
         self._led_select = 0
         self._self_test_ok = 0x55
+        # Host wiring: A20 gate and CPU-reset notifications.
+        self.on_a20 = None
+        self.on_reset = None
 
     def read_status(self):
         """Read status register (port 0x64)."""
@@ -139,20 +144,32 @@ class KeyboardController:
 
         if val == 0xAA:
             self._queue_output(self._self_test_ok)
+        elif val == 0xA7:               # PS/2: disable A20 directly
+            if self.on_a20:
+                self.on_a20(False)
+        elif val == 0xA8:               # PS/2: enable A20 directly
+            if self.on_a20:
+                self.on_a20(True)
         elif val == 0xAD:
             self.irq_pending = False
         elif val == 0xAE:
             pass  # Enable keyboard interrupt
         elif val == 0xD0:
-            self._queue_output(0x00)
-        elif val == 0xD1:
+            self._queue_output(self._output_port)
+        elif val in (0xD1, 0x60):
+            # Next byte written to port 60h becomes the controller
+            # command byte (0x60) or the output port latch (0xD1).
             self._cmd_mode = True
+            self._await_output_port = (val == 0xD1)
+            self._in_full = False
+        elif val in (0xFE, 0xFC, 0xFD):
+            # Pulse the output port lines (bit 0 = reset): the classic
+            # 80286 route back to real mode.
+            if not (val & 0x01) and self.on_reset:
+                self.on_reset('keyboard-pulse')
             self._in_full = False
         elif val == 0x20:
             self._queue_output(0x9D)
-        elif val == 0x60:
-            self._cmd_mode = True
-            self._in_full = False
         elif val == 0xAB:
             self._in_full = False
         else:
@@ -273,6 +290,15 @@ class KeyboardController:
                 self.num_lock = bool(val & 0x02)
                 self.scroll_lock = bool(val & 0x04)
                 self._led_select = 0
+            elif self._await_output_port:
+                # 0xD1 command byte: the controller output port latch.
+                # Bit 1 gates A20, bit 0 (active low) drives CPU reset.
+                self._await_output_port = False
+                self._output_port = val & 0xFF
+                if self.on_a20:
+                    self.on_a20(bool(val & 0x02))
+                if not (val & 0x01) and self.on_reset:
+                    self.on_reset('keyboard-output')
             return
 
         if val == 0xED:

@@ -81,8 +81,13 @@ class CCPU(CPU):
         self.ram_wait_cycles = getattr(io_ports, 'ram_wait_cycles', 0)
         self.prefetch_wait_cycles = getattr(io_ports, 'prefetch_wait_cycles', 0)
         self.vram_wait_cycles = getattr(io_ports, 'vram_wait_cycles', 0)
-        if self._ram is None or len(self._ram) != 0x100000:
-            raise RuntimeError('the C backend requires a flat 1 MiB memory buffer')
+        ram_size = len(self._ram) if self._ram is not None else 0
+        # Power-of-two backing at least 1 MiB maps cleanly into Unicorn
+        # (the default emulator image is 8 MiB: conventional + extended).
+        if (self._ram is None or ram_size < 0x100000
+                or ram_size & (ram_size - 1)):
+            raise RuntimeError('the C backend requires a flat power-of-two '
+                               'memory buffer of at least 1 MiB')
 
         self._uc = Uc(UC_ARCH_X86, UC_MODE_16)
         # Map Unicorn directly onto the emulator's bytearray.  Keeping one
@@ -194,6 +199,17 @@ class CCPU(CPU):
         return super()._pop()
 
     # ── Native callbacks ────────────────────────────────────────────
+
+    def set_a20(self, enabled):
+        """A20 gating is a Python-backend feature.
+
+        The native backend shares RAM with Unicorn directly, so the
+        address-line gate cannot be enforced there; guests that only
+        *enable* A20 (DPMI hosts, HIMEM-style loaders) behave
+        identically, while a disable request is tracked but not
+        enforced on the native path.
+        """
+        super().set_a20(enabled)
 
     def _on_interrupt(self, uc, number, user_data=None):
         # Unicorn has already advanced IP past CD imm8, but has not performed

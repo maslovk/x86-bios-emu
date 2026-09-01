@@ -365,6 +365,18 @@ class Emulator:
         self.io.prefetch_wait_cycles = self.machine_profile.prefetch_wait_cycles
         self.io.vram_wait_cycles = self.machine_profile.vram_wait_cycles
         self.io.use_emulated_time = True
+        # A20 gate control from the keyboard controller output port and
+        # the PS/2 fast port 92h.  The CPU defaults to A20 enabled; the
+        # reset pulse notification is recorded for the DPMI warm-reset
+        # path (milestone 4b).
+        self.reset_requests = []
+        self.io.on_a20 = lambda on: self.cpu.set_a20(on)
+        if self.kbd_ctrl is not None:
+            self.kbd_ctrl.on_a20 = self.io.on_a20
+            self.kbd_ctrl.on_reset = \
+                lambda why: self.reset_requests.append(why)
+        self.io.on_reset = \
+            lambda why: self.reset_requests.append(why)
         self.speaker = None
         if audio is None:
             audio = gtk
@@ -602,26 +614,31 @@ class Emulator:
 
     def _create_memory(self):
         """Create memory object compatible with CPU."""
+        # 8 MiB (power of two) backs the physical map: conventional
+        # memory, the video/ROM windows below 1 MiB, and the extended
+        # memory INT 15h AH=88h reports to guests such as DPMI hosts.
+        size = 0x800000
+        mask = size - 1
         class Mem:
             def __init__(self):
-                self.ram = bytearray(0x100000)
+                self.ram = bytearray(size)
             def read_byte(self, a):
-                return self.ram[a & 0xFFFFF]
+                return self.ram[a & mask]
             def read_word(self, a):
-                a &= 0xFFFFF
+                a &= mask
                 return self.ram[a] | (self.ram[a + 1] << 8)
             def read_dword(self, a):
-                a &= 0xFFFFF
+                a &= mask
                 return (self.ram[a] | (self.ram[a + 1] << 8) |
                         (self.ram[a + 2] << 16) | (self.ram[a + 3] << 24))
             def write_byte(self, a, v):
-                self.ram[a & 0xFFFFF] = v & 0xFF
+                self.ram[a & mask] = v & 0xFF
             def write_word(self, a, v):
-                a &= 0xFFFFF
+                a &= mask
                 self.ram[a] = v & 0xFF
                 self.ram[a + 1] = (v >> 8) & 0xFF
             def write_dword(self, a, v):
-                a &= 0xFFFFF
+                a &= mask
                 for i in range(4):
                     self.ram[a + i] = (v >> (i * 8)) & 0xFF
         return Mem()

@@ -580,10 +580,14 @@ class TestPortIO:
         kbd.write_command(command)
         assert not (kbd.read_status() & 0x02)
 
-    def test_read_input_port(self):
+    def test_read_output_port_latch(self):
         kbd = KeyboardController()
-        kbd.write_command(0xD0)  # Read input port
-        assert kbd.read_data() == 0x00
+        kbd.write_command(0xD0)  # Read output port
+        assert kbd.read_data() == 0x01     # reset released, A20 off
+        kbd.write_command(0xD1)
+        kbd.write_data(0xDF)               # A20 on, reset released
+        kbd.write_command(0xD0)
+        assert kbd.read_data() == 0xDF
 
     def test_read_command_byte(self):
         kbd = KeyboardController()

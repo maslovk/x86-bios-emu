@@ -71,6 +71,18 @@ class CPU:
         # bool for the hot address-translation paths.
         self.msw = 0xFFF0
         self._pm = False
+        # Physical address width: the backing RAM decides how far
+        # linear addresses reach (power-of-two sizes give a clean mask).
+        # The A20 gate masks address bit 20 when disabled, wrapping the
+        # 1 MiB+64 KiB region back to zero as the real gate does.
+        self._a20 = True
+        ram_size = len(self._ram) if self._ram is not None else 0x100000
+        # Only power-of-two backing sizes give a clean address mask; a
+        # non-power-of-two buffer (e.g. 1 MiB + 64 KiB with an HMA tail)
+        # addresses only its power-of-two prefix.
+        largest_pow2 = 1 << (ram_size.bit_length() - 1)
+        self._phys_mask = largest_pow2 - 1
+        self._ram_size = largest_pow2
         # Descriptor-table registers.  Bases are 24-bit on the 80286 and
         # are masked into the emulator's 1 MiB physical map on use.
         self.gdt_base = 0
@@ -225,6 +237,16 @@ class CPU:
 
     # ── Memory access ──────────────────────────────────────────────
 
+    def _gate(self, address):
+        """Apply the A20 gate and the physical address mask."""
+        if not self._a20:
+            address &= ~0x100000
+        return address & self._phys_mask
+
+    def set_a20(self, enabled):
+        """Set the A20 address-line gate (keyboard port 0x64/0x92)."""
+        self._a20 = bool(enabled)
+
     def _physw(self, seg, off):
         """Physical address of a word operand at segment:offset.
 
@@ -284,8 +306,8 @@ class CPU:
                 and getattr(self.io.video, 'graphics_mode', False):
             return self.io.video.graphics_read(a - 0xA0000)
         if self._ram is not None:
-            return self._ram[a & 0xFFFFF]
-        return self.mem.read_byte(a)
+            return self._ram[self._gate(a)]
+        return self.mem.read_byte(self._gate(a))
 
     def _readw(self, a):
         address = a & 0xFFFFF
@@ -296,9 +318,9 @@ class CPU:
                 and getattr(self.io.video, 'graphics_mode', False):
             return self._readb(a) | (self._readb(a + 1) << 8)
         if self._ram is not None:
-            a &= 0xFFFFF
-            return self._ram[a] | (self._ram[(a + 1) & 0xFFFFF] << 8)
-        return self.mem.read_word(a)
+            a = self._gate(a)
+            return self._ram[a] | (self._ram[self._gate(a + 1)] << 8)
+        return self.mem.read_word(self._gate(a))
 
     def _writeb(self, a, v):
         address = a & 0xFFFFF
@@ -312,9 +334,9 @@ class CPU:
             self.io.video.graphics_write(a - 0xA0000, v)
             return
         if self._ram is not None:
-            self._ram[a & 0xFFFFF] = v & 0xFF
+            self._ram[self._gate(a)] = v & 0xFF
         else:
-            self.mem.write_byte(a, v)
+            self.mem.write_byte(self._gate(a), v)
 
     def _writew(self, a, v):
         address = a & 0xFFFFF
@@ -327,19 +349,19 @@ class CPU:
             self._writeb(a + 1, v >> 8)
             return
         if self._ram is not None:
-            a &= 0xFFFFF
+            a = self._gate(a)
             self._ram[a] = v & 0xFF
-            self._ram[(a + 1) & 0xFFFFF] = (v >> 8) & 0xFF
+            self._ram[self._gate(a + 1)] = (v >> 8) & 0xFF
         else:
-            self.mem.write_word(a, v)
+            self.mem.write_word(self._gate(a), v)
 
     def _fetchb(self):
         self.cycle_count += self.prefetch_wait_cycles
         base = self._code_base if self._pm else (self.cs << 4)
         if self._ram is not None:
-            v = self._ram[(base + self.ip) & 0xFFFFF]
+            v = self._ram[self._gate(base + self.ip)]
         else:
-            v = self._readb((base + self.ip) & 0xFFFFF)
+            v = self._readb(self._gate(base + self.ip))
         self.ip = (self.ip + 1) & 0xFFFF
         return v
 
@@ -347,10 +369,10 @@ class CPU:
         self.cycle_count += 2 * self.prefetch_wait_cycles
         base = self._code_base if self._pm else (self.cs << 4)
         if self._ram is not None:
-            a = (base + self.ip) & 0xFFFFF
-            v = self._ram[a] | (self._ram[(a + 1) & 0xFFFFF] << 8)
+            a = self._gate(base + self.ip)
+            v = self._ram[a] | (self._ram[self._gate(a + 1)] << 8)
         else:
-            v = self._readw((base + self.ip) & 0xFFFFF)
+            v = self._readw(self._gate(base + self.ip))
         self.ip = (self.ip + 2) & 0xFFFF
         return v
 

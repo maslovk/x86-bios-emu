@@ -687,6 +687,10 @@ class IO:
         # refresh cycle (~15 us), and legacy timing loops (DOS 5 IO.SYS
         # keyboard init, BIOS beep waits) poll it until it changes.
         self._port61 = 0x00
+        self._port92 = 0x00
+        # Host wiring for the A20 gate and CPU reset notifications.
+        self.on_a20 = None
+        self.on_reset = None
         self._pit2_last_update = time.monotonic()
         # Ports not handled by a modeled device are recorded for diagnosing
         # legacy guests (notably SCP/WD1791 disk drivers).
@@ -729,8 +733,8 @@ class IO:
             return 0x00 if self.kbd.key_pressed() else 0x01
         if port == 0x80:  # Diagnostic port
             return 0x00
-        if port == 0x92:  # Soft config
-            return 0x00
+        if port == 0x92:  # Soft config / system control port A
+            return self._port92
 
         # VGA color CRTC and Input Status Register 1.  Both CPU backends route
         # port instructions through this IO object.
@@ -817,6 +821,14 @@ class IO:
         if port == 0x64:  # Keyboard controller command port
             if self.kbd_ctrl:
                 self.kbd_ctrl.write_command(val)
+            return
+        if port == 0x92:  # PS/2 system control port A
+            # Bit 1: fast A20 gate; bit 0 (active low): fast CPU reset.
+            self._port92 = val & 0x03
+            if self.on_a20:
+                self.on_a20(bool(val & 0x02))
+            if not (val & 0x01) and self.on_reset:
+                self.on_reset('port92')
             return
         if port == 0x80:  # Diagnostic port
             pass

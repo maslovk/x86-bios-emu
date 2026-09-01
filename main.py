@@ -10,6 +10,7 @@ import time
 import os
 import argparse
 
+from cpu import CPU
 from cpu_backend import BACKENDS, create_cpu, normalize_backend
 from video import Video, IO, Keyboard, Disk, DiskView, Serial
 from bios import BIOS
@@ -45,6 +46,11 @@ def schedule_pit_ticks(now, deadline, interval):
 # elapsed time rather than by loop iterations so timer-driven DOS programs do
 # not get mistaken for a hung emulator.
 STUCK_LOOP_SECONDS = 0.25
+# IBM AT shutdown-status bytes whose POST resumes execution at the
+# continuation dword in the BIOS data area (0040:0067) instead of
+# rebooting: the classic 80286 route back to real mode used by DOS
+# extenders and INT 15h block moves.
+WARM_RESET_SHUTDOWN_CODES = frozenset((0x04, 0x05, 0x09, 0x0A, 0x0B))
 # INT 28h idle calls after stdin EOF before a scripted session is considered
 # complete (COMMAND.COM polls INT 16h AH=01h and calls INT 28h while waiting).
 _STDIN_EOF_IDLE_CALLS = 4096
@@ -373,10 +379,8 @@ class Emulator:
         self.io.on_a20 = lambda on: self.cpu.set_a20(on)
         if self.kbd_ctrl is not None:
             self.kbd_ctrl.on_a20 = self.io.on_a20
-            self.kbd_ctrl.on_reset = \
-                lambda why: self.reset_requests.append(why)
-        self.io.on_reset = \
-            lambda why: self.reset_requests.append(why)
+            self.kbd_ctrl.on_reset = self._warm_reset
+        self.io.on_reset = self._warm_reset
         self.speaker = None
         if audio is None:
             audio = gtk
@@ -571,6 +575,46 @@ class Emulator:
         if self.cpu._retry_interrupt_state is not None:
             return True
         return self._int28_idle_calls >= _STDIN_EOF_IDLE_CALLS
+
+    def _warm_reset(self, reason):
+        """80286 warm reset: resume at the BDA continuation vector.
+
+        The keyboard-controller (or port 92h) reset pulse restarts the
+        CPU in real mode with memory preserved.  When the guest stored a
+        resume shutdown code in CMOS register 0Fh, the BIOS jumps to the
+        dword at 0040:0067 instead of rebooting — the mechanism DOS
+        extenders use to leave protected mode on a 286.  The code is
+        cleared on dispatch, as the real POST does.
+        """
+        self.reset_requests.append(reason)
+        code = self.cmos._data[0x0F] if self.cmos is not None else 0
+        if code not in WARM_RESET_SHUTDOWN_CODES:
+            return False
+        vector_off = self.mem.read_word(0x0467)
+        vector_seg = self.mem.read_word(0x0469)
+        self._cpu_real_mode_reset()
+        self.cpu.cs = vector_seg
+        self.cpu.ip = vector_off
+        if self.cmos is not None:
+            self.cmos._data[0x0F] = 0x00
+        return True
+
+    def _cpu_real_mode_reset(self):
+        """CPU-side state after the reset line is asserted."""
+        cpu = self.cpu
+        cpu.msw = 0xFFF0
+        cpu._pm = False
+        cpu._desc_cache.clear()
+        cpu._exception_active = False
+        cpu._retry_interrupt_state = None
+        cpu.gdt_base = 0
+        cpu.gdt_limit = 0
+        cpu.idt_base = 0
+        cpu.idt_limit = 0x03FF
+        cpu.ldtr_selector = 0
+        cpu.tr_selector = 0
+        cpu._cpl = 0
+        cpu._int28_idle_calls = 0
 
     def _media_status(self):
         """Return compact GUI media labels, marking guest-dirty devices."""
@@ -1019,6 +1063,13 @@ class Emulator:
         bios_ref = self.bios
 
         def hooked_interrupt(n, error_code=None, software=False):
+            # A protected-mode guest owns its IDT: dispatch through the
+            # CPU's gate machinery (including call/task gates and ring
+            # switches) instead of the real-mode IVT/BIOS layer below.
+            if self.cpu._pm:
+                CPU._do_interrupt(self.cpu, n, error_code=error_code,
+                                  software=software)
+                return
             # INT 28h is DOS's idle call: it fires while the foreground
             # process waits for console input that is not yet available.
             # Once piped stdin is exhausted this marks "the scripted

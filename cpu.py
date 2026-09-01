@@ -1239,7 +1239,14 @@ class CPU:
         higher (outer) than IOPL.  Other flag bits load unconditionally.
         """
         value &= 0xFFFF
-        if not self._pm or self._cpl == 0:
+        if not self._pm:
+            # Real mode on the 80286: IOPL reads 0 and NT stays clear;
+            # bits 12-15 never stick.  This is exactly the PUSHF/POPF
+            # CPU-identity test (8086: always 1; 286: always 0) that
+            # 286-aware hosts and DOS extenders probe.
+            self.flags = value & 0x0FFF
+            return
+        if self._cpl == 0:
             self.flags = value
             return
         old = self.flags

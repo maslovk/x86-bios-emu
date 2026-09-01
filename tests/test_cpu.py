@@ -289,9 +289,18 @@ class TestOpcodes:
 
     def test_pushf_popf(self, cpu):
         self._load(cpu, [0x9C, 0x9D])
-        cpu.flags = 0x1234
+        cpu.flags = 0x0234
         cpu.execute(); cpu.execute()
-        assert cpu.flags == 0x1234
+        assert cpu.flags == 0x0234
+
+    def test_pushf_popf_masks_80286_only_bits_in_real_mode(self, cpu):
+        """Bits 12-15 (IOPL/NT/reserved) never stick in real mode on a
+        286: the classic CPU-identity probe (8086 keeps them set, 286
+        clears them) — DOS extenders and DPMI hosts depend on it."""
+        self._load(cpu, [0x9C, 0x9D])
+        cpu.flags = 0xF002
+        cpu.execute(); cpu.execute()
+        assert cpu.flags == 0x0002   # only the low 12 bits survive
 
     def test_lahf_sahf(self, cpu):
         self._load(cpu, [0x9F, 0x9E])

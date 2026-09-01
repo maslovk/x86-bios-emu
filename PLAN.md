@@ -738,15 +738,39 @@ reference CPU without weakening the real-mode path.
   round-trips through nested task calls, INT task gates, busy-bit
   transitions, and straddling word operands.
 
-### Milestone 4 — DPMI host (next)
+### Milestone 4 — DPMI host (4a-4c complete; host boot in progress)
 
-- Boot DPMI16BI.OVL under DOS 6.22 in the emulator; it becomes the
-  privileged-mode DPMI server.  Needs: INT 31h service surface (the
-  host provides it, the emulator only needs the CPU), DOS extender
-  client loading, and possibly 386-style granularity for >1 MiB
-  clients — assess once the host boots.
-- Then: build VC.OVL with TASMX and compare against the real-mode
-  TASM loader build.
+Complete:
+- **4a extended memory + A20**: the emulator image is 8 MiB (finally
+  backing the INT 15h AH=88h claim), the A20 gate wraps addresses when
+  disabled (keyboard 0xD1 byte, PS/2 0xA7/0xA8, port 92h all control
+  it), and reset pulses are captured.
+- **4b warm reset**: shutdown codes 04/05/09/0A/0B in CMOS 0Fh resume
+  execution at the 0040:0067 continuation dword with the CPU restored
+  to real mode and memory preserved (tests/test_a20_extmem.py).
+- **4c PM INT routing**: software interrupts in protected mode
+  dispatch through the guest's IDT instead of the real-mode BIOS/IVT
+  layer.
+- 286 CPU identity: PUSHF/POPF clears flags bits 12-15 in real mode
+  (the classic 8086-vs-286 probe DOS extenders use).
+
+In progress — booting the Ergo DPMI (286) host (DPMI16BI.OVL):
+- `DPMILOAD.EXE` and `DPMIINST.EXE` run their real-mode prologues
+  under DOS 6.22: banner, host install, IRQ-0 reflector chain — the
+  emulator carries them for over a million instructions.
+- They stall in DPMIINST's long machine-probe scan (a ~54k-iteration
+  string scan at 0x1305:0x4E6) and never reach LMSW; a runtime-built
+  `call` then lands in not-yet-materialised overlay code and the CPU
+  slides into IVT bytes.
+- Diagnosis trail and reproduction: `probe_dpmi.py`.
+- Next steps: build a minimal DPMI client EXE (INT 2Fh AX=1687h detect
+  + mode-switch entry) to exercise the *normal* DPMILOAD path rather
+  than the interactive installer; instrument DPMIINST's probe loop to
+  see which machine signature it scans for; consider DOSBox as a
+  ground-truth comparison for the probe's expected outcome.
+
+Then: build VC.OVL with TASMX and compare against the real-mode
+TASM loader build.
 
 ### Ground rules
 

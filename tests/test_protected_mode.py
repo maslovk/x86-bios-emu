@@ -204,6 +204,19 @@ class TestMSWAndTableRegisters:
         cpu.execute()
         assert cpu.halted                              # bare CPU parks
 
+    def test_invalid_idt_gate_fires_reset_hook(self):
+        cpu, mem = make_cpu()
+        cpu._set_msw(1)
+        cpu.idt_base = 0x0800
+        cpu.idt_limit = 0x0FFF
+        # In-range but absent gate for INT 3.
+        write_code(cpu, mem, 0x0100, [0xCC])
+        fired = []
+        cpu.on_triple_fault = lambda: fired.append(True)
+        cpu.execute()
+        assert fired == [True]
+        assert not cpu.halted
+
 
 class TestProtectedModeSwitch:
     def setup_pm(self, code_base=0x00500, data_base=0x07000):
@@ -260,6 +273,14 @@ class TestProtectedModeSwitch:
         assert mem.read_word(data_base + 0x10) == 0xBEEF
         # The old real-mode address must NOT have been written.
         assert mem.read_word((data_sel << 4) + 0x10) == 0
+
+    def test_ds_es_accept_null_selector(self):
+        cpu, mem, code_sel, data_sel, code_base, data_base = self.setup_pm()
+        cpu._set_ds(0)
+        cpu._set_es(0)
+        assert cpu.ds == 0
+        assert cpu.es == 0
+        assert not cpu.halted
 
     def test_stack_uses_descriptor_base(self):
         cpu, mem, code_sel, data_sel, code_base, data_base = self.setup_pm()

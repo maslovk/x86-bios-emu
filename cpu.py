@@ -280,6 +280,7 @@ class CPU:
             desc = self._desc_cache.get(seg)
             if desc is None:
                 self._raise_gp(0)
+                return self._gate(0)
             off &= 0xFFFF
             ar = desc[2]
             if (ar & 0x18) == 0x10 and (ar & 0x04):
@@ -299,6 +300,7 @@ class CPU:
         desc = self._desc_cache.get(self.ss)
         if desc is None:
             self._raise_ss(self.ss & 0xFFFC)
+            return False
         ar = desc[2]
         if (ar & 0x18) == 0x10 and (ar & 0x04):
             if off <= desc[1]:
@@ -875,6 +877,14 @@ class CPU:
                 self._code_base = (value << 4) & 0xFFFFF
                 self._use_cached_code_base = False
             return
+        # DS/ES may be loaded with a null selector in protected mode.  The
+        # selector makes the hidden segment cache unusable, but the load
+        # itself is legal (unlike CS and SS).  This is used by DOS extenders
+        # while temporarily discarding a data segment.
+        if name in ('ds', 'es') and not (value & 0xFFFC):
+            setattr(self, name, value)
+            self._desc_cache.pop(value, None)
+            return
         desc = self._translate_selector(value)
         ar = desc[2]
         is_code = (ar & 0x18) == 0x18
@@ -1141,12 +1151,20 @@ class CPU:
             return
         index = sel >> 3
         if index == 0:
-            self._raise_gp(0)
+            resumed = self._raise_gp(0)
+            if not self._pm:
+                self._set_cs(sel)
+                self.ip = off
+            return
         table_base = (self._ldt_base() if sel & 0x04 else self.gdt_base)
         table_limit = (self._ldt_limit() if sel & 0x04 else self.gdt_limit)
         gate_addr = table_base + index * 8
         if gate_addr + 7 > table_base + table_limit:
-            self._raise_gp(sel & 0xFFFC)
+            resumed = self._raise_gp(sel & 0xFFFC)
+            if not self._pm:
+                self._set_cs(sel)
+                self.ip = off
+            return
         gate = bytes(self._readb((gate_addr + i) & 0xFFFFF)
                      for i in range(8))
         access = gate[5]
@@ -1298,7 +1316,7 @@ class CPU:
 
     def _raise_gp(self, error_code=0):
         """Raise ``#GP`` (INT 13) with the 286 error code."""
-        self._do_exception(13, error_code)
+        return self._do_exception(13, error_code)
 
     def _raise_np(self, error_code=0):
         self._do_exception(11, error_code)
@@ -1321,13 +1339,16 @@ class CPU:
             # shutdown-code resume); a bare CPU still parks so unit
             # tests stay deterministic.
             if self.on_triple_fault is not None:
-                self.on_triple_fault()
+                resumed = self.on_triple_fault()
+                if resumed is False:
+                    self.halted = True
+                return resumed
             else:
                 self.halted = True
-            return
+            return False
         self._exception_active = True
         try:
-            self._do_interrupt(n, error_code=error_code)
+            return self._do_interrupt(n, error_code=error_code)
         finally:
             self._exception_active = False
 
@@ -3154,13 +3175,19 @@ class CPU:
             return
         if not (access & 0x80) or gate_type not in (0x06, 0x07):
             # Absent/invalid gate.  Hardware would double- then triple-fault
-            # into a reset; the deterministic emulator answer is to park
-            # the CPU (matching the bare-CPU divide-error behaviour)
-            # rather than recurse through #NP.
+            # into a reset.  Let a machine-level reset hook handle that path;
+            # bare CPUs retain the deterministic parked behavior used by the
+            # unit tests.
             if self.debug:
                 print(f"[PM] no usable IDT gate for INT {n:02X}; halting",
                       file=sys.stderr)
-            self.halted = True
+            if self.on_triple_fault is not None:
+                resumed = self.on_triple_fault()
+                if resumed is False:
+                    self.halted = True
+                return resumed
+            else:
+                self.halted = True
             return
         if software and ((access >> 5) & 3) < self._cpl:
             # ``INT n`` requires a gate DPL no more privileged than CPL;

@@ -18,7 +18,11 @@ class FakeCPU:
         self.ds = 0; self.ss = 0; self.cs = 0; self.ip = 0; self.sp = 0
         self.si = 0; self.tf = 0; self.if_flag = True
         self.flags = 0; self.halted = False
+        self.a20_enabled = False
         self.int_no_return = False
+
+    def set_a20(self, enabled):
+        self.a20_enabled = bool(enabled)
 
     @property
     def al(self): return self.ax & 0xFF
@@ -160,6 +164,33 @@ class TestINT10h:
         assert ch == ord('H')
         ch, _ = bios_env.video.buffer[0][1]
         assert ch == ord('i')
+        assert (bios_env.video.cur_y, bios_env.video.cur_x) == (0, 2)
+
+    def test_write_string_with_per_character_attributes(self, bios_env):
+        bios_env.initialize()
+        for offset, value in enumerate((ord('O'), 0x1E, ord('K'), 0x2F)):
+            bios_env.mem.write_byte(0x7C00 + offset, value)
+
+        self._call(bios_env, ax=0x1303, bx=0x0007, cx=2, dx=0x0304,
+                   es=0x07C0, bp=0)
+
+        assert bios_env.video.buffer[3][4] == (ord('O'), 0x1E)
+        assert bios_env.video.buffer[3][5] == (ord('K'), 0x2F)
+        assert (bios_env.video.cur_y, bios_env.video.cur_x) == (3, 6)
+        assert bios_env.mem.read_word(0x00450) == 0x0306
+
+    def test_write_string_mode_two_does_not_move_cursor(self, bios_env):
+        bios_env.initialize()
+        bios_env.video.cur_y = 8
+        bios_env.video.cur_x = 9
+        bios_env.mem.write_byte(0x7C00, ord('X'))
+        bios_env.mem.write_byte(0x7C01, 0x4A)
+
+        self._call(bios_env, ax=0x1302, bx=0x0007, cx=1, dx=0x0203,
+                   es=0x07C0, bp=0)
+
+        assert bios_env.video.buffer[2][3] == (ord('X'), 0x4A)
+        assert (bios_env.video.cur_y, bios_env.video.cur_x) == (8, 9)
 
     def test_teletype(self, bios_env):
         bios_env.initialize()
@@ -233,6 +264,18 @@ class TestINT10h:
         assert bios_env.video.buffer[4][4] == (ord('O'), 0x07)
         assert bios_env.video.buffer[5][5] == (ord('X'), 0x0A)
         assert bios_env.video.buffer[6][5] == (0x20, 0x1E)
+
+    def test_scroll_up_preserves_direct_vram_writes(self, bios_env):
+        bios_env.initialize()
+        bios_env.video.attach_memory(bios_env.mem)
+        address = 0xB8000 + (6 * 80 + 5) * 2
+        bios_env.mem.write_byte(address, ord('X'))
+        bios_env.mem.write_byte(address + 1, 0x2A)
+
+        self._call(bios_env, ax=0x0601, bx=0x1E00,
+                   cx=0x0505, dx=0x0606)
+
+        assert bios_env.video.buffer[5][5] == (ord('X'), 0x2A)
 
     def test_scroll_down_honors_window_and_fill_attribute(self, bios_env):
         bios_env.initialize()
@@ -834,6 +877,33 @@ class TestINT33h:
 
 class TestINT15h:
     """Test INT 15h extended functions."""
+
+    def test_a20_gate_control_and_status(self, bios_env):
+        bios_env.initialize()
+        cpu = FakeCPU(ax=0x2401)
+
+        bios_env.handlers[0x15](cpu)
+        assert cpu.a20_enabled is True
+        assert cpu.ax == 0
+        assert not cpu.flags & 0x01
+
+        cpu.ax = 0x2402
+        bios_env.handlers[0x15](cpu)
+        assert cpu.ax == 1
+
+        cpu.ax = 0x2400
+        bios_env.handlers[0x15](cpu)
+        assert cpu.a20_enabled is False
+
+    def test_a20_gate_reports_both_supported_mechanisms(self, bios_env):
+        bios_env.initialize()
+        cpu = FakeCPU(ax=0x2403)
+
+        bios_env.handlers[0x15](cpu)
+
+        assert cpu.ax == 0
+        assert cpu.bx == 0x0003
+        assert not cpu.flags & 0x01
 
     def test_ext_memory_size(self, bios_env):
         """INT 15h AH=88: Get extended memory size."""

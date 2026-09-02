@@ -398,7 +398,33 @@ class BIOS:
 
     def _int15h(self, cpu):
         ah = (cpu.ax >> 8) & 0xFF
-        if ah == 0x86:  # Wait for specified time
+        al = cpu.ax & 0xFF
+        if ah == 0x24:  # A20 gate control (PS/2 BIOS interface)
+            if al in (0x00, 0x01):
+                enabled = bool(al)
+                setter = getattr(cpu, 'set_a20', None)
+                if setter is None:
+                    setter = getattr(cpu, 'set_a20_enabled', None)
+                if setter is not None:
+                    setter(enabled)
+                elif self.kbd_ctrl and self.kbd_ctrl.on_a20:
+                    self.kbd_ctrl.on_a20(enabled)
+                cpu.ax = 0x0000
+                cpu.flags &= ~0x01
+            elif al == 0x02:  # Query current gate state
+                enabled = bool(getattr(
+                    cpu, 'a20_enabled', getattr(cpu, '_a20', False)))
+                cpu.ax = 0x0001 if enabled else 0x0000
+                cpu.flags &= ~0x01
+            elif al == 0x03:  # Query supported control mechanisms
+                # Bit 0: keyboard-controller method; bit 1: port 92h.
+                cpu.ax = 0x0000
+                cpu.bx = 0x0003
+                cpu.flags &= ~0x01
+            else:
+                cpu.ah = 0x86
+                cpu.flags |= 0x01
+        elif ah == 0x86:  # Wait for specified time
             cpu.ax = 0x0000
             cpu.flags &= ~0x01
         elif ah == 0x87:  # Move block
@@ -497,6 +523,11 @@ class BIOS:
             cpu.dx = (self.video.cur_y << 8) | self.video.cur_x
             cpu.cx = 0x0607
         elif ah == 0x06:  # Scroll up
+            # Full-screen DOS applications commonly draw directly into text
+            # VRAM and then use BIOS scrolling for windows.  Refresh the
+            # shadow first so scrolling cannot restore stale pre-application
+            # contents over those direct writes.
+            self.video._sync_from_memory()
             top = (cx >> 8) & 0xFF
             left = cx & 0xFF
             # IBM-compatible callers commonly use 19FF as an open-ended
@@ -519,6 +550,7 @@ class BIOS:
             # from 0xB8000 via _sync_from_memory before each redraw).
             self.video._sync_to_memory()
         elif ah == 0x07:  # Scroll down
+            self.video._sync_from_memory()
             top = (cx >> 8) & 0xFF
             left = cx & 0xFF
             # AH=07 has the same window and AL semantics as AH=06, but
@@ -540,6 +572,7 @@ class BIOS:
                         self.video.buffer[y][x] = (0x20, attr)
             self.video._sync_to_memory()
         elif ah == 0x08:  # Read char/attr at cursor
+            self.video._sync_from_memory()
             x, y = self.video.cur_x, self.video.cur_y
             if 0 <= y < 25 and 0 <= x < 80:
                 ch, attr = self.video.buffer[y][x]
@@ -563,6 +596,7 @@ class BIOS:
             # adapters retain the attribute already present at the cursor
             # while replacing the character.  Treating page 0 as attribute 0
             # made normal DOS output black-on-black in the GTK renderer.
+            self.video._sync_from_memory()
             attr = self.video.ATTR_NORMAL
             if (0 <= self.video.cur_y < self.video.height
                     and 0 <= self.video.cur_x < self.video.width):
@@ -584,22 +618,32 @@ class BIOS:
                 self.video.attr_palette[bl] = bh & 0x3F
                 self.video.graphics_dirty = True
         elif ah == 0x13:  # Write string
-            attr = bl if (bh & 0x80) else 0x07
-            count = cx
+            # AL bit 0 requests a cursor update; bit 1 says ES:BP contains
+            # character/attribute pairs.  BH is the display page, not a mode
+            # flag.  Borland's text installers use mode 03h extensively.
+            update_cursor = bool(al & 0x01)
+            has_attributes = bool(al & 0x02)
             row = (dx >> 8) & 0xFF
             col = dx & 0xFF
-            if row < 25 and col < 80:
-                self.video.cur_x = col
-                self.video.cur_y = row
-            for i in range(count if count else 16):
-                ch = self.mem.read_byte((cpu.es << 4) + cpu.bp + i)
-                if ch == 0:
+            start = row * 80 + col
+            last = start
+            source = (cpu.es << 4) + cpu.bp
+            for i in range(cx):
+                pos = start + i
+                if pos >= 80 * 25:
                     break
-                if bh & 0x01:
-                    self.video.putc(ch, attr)
-                else:
-                    self.video.write(self.video.cur_x, self.video.cur_y, ch, attr)
-                    self.video.cur_x = (self.video.cur_x + 1) % 80
+                stride = 2 if has_attributes else 1
+                ch = self.mem.read_byte(source + i * stride)
+                attr = (self.mem.read_byte(source + i * stride + 1)
+                        if has_attributes else bl)
+                self.video.write(pos % 80, pos // 80, ch, attr)
+                last = pos + 1
+            if update_cursor:
+                self.video.cur_x = last % 80
+                self.video.cur_y = min(last // 80, 24)
+                self.mem.write_word(
+                    0x00450 + ((bh & 0x07) * 2),
+                    (self.video.cur_y << 8) | self.video.cur_x)
         elif ah == 0x1A and al == 0x00:  # Get display combination
             # IBM VGA color: BL=08h.  Borland's EGAVGA BGI driver uses this
             # service to select its direct VGA register path.

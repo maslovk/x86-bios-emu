@@ -1,87 +1,302 @@
-#!/usr/bin/env bash
-# Build Volkov Commander inside the emulator using separate DOS drives.
-#
-# VC.COM (the 9 KB loader stub) assembles and links fully in-emulator with
-# the real-mode TASM 4.1 / MS LINK 3.65 toolchain.  VC.OVL (the actual
-# overlay program, ~846 KB of source) needs TASMX: Borland's protected-mode
-# assembler.  Upstream MAKE.BAT uses TASMX for exactly this reason, and
-# real-mode TASM runs out of memory regardless of /kh, /z, or CONFIG.SYS
-# tuning (verified: "Remaining memory: 48 bytes / Fatal Out of memory").
-# TASMX requires a 16-bit DPMI host, which needs 286 protected mode —
-# not implemented by this real-mode emulator.  Set VC_TRY_OVL=1 to attempt
-# the VCOVL build anyway (e.g. once protected mode arrives).
-#
-# The session ends by itself: when piped stdin is exhausted and DOS blocks
-# at a prompt waiting for a key that can never arrive, the emulator exits
-# cleanly (stop reason "stdin closed"), so the timeout is only a safety net.
-set -euo pipefail
+#!/usr/bin/env python3
+"""Build Volkov Commander with the real Borland tools in the emulator.
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repo_dir=$(cd -- "$script_dir/.." && pwd)
-emulator=${EMULATOR_PYTHON:-python3}
-hard_disk=${1:-"$repo_dir/dos622-new.hdd"}
-tasm_dir=${VC_TASM_DIR:-"$repo_dir/DOS_sources/TASM"}
-source_dir=${VC_SOURCE_DIR:-"$repo_dir/DOS_sources/VC_source"}
-link_dir=${VC_LINK_DIR:-"/tmp/volkov-link-tools"}
-try_ovl=${VC_TRY_OVL:-0}
+The build is deliberately transactional. TASM, the Volkov sources, and the
+link tools are copied to a temporary DOS workspace; DPMIINST configures that
+copy of DPMI16BI.OVL, and only complete VC.COM/VC.OVL files are published to
+build/volkov.
+"""
 
-if [[ -z "${VC_LINK_DIR:-}" ]]; then
-    mkdir -p "$link_dir"
-    cp "$repo_dir/DOS_sources/v4.0/src/TOOLS/LINK.EXE" \
-       "$repo_dir/DOS_sources/v4.0/src/TOOLS/EXE2BIN.EXE" "$link_dir/"
-fi
+import argparse
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
 
-for path in "$hard_disk" "$tasm_dir" "$source_dir" "$link_dir"; do
-    if [[ ! -e "$path" ]]; then
-        echo "build_volkov: missing path: $path" >&2
-        exit 2
-    fi
-done
 
-cd "$repo_dir"
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(REPO_DIR))
 
-# The initial CRs answer the DOS date/time prompts when they are shown.  The
-# remaining commands are consumed by COMMAND.COM in order.  Keep this in
-# terminal mode: GTK has no host-side command injection path.  The trailing
-# DIR is the last command: after it, DOS blocks at the prompt and the
-# emulator ends the session on exhausted stdin (no EXIT, which would reboot).
-commands=$'\r\rD:\rPATH D:\\;F:\\;C:\\DOS\rE:\r'
-commands+=$'TASM /z/m9/kh10000 VC\r'
-commands+=$'F:\\LINK.EXE VC.OBJ,VC.EXE;\r'
-commands+=$'F:\\EXE2BIN.EXE VC.EXE VC.COM\r'
-if [[ "$try_ovl" == "1" ]]; then
-    commands+=$'TASM /z/m9/kh10000 VCOVL\r'
-    commands+=$'F:\\LINK.EXE VCOVL.OBJ,VC.OVL;\r'
-fi
-commands+=$'DIR VC.COM\rDIR VC.OVL\r'
+from dosharness import DOSHarness  # noqa: E402
 
-printf '%s' "$commands" | timeout --signal=INT --kill-after=10 \
-    "${VC_BUILD_TIMEOUT:-600}" "$emulator" main.py \
-    --cpu-backend c \
-    --hard-disk "$hard_disk" \
-    --boot-hard-disk \
-    --host-mount "D=$tasm_dir" \
-    --host-mount "E=$source_dir" \
-    --host-mount "F=$link_dir" \
-    --host-dir-write \
-    --persist \
-    --interactive \
-    --no-serial \
-    --max-instructions 500000000
 
-status=0
-if [[ ! -f "$source_dir/VC.COM" ]]; then
-    echo "build_volkov: VC.COM was not produced; the loader build failed" >&2
-    status=1
-else
-    echo "build_volkov: VC.COM (loader) built in $source_dir"
-fi
-if [[ "$try_ovl" == "1" && ! -f "$source_dir/VC.OVL" ]]; then
-    echo "build_volkov: VC.OVL was not produced." >&2
-    echo "  Expected today: real-mode TASM 4.1 exhausts 640K assembling the" >&2
-    echo "  ~846 KB VCOVL source. Upstream requires TASMX, a 16-bit DPMI" >&2
-    echo "  client, which needs 286 protected mode — unsupported by this" >&2
-    echo "  real-mode emulator. See the header comment of this script." >&2
-    status=1
-fi
-exit "$status"
+class BuildError(RuntimeError):
+    """A guest command or build prerequisite failed."""
+
+
+def nonblank_lines(screen):
+    return [line.rstrip() for line in screen.splitlines() if line.strip()]
+
+
+def at_prompt(screen, drive):
+    """Return true for a bottom-row ``E:\\>``-style DOS prompt."""
+    lines = nonblank_lines(screen)
+    if not lines:
+        return False
+    return re.search(rf'{re.escape(drive)}:\\[^>]*>$', lines[-1]) is not None
+
+
+def screen_tail(screen, count=14):
+    return '\n'.join(nonblank_lines(screen)[-count:])
+
+
+class GuestDriver:
+    """Prompt-aware driver for host-mounted DOS drives D: through F:."""
+
+    def __init__(self, harness):
+        self.harness = harness
+        self.harness.cpu.max_insns = max(
+            self.harness.cpu.max_insns,
+            self.harness.cpu.insn_count + 1_500_000_000)
+
+    def wait(self, predicate, budget, description):
+        spent = 0
+        while spent < budget:
+            screen = self.harness.vga_str()
+            if predicate(screen):
+                print(f'  reached {description} ({spent:,} steps)', flush=True)
+                return screen
+            batch = min(250_000, budget - spent)
+            self.harness.run_steps(batch)
+            spent += batch
+        cpu = self.harness.cpu
+        raise BuildError(
+            f'timed out waiting for {description} at '
+            f'{cpu.cs:04X}:{cpu.ip:04X}\n{screen_tail(self.harness.vga_str())}')
+
+    def change_drive(self, drive):
+        previous = self.harness.vga_str()
+        self.harness.inject_string(f'{drive}:\r')
+        return self.wait(
+            lambda screen: screen != previous and at_prompt(screen, drive),
+            5_000_000, f'{drive}: prompt')
+
+    def command(self, command, drive, budget):
+        """Run one command, require its prompt and ERRORLEVEL zero."""
+        scroll_start = len(self.harness._scrollback)
+        previous = self.harness.vga_str()
+        print(f'  {drive}:\\> {command}', flush=True)
+        self.harness.inject_string(command + '\r')
+        screen = self.wait(
+            lambda current: current != previous and at_prompt(current, drive),
+            budget, f'completion of {command.split()[0]}')
+        output = self.harness._transcript(scroll_start)
+
+        marker = '__VC_BUILD_FAILED__'
+        marker_start = len(self.harness._scrollback)
+        previous = screen
+        self.harness.inject_string(f'IF ERRORLEVEL 1 ECHO {marker}\r')
+        self.wait(
+            lambda current: current != previous and at_prompt(current, drive),
+            5_000_000, 'ERRORLEVEL probe')
+        probe = self.harness._transcript(marker_start)
+        if marker in {line.strip() for line in probe.splitlines()}:
+            raise BuildError(
+                f'guest command failed: {command}\n{screen_tail(output, 24)}')
+        return output
+
+    def configure_dpmi(self):
+        print('Configuring the Borland 16-bit DPMI host...', flush=True)
+        self.harness.inject_string('DPMIINST.EXE\r')
+        prompts = (
+            ('Proceed? (space to continue', 60_000_000, 'Proceed prompt'),
+            ('A20 enabled, please press', 30_000_000, 'A20-enabled prompt'),
+            ('A20 disabled now, please press', 30_000_000,
+             'A20-disabled prompt'),
+            ('Back in real mode, please press', 40_000_000,
+             'real-mode-return prompt'),
+        )
+        for text, budget, description in prompts:
+            self.wait(lambda screen, text=text: text in screen,
+                      budget, description)
+            self.harness.inject_string(' ')
+
+        # Later safety/timing passes are mostly silent, but periodically
+        # perform a keyboard-liveness check. A fresh space after each bounded
+        # interval handles both ordinary and "hold space" variants.
+        failure_text = (
+            'unable to make a conclusive analysis',
+            'file allocation table bad',
+            'cannot find method',
+            'error writing checkpoint file',
+        )
+        for phase in range(1, 21):
+            for _ in range(40):
+                self.harness.run_steps(250_000)
+                screen = self.harness.vga_str()
+                lowered = screen.lower()
+                if any(text in lowered for text in failure_text):
+                    raise BuildError(
+                        'DPMIINST could not configure the host:\n'
+                        + screen_tail(screen, 24))
+                if at_prompt(screen, 'D'):
+                    if 'DPMI16BI file' not in screen or 'updated' not in screen:
+                        raise BuildError(
+                            'DPMIINST returned without updating DPMI16BI.OVL:\n'
+                            + screen_tail(screen, 24))
+                    print(f'  DPMI16BI.OVL configured (phase {phase})',
+                          flush=True)
+                    return
+            self.harness.inject_string(' ')
+            print(f'  completed DPMI safety phase {phase}', flush=True)
+        raise BuildError(
+            'DPMIINST did not return to DOS:\n'
+            + screen_tail(self.harness.vga_str(), 24))
+
+
+def copy_workspace(source, destination):
+    shutil.copytree(source, destination)
+
+
+def remove_stale_outputs(source_dir):
+    for name in ('VC.COM', 'VC.EXE', 'VC.OBJ', 'VC.OVL', 'VCOVL.OBJ'):
+        path = source_dir / name
+        if path.exists():
+            path.unlink()
+
+
+def publish_atomic(source, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f'.{destination.name}.', suffix='.tmp', dir=destination.parent)
+    os.close(fd)
+    temporary_path = Path(temporary)
+    try:
+        shutil.copy2(source, temporary_path)
+        os.replace(temporary_path, destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def resolve_path(value, default):
+    return Path(value).expanduser().resolve() if value else default.resolve()
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description='Build VC.COM and VC.OVL inside the Python x86 emulator.')
+    parser.add_argument(
+        'hard_disk', nargs='?',
+        default=os.environ.get('VC_HARD_DISK', REPO_DIR / 'dos622-new.hdd'),
+        help='bootable DOS 6.22 hard-disk image (default: dos622-new.hdd)')
+    parser.add_argument(
+        '--output-dir',
+        default=os.environ.get('VC_OUTPUT_DIR', REPO_DIR / 'build/volkov'),
+        help='artifact directory (default: build/volkov)')
+    parser.add_argument(
+        '--tasm-dir', default=os.environ.get('VC_TASM_DIR'),
+        help='Borland TASM/DPMI tool directory')
+    parser.add_argument(
+        '--tasmx', default=os.environ.get('VC_TASMX'),
+        help='protected-mode TASMX.EXE (default: TASM directory/TASMX.EXE)')
+    parser.add_argument(
+        '--source-dir', default=os.environ.get('VC_SOURCE_DIR'),
+        help='Volkov Commander source directory')
+    parser.add_argument(
+        '--link-dir', default=os.environ.get('VC_LINK_DIR'),
+        help='directory containing LINK.EXE and EXE2BIN.EXE')
+    return parser.parse_args(argv)
+
+
+def build(args):
+    hard_disk = Path(args.hard_disk).expanduser().resolve()
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    tasm_source = resolve_path(
+        args.tasm_dir, REPO_DIR / 'DOS_sources/TASM')
+    tasmx_source = resolve_path(
+        args.tasmx, tasm_source / 'TASMX.EXE')
+    vc_source = resolve_path(
+        args.source_dir, REPO_DIR / 'DOS_sources/VC_source')
+    link_source = resolve_path(
+        args.link_dir, REPO_DIR / 'DOS_sources/v4.0/src/TOOLS')
+    dos_disk = REPO_DIR / 'DOS6_22/Disk1.img'
+
+    required = (
+        hard_disk, dos_disk, tasm_source / 'DPMIINST.EXE',
+        tasm_source / 'DPMI16BI.OVL', tasm_source / 'TASM.EXE',
+        tasmx_source,
+        vc_source / 'VC.ASM', vc_source / 'VCOVL.ASM',
+        link_source / 'LINK.EXE', link_source / 'EXE2BIN.EXE',
+    )
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        detail = 'missing build input(s):\n  ' + '\n  '.join(missing)
+        if str(tasmx_source) in missing:
+            detail += (
+                '\nVC.OVL cannot be built by the bundled real-mode TASM.EXE '
+                '(it runs out of conventional memory). Supply Borland\'s '
+                'protected-mode TASMX.EXE with --tasmx PATH or VC_TASMX=PATH.')
+        raise BuildError(detail)
+
+    with tempfile.TemporaryDirectory(prefix='volkov-build-') as temporary:
+        root = Path(temporary)
+        tasm_dir = root / 'tasm'
+        source_dir = root / 'source'
+        link_dir = root / 'link'
+        copy_workspace(tasm_source, tasm_dir)
+        shutil.copy2(tasmx_source, tasm_dir / 'TASMX.EXE')
+        copy_workspace(vc_source, source_dir)
+        link_dir.mkdir()
+        shutil.copy2(link_source / 'LINK.EXE', link_dir / 'LINK.EXE')
+        shutil.copy2(link_source / 'EXE2BIN.EXE', link_dir / 'EXE2BIN.EXE')
+        remove_stale_outputs(source_dir)
+
+        harness = DOSHarness(
+            image_path=str(dos_disk), hard_disk=str(hard_disk),
+            boot_drive=0x80, writable=True,
+            host_mounts={
+                'D': str(tasm_dir),
+                'E': str(source_dir),
+                'F': str(link_dir),
+            },
+            host_dir_write=True, cpu_backend='python')
+        driver = GuestDriver(harness)
+
+        print('Booting MS-DOS 6.22...', flush=True)
+        driver.wait(lambda screen: at_prompt(screen, 'C'),
+                    35_000_000, 'DOS C: prompt')
+        driver.change_drive('D')
+        driver.configure_dpmi()
+
+        driver.command(r'PATH D:\;F:\;C:\DOS', 'D', 5_000_000)
+        driver.change_drive('E')
+        print('Building the VC.COM loader...', flush=True)
+        driver.command('TASM /z/m9/kh10000 VC', 'E', 120_000_000)
+        driver.command(r'F:\LINK.EXE VC.OBJ,VC.EXE;', 'E', 60_000_000)
+        driver.command(r'F:\EXE2BIN.EXE VC.EXE VC.COM', 'E', 30_000_000)
+
+        print('Building the VC.OVL program overlay...', flush=True)
+        driver.command('TASMX /z/m9/kh10000 VCOVL', 'E', 600_000_000)
+        driver.command(r'F:\LINK.EXE VCOVL.OBJ,VC.OVL;', 'E', 120_000_000)
+
+        # DOSHarness runs in process, so explicitly write dirty D:/E:/F:
+        # FAT images back to their temporary host directories.
+        harness.emu._persist_host_dir()
+
+        products = (source_dir / 'VC.COM', source_dir / 'VC.OVL')
+        for product in products:
+            if not product.is_file() or product.stat().st_size == 0:
+                raise BuildError(
+                    f'expected artifact was not produced: {product.name}')
+        for product in products:
+            publish_atomic(product, output_dir / product.name)
+            print(f'Published {output_dir / product.name} '
+                  f'({product.stat().st_size:,} bytes)', flush=True)
+        harness.cleanup()
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        build(args)
+    except (BuildError, OSError, ValueError) as error:
+        print(f'build_volkov: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

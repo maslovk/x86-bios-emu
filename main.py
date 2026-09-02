@@ -592,7 +592,13 @@ class Emulator:
         self.reset_requests.append(reason)
         code = self.cmos._data[0x0F] if self.cmos is not None else 0
         if code not in WARM_RESET_SHUTDOWN_CODES:
-            return False
+            # A reset pulse still resets the CPU even when POST has no
+            # shutdown-code continuation to resume.  Keep the current
+            # visible CS:IP here: the caller may be a device-level reset
+            # probe, while the hidden protected-mode state must not leak
+            # into the following real-mode instruction stream.
+            self._cpu_real_mode_reset()
+            return True
         vector_off = self.mem.read_word(0x0467)
         vector_seg = self.mem.read_word(0x0469)
         self._cpu_real_mode_reset()

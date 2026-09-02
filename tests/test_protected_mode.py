@@ -120,6 +120,90 @@ class TestMSWAndTableRegisters:
         assert cpu.idt_base == 0
         assert mem.read_word(0x3000) == 0x0207
 
+    def test_mov_cr0_round_trip(self):
+        cpu, mem = make_cpu()
+        # MOV EAX, CR0 / MOV CR0, EAX = 0F 20 C0 / 0F 22 C0
+        write_code(cpu, mem, 0x0100,
+                   [0x0F, 0x20, 0xC0])                 # MOV EAX, CR0
+        cpu.execute()
+        assert cpu.ax == 0xFFF0                       # PE clear at reset
+        write_code(cpu, mem, 0x0103,
+                   [0xB8, 0x01, 0x00,                 # MOV AX, 1
+                    0x0F, 0x22, 0xC0])                # MOV CR0, EAX
+        cpu.execute(); cpu.execute()
+        assert cpu.msw == 0xFFF1
+        assert cpu._pm
+
+    def test_mov_cr0_clears_pe_back_to_real_mode(self):
+        """The canonical 386 leave-protected-mode sequence."""
+        cpu, mem = make_cpu()
+        cpu._set_msw(1)
+        assert cpu._pm
+        # MOV EAX, CR0 / AND AL, 0xF4 / MOV CR0, EAX
+        write_code(cpu, mem, 0x0100,
+                   [0x0F, 0x20, 0xC0,                 # MOV EAX, CR0
+                    0x24, 0xF4,                       # AND AL, 0xF4
+                    0x0F, 0x22, 0xC0])                # MOV CR0, EAX
+        cpu.execute(); cpu.execute(); cpu.execute()
+        assert not cpu._pm
+        assert cpu.msw == 0xFFF0
+        assert cpu.idt_limit == 0x03FF                 # caches flushed to RM
+
+    def test_mov_cr0_clear_fetches_far_jump_from_hidden_cs_base(self):
+        """PE-off keeps the PM CS cache until a far jump reloads CS."""
+        cpu, mem = make_cpu()
+        pm_base = 0x5000
+        cpu.cs = 0x08
+        cpu.ip = 0x0100
+        cpu._code_base = pm_base
+        cpu._pm = True
+        cpu.msw = 0xFFF1
+        cpu._desc_cache[cpu.cs] = (pm_base, 0xFFFF, ACC_CODE, 0)
+        cpu.ax = 0xFFF0
+        write_code(cpu, mem, pm_base + 0x0100,
+                   [0x0F, 0x22, 0xC0,                 # MOV CR0, EAX
+                    0xEA, 0x00, 0x02, 0x00, 0x10])    # JMP 1000:0200
+        write_code(cpu, mem, 0x10200, [0x90])          # real-mode NOP
+
+        cpu.execute()
+        assert not cpu._pm
+        assert cpu._use_cached_code_base
+        cpu.execute()
+        assert (cpu.cs, cpu.ip) == (0x1000, 0x0200)
+        assert not cpu._use_cached_code_base
+        cpu.execute()
+        assert cpu.ip == 0x0201
+
+    def test_mov_cr0_privileged_in_pm(self):
+        cpu, mem = make_cpu()
+        cpu._set_msw(1)
+        cpu._cpl = 3
+        write_code(cpu, mem, 0x0100, [0x0F, 0x22, 0xC0])
+        cpu.execute()
+        assert cpu.halted                             # #GP with no handler
+
+    def test_triple_fault_fires_reset_hook(self):
+        """Fault-while-delivering-fault hands RESET to the machine."""
+        cpu, mem = make_cpu()
+        cpu._set_msw(1)
+        cpu.idt_base = 0
+        cpu.idt_limit = 0                             # null IDT: all
+        write_code(cpu, mem, 0x0100, [0xCC])          # INT3 -> #GP -> #GP
+        fired = []
+        cpu.on_triple_fault = lambda: fired.append(True)
+        cpu.execute()
+        assert fired == [True]
+        assert not cpu.halted
+
+    def test_triple_fault_without_hook_parks(self):
+        cpu, mem = make_cpu()
+        cpu._set_msw(1)
+        cpu.idt_base = 0
+        cpu.idt_limit = 0
+        write_code(cpu, mem, 0x0100, [0xCC])
+        cpu.execute()
+        assert cpu.halted                              # bare CPU parks
+
 
 class TestProtectedModeSwitch:
     def setup_pm(self, code_base=0x00500, data_base=0x07000):

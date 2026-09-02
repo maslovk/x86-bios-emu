@@ -23,6 +23,9 @@ class CPU:
         self._ram = getattr(memory, 'ram', None)
         self.io = io_ports
         self.halted = False
+        # Machine hook fired on a triple fault (fault while delivering
+        # the double fault): real hardware asserts RESET here.
+        self.on_triple_fault = None
         self.int_no_return = False  # True when INT handler takes over (e.g., boot)
         # A synchronous host BIOS handler can ask the emulator loop to pump
         # devices before the guest is allowed to return from a blocking INT.
@@ -75,7 +78,9 @@ class CPU:
         # linear addresses reach (power-of-two sizes give a clean mask).
         # The A20 gate masks address bit 20 when disabled, wrapping the
         # 1 MiB+64 KiB region back to zero as the real gate does.
-        self._a20 = True
+        # Like real hardware, the gate starts disabled; loaders enable
+        # it through the keyboard controller or port 92h.
+        self._a20 = False
         ram_size = len(self._ram) if self._ram is not None else 0x100000
         # Only power-of-two backing sizes give a clean address mask; a
         # non-power-of-two buffer (e.g. 1 MiB + 64 KiB with an HMA tail)
@@ -101,9 +106,12 @@ class CPU:
         self._desc_cache = {}
         # Fast linear base for instruction fetch (CS descriptor cache).
         self._code_base = (self.cs << 4) & 0xFFFFF
-        # Fault-delivery latch: a fault raised while another fault is in
-        # flight parks the CPU (emulating the hardware's double/triple
-        # fault escalation without a reset path).
+        # Clearing CR0.PE does not immediately replace the hidden CS base.
+        # The canonical 386 transition executes one far jump through the
+        # protected-mode cache before loading a real-mode CS base.
+        self._use_cached_code_base = False
+        # Fault-delivery latch: a nested delivery escalates to the machine's
+        # triple-fault reset hook, or parks a standalone CPU deterministically.
         self._exception_active = False
         # Current privilege level: in real mode always 0; in protected
         # mode it is the RPL of the loaded CS selector (conforming code
@@ -258,7 +266,7 @@ class CPU:
         return self._phys(seg, off)
 
     def _phys(self, seg, off):
-        """Linear (physical, 1 MiB map) address for segment:offset.
+        """Linear/physical backing address for segment:offset.
 
         Real mode: base = selector * 16.  Protected mode: base comes from
         the hidden descriptor cache populated at segment-register load;
@@ -280,8 +288,11 @@ class CPU:
                     self._raise_gp(seg & 0xFFFC)
             elif off > desc[1]:
                 self._raise_gp(seg & 0xFFFC)
-            return (desc[0] + off) & 0xFFFFF
-        return ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
+            return self._gate(desc[0] + off)
+        # Real mode: the linear address is 21 bits; the A20 gate decides
+        # whether it wraps back to zero (gate disabled) or reaches the
+        # HMA/extended memory backing.
+        return self._gate((seg << 4) + (off & 0xFFFF))
 
     def _stack_check(self, off):
         """``#SS(selector)`` when SP-relative access exceeds the SS limit."""
@@ -357,7 +368,9 @@ class CPU:
 
     def _fetchb(self):
         self.cycle_count += self.prefetch_wait_cycles
-        base = self._code_base if self._pm else (self.cs << 4)
+        base = (self._code_base
+                if self._pm or self._use_cached_code_base
+                else (self.cs << 4))
         if self._ram is not None:
             v = self._ram[self._gate(base + self.ip)]
         else:
@@ -367,7 +380,9 @@ class CPU:
 
     def _fetchw(self):
         self.cycle_count += 2 * self.prefetch_wait_cycles
-        base = self._code_base if self._pm else (self.cs << 4)
+        base = (self._code_base
+                if self._pm or self._use_cached_code_base
+                else (self.cs << 4))
         if self._ram is not None:
             a = self._gate(base + self.ip)
             v = self._ram[a] | (self._ram[self._gate(a + 1)] << 8)
@@ -858,6 +873,7 @@ class CPU:
             setattr(self, name, value)
             if name == 'cs':
                 self._code_base = (value << 4) & 0xFFFFF
+                self._use_cached_code_base = False
             return
         desc = self._translate_selector(value)
         ar = desc[2]
@@ -1266,6 +1282,7 @@ class CPU:
         self.msw = (self.msw & 0xFFF0) | (value & 0x000F)
         self._pm = bool(self.msw & 0x0001)
         if self._pm and not was_pm:
+            self._use_cached_code_base = False
             self._seed_real_mode_caches()
             # The CS cache now holds the real-mode base; keep the fetch
             # fast-path in sync (external code may have written CS
@@ -1273,7 +1290,11 @@ class CPU:
             self._code_base = (self.cs << 4) & 0xFFFFF
         elif not self._pm and was_pm:
             self._desc_cache.clear()
-            self._code_base = (self.cs << 4) & 0xFFFFF
+            # Keep the protected-mode CS hidden base for the instruction
+            # immediately following MOV CR0.  Real hardware retains it
+            # until the required far jump reloads CS; changing to CS<<4
+            # here fetches that jump from unrelated low memory.
+            self._use_cached_code_base = True
 
     def _raise_gp(self, error_code=0):
         """Raise ``#GP`` (INT 13) with the 286 error code."""
@@ -1289,14 +1310,20 @@ class CPU:
         """CPU exception delivery: like an interrupt plus error code.
 
         The error code is pushed above IP/CS/FLAGS, so the handler pops it
-        before IRET.  A fault raised while another fault is being
-        delivered would double- then triple-fault on hardware; the
-        emulator parks deterministically instead of recursing.  With no
-        Python-side dispatcher installed (bare CPU in unit tests), the
-        CPU halts like ``_raise_divide_error``.
+        before IRET.  A nested delivery escalates through the machine's
+        triple-fault reset hook; without one, a bare CPU parks instead of
+        recursing indefinitely.
         """
         if self._exception_active:
-            self.halted = True
+            # A fault raised while delivering a fault double-faults; if
+            # that delivery faults too, hardware triple-faults and
+            # asserts RESET.  Hand the reset to the machine (BIOS
+            # shutdown-code resume); a bare CPU still parks so unit
+            # tests stay deterministic.
+            if self.on_triple_fault is not None:
+                self.on_triple_fault()
+            else:
+                self.halted = True
             return
         self._exception_active = True
         try:
@@ -1592,7 +1619,7 @@ class CPU:
         if 0xB0 <= opc <= 0xB7: return f"MOV {reg_names8[opc-0xB0]}, {peek(1)[0]:02X}"
         if 0xB8 <= opc <= 0xBF: return f"MOV {reg_names16[opc-0xB8]}, {peekw():04X}"
 
-        if opc == 0xC0: return "LDS r16, [modrm]"
+        if opc == 0xC0: return "SHIFT r/m8, imm8 [C0]"
         if opc == 0xC3: return "RET"
         if opc == 0xC4: return "LES AX, [modrm]"
         if opc == 0xC5: return "LES r16, [modrm]"
@@ -2488,7 +2515,7 @@ class CPU:
             return
 
         # D0-D3 SHIFT/ROTATE
-        if 0xD0 <= opc <= 0xD3:
+        if 0xD0 <= opc <= 0xD3 or opc in (0xC0, 0xC1):
             self._do_shift(opc)
             return
 
@@ -2767,6 +2794,32 @@ class CPU:
                     self.zf = True
                 else:
                     self.zf = False
+                return
+            elif opc2 in (0x20, 0x22):
+                # MOV r32, CR / MOV CR, r32.  The register file is 16-bit,
+                # so the low word carries the bits a 16-bit host tests
+                # and writes (``mov eax,cr0 / and al,mask / mov cr0,eax``
+                # is the canonical leave-protected-mode sequence).
+                mod, reg, rm = self._decode_modrm()
+                if mod != 3:
+                    self._raise_gp(0)      # control moves are register-only
+                    return
+                if self._pm and self._cpl > 0:
+                    self._raise_gp(0)      # privileged instruction
+                    return
+                if opc2 == 0x20:           # MOV r32, CR
+                    if reg == 0:
+                        val = self.msw
+                    elif reg in (2, 3):
+                        val = 0            # CR2/CR3: paging not modelled
+                    else:
+                        val = 0            # reserved control registers
+                    self._set_reg16(rm, val & 0xFFFF)
+                else:                      # MOV CR, r32
+                    val = self._get_reg16(rm)
+                    if reg == 0:
+                        self._set_msw(val)
+                    # CR2/CR3/reserved writes are ignored (no paging)
                 return
             elif opc2 == 0x06:
                 # CLTS — clear the task-switched bit
@@ -3089,6 +3142,7 @@ class CPU:
         gate_addr = self.idt_base + n * 8
         if n * 8 + 7 > self.idt_limit:
             self._raise_gp((n << 3) | 2)
+            return
         gate = bytes(self._readb((gate_addr + i) & 0xFFFFF)
                      for i in range(8))
         access = gate[5]
@@ -3112,6 +3166,7 @@ class CPU:
             # ``INT n`` requires a gate DPL no more privileged than CPL;
             # hardware IRQs and CPU exceptions enter regardless of DPL.
             self._raise_gp((n << 3) | 2)
+            return
         sel = gate[2] | (gate[3] << 8)
         offset = gate[0] | (gate[1] << 8)
         target = self._translate_selector(sel)
@@ -3141,7 +3196,7 @@ class CPU:
         self.ip = offset
 
     def _do_shift(self, opc):
-        """D0-D3 shift/rotate instructions."""
+        """C0/C1 (imm8 count) and D0-D3 (1/CL count) shifts and rotates."""
         mod, reg, rm = self._decode_modrm()
         if opc == 0xD0:
             count = 1
@@ -3151,8 +3206,12 @@ class CPU:
             count = self.cl & 0x1F
         elif opc == 0xD3:
             count = self.cl & 0x1F
+        elif opc == 0xC0:
+            count = self._fetchb() & 0x1F
+        else:                            # 0xC1
+            count = self._fetchb() & 0x1F
 
-        is_word = opc in (0xD1, 0xD3)
+        is_word = opc in (0xC1, 0xD1, 0xD3)
         # Rotate counts wrap at the operand width.  Through-carry rotates
         # include CF in the ring, so their modulus is width+1.  Without this
         # reduction ROL AL,8 and RCL AL,9 incorrectly perform a full cycle,

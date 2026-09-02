@@ -372,9 +372,9 @@ class Emulator:
         self.io.vram_wait_cycles = self.machine_profile.vram_wait_cycles
         self.io.use_emulated_time = True
         # A20 gate control from the keyboard controller output port and
-        # the PS/2 fast port 92h.  The CPU defaults to A20 enabled; the
-        # reset pulse notification is recorded for the DPMI warm-reset
-        # path (milestone 4b).
+        # the PS/2 fast port 92h.  The gate starts disabled (as real
+        # hardware boots); the reset pulse notification is recorded for
+        # the DPMI warm-reset path (milestone 4b).
         self.reset_requests = []
         self.io.on_a20 = lambda on: self.cpu.set_a20(on)
         if self.kbd_ctrl is not None:
@@ -555,6 +555,9 @@ class Emulator:
         cpu.ram_wait_cycles = self.machine_profile.memory_wait_states
         cpu.prefetch_wait_cycles = self.machine_profile.prefetch_wait_cycles
         cpu.step_mode = self.step_mode
+        # A triple fault (e.g. the deliberate null-IDT INT used by 286 DOS
+        # extenders) asserts RESET and uses the normal shutdown-code resume.
+        cpu.on_triple_fault = lambda: self._warm_reset('triple-fault')
         return cpu
 
     def _stdin_session_complete(self):
@@ -604,6 +607,8 @@ class Emulator:
         cpu = self.cpu
         cpu.msw = 0xFFF0
         cpu._pm = False
+        cpu._use_cached_code_base = False
+        cpu.if_flag = False             # RESET services no maskable IRQs
         cpu._desc_cache.clear()
         cpu._exception_active = False
         cpu._retry_interrupt_state = None

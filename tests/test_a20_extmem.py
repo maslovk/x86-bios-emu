@@ -41,9 +41,9 @@ class TestA20Gate:
         cpu.set_a20(True)
         cpu.cs = 0xFFFF
         cpu.ip = 0x0000
-        assert cpu._gate(0xFFFF0 + 0xFFFF) == 0x10FFEF
+        assert cpu._phys(0xFFFF, 0xFFFF) == 0x10FFEF
         cpu.set_a20(False)
-        assert cpu._gate(0xFFFF0 + 0xFFFF) == 0x0FFEF
+        assert cpu._phys(0xFFFF, 0xFFFF) == 0x0FFEF
 
     def test_non_power_of_two_backing_clamps(self):
         cpu, _ = self._cpu(size=0x110000)
@@ -60,18 +60,18 @@ class TestEmulatorWiring:
     def test_keyboard_output_port_controls_a20(self):
         from main import Emulator
         emu = Emulator(enable_hardware=True)
+        assert not emu.cpu._a20               # boots disabled
+        emu.io.outb(0x64, 0xD1)
+        emu.io.outb(0x60, 0xDF)               # A20 on, reset released
         assert emu.cpu._a20
-        # 0xD1 command, then output byte with A20 bit clear -> gate off.
         emu.io.outb(0x64, 0xD1)
         emu.io.outb(0x60, 0x00)
         assert not emu.cpu._a20
-        emu.io.outb(0x64, 0xD1)
-        emu.io.outb(0x60, 0x03)              # A20 on, reset released
-        assert emu.cpu._a20
 
     def test_port92_controls_a20(self):
         from main import Emulator
         emu = Emulator(enable_hardware=True)
+        assert not emu.cpu._a20               # boots disabled
         emu.io.outb(0x92, 0x02)
         assert emu.cpu._a20
         emu.io.outb(0x92, 0x00)
@@ -177,3 +177,22 @@ class TestWarmReset:
         assert (cpu.cs, cpu.ip) == (0x2000, 0x0000)
         cpu.execute()                        # NOP at the continuation
         assert cpu.ip == 0x0001
+
+    def test_triple_fault_resumes_through_shutdown_vector(self):
+        """A null-IDT fault asserts RESET and takes the BIOS continuation."""
+        emu = self._emu()
+        cpu = emu.cpu
+        self._arm_continuation(emu, 0x0A, 0x2000, 0x0040)
+        emu.mem.write_byte((cpu.cs << 4) + cpu.ip, 0xCC)  # INT3
+        cpu._set_msw(1)
+        cpu.idt_base = 0
+        cpu.idt_limit = 0
+
+        cpu.execute()
+
+        assert emu.reset_requests == ['triple-fault']
+        assert (cpu.cs, cpu.ip) == (0x2000, 0x0040)
+        assert not cpu._pm
+        assert not cpu.halted
+        assert not cpu.if_flag
+        assert emu.cmos._data[0x0F] == 0

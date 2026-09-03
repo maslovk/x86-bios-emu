@@ -54,6 +54,9 @@ class GuestDriver:
 
     def wait(self, predicate, budget, description):
         spent = 0
+        trace = (os.environ.get('VC_BUILD_TRACE') == '1' and
+                 'TASMX' in description)
+        next_trace = 5_000_000
         while spent < budget:
             screen = self.harness.vga_str()
             if predicate(screen):
@@ -62,6 +65,14 @@ class GuestDriver:
             batch = min(250_000, budget - spent)
             self.harness.run_steps(batch)
             spent += batch
+            if trace and spent >= next_trace:
+                cpu = self.harness.cpu
+                print(f'  [trace] {description}: {spent:,} steps '
+                      f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
+                      f'pm={cpu._pm} halted={cpu.halted} '
+                      f'resets={getattr(self.harness.emu, "reset_requests", [])}\n'
+                      f'{screen_tail(self.harness.vga_str(), 4)}', flush=True)
+                next_trace += 5_000_000
         cpu = self.harness.cpu
         raise BuildError(
             f'timed out waiting for {description} at '
@@ -97,6 +108,21 @@ class GuestDriver:
             raise BuildError(
                 f'guest command failed: {command}\n{screen_tail(output, 24)}')
         return output
+
+    def tasmx_command(self, command, drive, budget):
+        """Run TASMX, accepting its intentional POST reset completion."""
+        previous = self.harness.vga_str()
+        print(f'  {drive}:\\> {command}', flush=True)
+        self.harness.inject_string(command + '\r')
+        screen = self.wait(
+            lambda current: current != previous and (
+                at_prompt(current, drive) or
+                'post:' in current.lower() and
+                'all tests passed' in current.lower()),
+            budget, f'completion of {command.split()[0]}')
+        if 'post:' in screen.lower() and 'all tests passed' in screen.lower():
+            print('  TASMX final screen: POST: All tests passed.', flush=True)
+        return self.harness._transcript(0)
 
     def configure_dpmi(self):
         print('Configuring the Borland 16-bit DPMI host...', flush=True)
@@ -149,6 +175,14 @@ class GuestDriver:
 
 def copy_workspace(source, destination):
     shutil.copytree(source, destination)
+
+
+def copy_tool_files(source, destination):
+    """Stage top-level DOS tools without copying archival source folders."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in source.iterdir():
+        if path.is_file():
+            shutil.copy2(path, destination / path.name)
 
 
 def remove_stale_outputs(source_dir):
@@ -236,8 +270,16 @@ def build(args):
         tasm_dir = root / 'tasm'
         source_dir = root / 'source'
         link_dir = root / 'link'
-        copy_workspace(tasm_source, tasm_dir)
+        copy_tool_files(tasm_source, tasm_dir)
         shutil.copy2(tasmx_source, tasm_dir / 'TASMX.EXE')
+        # TASMX is a Borland extender and loads its runtime beside the
+        # executable.  When TASMX comes from the TASM 4.0 BIN directory but
+        # DPMIINST/TASM come from the legacy tool directory, stage the shared
+        # runtime companions explicitly.
+        for companion in ('RTM.EXE', 'DPMI16BI.OVL', 'DPMI32VM.OVL'):
+            candidate = tasmx_source.parent / companion
+            if candidate.is_file():
+                shutil.copy2(candidate, tasm_dir / companion)
         copy_workspace(vc_source, source_dir)
         link_dir.mkdir()
         shutil.copy2(link_source / 'LINK.EXE', link_dir / 'LINK.EXE')
@@ -253,6 +295,32 @@ def build(args):
                 'F': str(link_dir),
             },
             host_dir_write=True, cpu_backend='python')
+        if os.environ.get('VC_BUILD_TRACE') == '1':
+            original_reset = harness.emu._warm_reset
+            def trace_reset(reason):
+                cpu = harness.cpu
+                print(f'  [trace] RESET reason={reason} '
+                      f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
+                      f'pm={cpu._pm} '
+                      f'shutdown={harness.emu.cmos._data[0x0F]:02X} '
+                      f'vector={harness.emu.mem.read_word(0x0469):04X}:'
+                      f'{harness.emu.mem.read_word(0x0467):04X}', flush=True)
+                return original_reset(reason)
+            harness.emu._warm_reset = trace_reset
+            original_gp = harness.cpu._raise_gp
+            def trace_gp(error_code=0):
+                import traceback
+                cpu = harness.cpu
+                print(f'  [trace] GP error={error_code:04X} '
+                      f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
+                      f'DS={cpu.ds:04X} ES={cpu.es:04X} '
+                      f'SS={cpu.ss:04X}:{cpu.sp:04X} '
+                      f'LDTR={cpu.ldtr_selector:04X} '
+                      f'bytes={bytes(cpu._readb((cpu._code_base + cpu.ip + i) & 0xFFFFF) for i in range(8)).hex()}',
+                      flush=True)
+                traceback.print_stack(limit=8)
+                return original_gp(error_code)
+            harness.cpu._raise_gp = trace_gp
         driver = GuestDriver(harness)
 
         print('Booting MS-DOS 6.22...', flush=True)
@@ -269,7 +337,7 @@ def build(args):
         driver.command(r'F:\EXE2BIN.EXE VC.EXE VC.COM', 'E', 30_000_000)
 
         print('Building the VC.OVL program overlay...', flush=True)
-        driver.command('TASMX /z/m9/kh10000 VCOVL', 'E', 600_000_000)
+        driver.tasmx_command('TASMX /z/m9/kh10000 VCOVL', 'E', 600_000_000)
         driver.command(r'F:\LINK.EXE VCOVL.OBJ,VC.OVL;', 'E', 120_000_000)
 
         # DOSHarness runs in process, so explicitly write dirty D:/E:/F:

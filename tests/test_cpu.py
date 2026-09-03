@@ -11,6 +11,38 @@ from tests.conftest import Mem
 
 
 class TestRegisterHelpers:
+    def test_reg32_aliases_preserve_and_replace_high_word(self, cpu):
+        cpu.eax = 0x12345678
+        assert cpu.ax == 0x5678
+        assert cpu.eax == 0x12345678
+        cpu.ax = 0xBEEF
+        assert cpu.eax == 0x1234BEEF
+        cpu.eax = -1
+        assert cpu.eax == 0xFFFFFFFF
+        assert cpu.ax == 0xFFFF
+
+    def test_reg32_instruction_forms(self, cpu):
+        # MOV EAX, imm32; MOV ECX,EAX; ADD EAX,imm32; PUSH/POP EAX/ECX.
+        cpu.cs = cpu.ds = cpu.ss = 0
+        cpu.ip = 0x100
+        cpu.sp = 0x800
+        code = [
+            0x66, 0xB8, 0x78, 0x56, 0x34, 0x12,
+            0x66, 0x89, 0xC1,
+            0x66, 0x05, 0x01, 0x00, 0x00, 0x80,
+            0x66, 0x50,
+            0x66, 0x59,
+            0x66, 0xC7, 0xC2, 0xEF, 0xBE, 0xAD, 0xDE,
+        ]
+        for i, byte in enumerate(code):
+            cpu.mem.write_byte(0x100 + i, byte)
+        for _ in range(6):
+            assert cpu.execute()
+        assert cpu.ecx == 0x92345679
+        assert cpu.eax == 0x92345679
+        assert cpu.edx == 0xDEADBEEF
+        assert cpu.sp == 0x800
+
     def test_reg16(self, cpu):
         cpu.ax = 0x1234; cpu.cx = 0x5678; cpu.dx = 0x9ABC; cpu.bx = 0xDEF0
         cpu.sp = 0x1111; cpu.bp = 0x2222; cpu.si = 0x3333; cpu.di = 0x4444
@@ -649,11 +681,165 @@ class TestModRM:
         cpu.execute()
         assert cpu.ax == 0xDEAD
 
+    def test_32bit_addressing_sib_with_dword_operand(self, cpu):
+        # 67 66 C7 44 88 10 DEADBEEF
+        # [EAX + ECX*4 + 10h] = DEADBEEF.
+        self._load(cpu, [0x67, 0x66, 0xC7, 0x44, 0x88, 0x10,
+                         0xEF, 0xBE, 0xAD, 0xDE])
+        cpu.eax = 0x1000
+        cpu.ecx = 2
+        cpu.execute()
+        assert cpu.mem.read_dword(0x1018) == 0xDEADBEEF
+
+    def test_386_movzx_movsx_and_imul(self, cpu):
+        # MOVZX EAX, byte [1000h]; MOVSX ECX, byte [1001h];
+        # IMUL EAX, ECX.
+        self._load(cpu, [
+            0x67, 0x66, 0x0F, 0xB6, 0x05, 0x00, 0x10, 0x00, 0x00,
+            0x67, 0x66, 0x0F, 0xBE, 0x0D, 0x01, 0x10, 0x00, 0x00,
+            0x66, 0x0F, 0xAF, 0xC1,
+        ])
+        cpu.mem.write_byte(0x1000, 3)
+        cpu.mem.write_byte(0x1001, 0xFE)
+        for _ in range(3):
+            assert cpu.execute()
+        assert cpu.eax == 0xFFFFFFFA
+        assert cpu.ecx == 0xFFFFFFFE
+        assert not cpu.cf and not cpu.of
+
+    def test_32bit_relative_branch_and_call(self, cpu):
+        self._load(cpu, [
+            0x66, 0xE9, 0x0A, 0x00, 0x00, 0x00,  # jump to 7C10
+            0xF4,
+        ])
+        cpu.mem.write_byte(0x7C10, 0x90)
+        cpu.execute()
+        assert cpu.eip == 0x7C10
+
+        self._load(cpu, [0x66, 0xE8, 0x0A, 0x00, 0x00, 0x00], sp=0x800)
+        cpu.mem.write_byte(0x7C10, 0x66)
+        cpu.mem.write_byte(0x7C11, 0xC3)
+        cpu.execute()
+        assert cpu.eip == 0x7C10
+        assert cpu.mem.read_dword(0x7FC) == 0x7C06
+        cpu.execute()
+        assert cpu.eip == 0x7C06
+        assert cpu.sp == 0x800
+
     def test_lea(self, cpu):
         self._load(cpu, [0x8D, 0x5E, 0x10])
         cpu.bp = 0x200
         cpu.execute()
         assert cpu.bx == 0x210
+
+    def test_386_interrupt_gate_pushes_and_irets_32bit_frame(self, cpu):
+        def descriptor(base, limit, access, flags):
+            return [limit & 0xff, limit >> 8, base & 0xff,
+                    (base >> 8) & 0xff, (base >> 16) & 0xff,
+                    access, ((limit >> 16) & 0x0f) | flags, 0]
+
+        cpu._pm = True
+        cpu.gdt_base, cpu.gdt_limit = 0x1000, 0x17
+        cpu.idt_base, cpu.idt_limit = 0x2000, 0x7
+        for i, b in enumerate(descriptor(0, 0xfffff, 0x9a, 0x40)):
+            cpu.mem.write_byte(0x1008 + i, b)
+        for i, b in enumerate(descriptor(0, 0xfffff, 0x92, 0x40)):
+            cpu.mem.write_byte(0x1010 + i, b)
+        cpu._desc_cache[8] = (0, 0xfffff, 0x9a, 0x1008)
+        cpu._desc_cache[0x10] = (0, 0xfffff, 0x92, 0x1010)
+        # 386 interrupt gate: offset 0300h, selector 0008h, type 0Eh.
+        gate = [0x00, 0x03, 0x08, 0x00, 0x00, 0x8e, 0x00, 0x00]
+        for i, b in enumerate(gate):
+            cpu.mem.write_byte(0x2000 + i, b)
+        cpu.cs, cpu.ss, cpu.sp = 8, 0x10, 0x800
+        cpu.eip = 0x12345678
+        cpu.flags = 0x202
+        cpu.mem.write_byte(0x300, 0xcf)  # IRET
+
+        cpu._do_interrupt(0)
+        assert cpu.eip == 0x300
+        assert cpu.sp == 0x7f4
+        assert cpu.mem.read_dword(0x7f4) == 0x12345678
+        assert cpu.mem.read_dword(0x7f8) == 8
+        assert cpu.mem.read_dword(0x7fc) == 0x202
+        cpu.execute()
+        assert cpu.eip == 0x12345678
+        assert cpu.sp == 0x800
+
+    def test_386_descriptor_decodes_full_base_and_granular_limit(self, cpu):
+        cpu._pm = True
+        cpu.gdt_base = 0x1800
+        cpu.gdt_limit = 0x17
+        # base=0x12345678, 20-bit limit=0xfffff, G=1.
+        raw = [0xff, 0xff, 0x78, 0x56, 0x34, 0x92, 0xcf, 0x12]
+        for i, byte in enumerate(raw):
+            cpu.mem.write_byte(cpu.gdt_base + 8 + i, byte)
+        desc = cpu._translate_selector(8)
+        assert desc[0] == 0x12345678
+        assert desc[1] == 0xFFFFFFFF
+
+    def test_386_tss_supplies_esp_and_stack_uses_32bit_pointer(self, cpu):
+        cpu._pm = True
+        cpu.tr_selector = 0x18
+        cpu._desc_cache[0x18] = (0x3000, 0x67, 0x89, 0x3018)
+        # ESP0=0001:0200, SS0=0010 in a 386 TSS.
+        cpu.mem.write_dword(0x3004, 0x00010200)
+        cpu.mem.write_word(0x3008, 0x0010)
+        assert cpu._ring_stack_from_tss(0) == (0x0010, 0x00010200, True)
+
+        cpu.ss = 0x10
+        cpu._desc_cache[0x10] = (0, 0xFFFFFFFF, 0x92, 0x3010)
+        cpu._stack32 = True
+        cpu.esp = 0x800
+        cpu._pushd(0xDEADBEEF)
+        assert cpu.esp == 0x7FC
+        assert cpu.mem.read_dword(0x7FC) == 0xDEADBEEF
+        assert cpu._popd() == 0xDEADBEEF
+        assert cpu.esp == 0x800
+
+    def test_386_interrupt_switches_to_tss_stack_and_irets_outer_ring(self, cpu):
+        def descriptor(base, limit, access, flags=0x40):
+            return [limit & 0xff, limit >> 8, base & 0xff,
+                    (base >> 8) & 0xff, (base >> 16) & 0xff,
+                    access, ((limit >> 16) & 0x0f) | flags, (base >> 24) & 0xff]
+
+        cpu._pm = True
+        cpu.gdt_base, cpu.gdt_limit = 0x1000, 0x2f
+        cpu.idt_base, cpu.idt_limit = 0x2000, 0x7
+        entries = {
+            8: descriptor(0, 0xfffff, 0x9a),
+            0x10: descriptor(0, 0xfffff, 0x92),
+            0x18: descriptor(0, 0xfffff, 0xfa),
+            0x20: descriptor(0, 0xfffff, 0xf2),
+            0x28: descriptor(0x3000, 0x67, 0x89, 0),
+        }
+        for selector, raw in entries.items():
+            for i, byte in enumerate(raw):
+                cpu.mem.write_byte(cpu.gdt_base + selector + i, byte)
+        for selector, addr, access in ((8, 0x1008, 0x9a),
+                                       (0x10, 0x1010, 0x92),
+                                       (0x18, 0x1018, 0xfa),
+                                       (0x20, 0x1020, 0xf2),
+                                       (0x28, 0x1028, 0x89)):
+            cpu._desc_cache[selector] = (0, 0xfffff, access, addr)
+        cpu._desc_cache[0x28] = (0x3000, 0x67, 0x89, 0x1028)
+        cpu.tr_selector = 0x28
+        cpu.mem.write_dword(0x3004, 0x00000900)
+        cpu.mem.write_word(0x3008, 0x10)
+        cpu.mem.write_byte(0x2000, 0x00)
+        cpu.mem.write_byte(0x2001, 0x03)
+        cpu.mem.write_word(0x2002, 8)
+        cpu.mem.write_byte(0x2005, 0x8e)
+        cpu.cs, cpu.ss, cpu.sp = 0x1b, 0x23, 0x700
+        cpu._cpl = 3
+        cpu._code32 = cpu._stack32 = True
+        cpu.eip, cpu.esp, cpu.flags = 0x12345678, 0x00ABCDEF, 0x202
+        cpu.mem.write_byte(0x300, 0xcf)
+
+        cpu._do_interrupt(0)
+        assert (cpu.cs, cpu.ss, cpu.esp, cpu.eip) == (8, 0x10, 0x8ec, 0x300)
+        cpu.execute()
+        assert (cpu.cs, cpu.ss, cpu.esp, cpu.eip) == (0x1b, 0x23, 0x00ABCDEF, 0x12345678)
 
 
 class TestInstructionCount:

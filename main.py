@@ -592,6 +592,9 @@ class Emulator:
         self.reset_requests.append(reason)
         code = self.cmos._data[0x0F] if self.cmos is not None else 0
         if code not in WARM_RESET_SHUTDOWN_CODES:
+            if reason == 'triple-fault':
+                self._cold_reset()
+                return True
             # A reset pulse still resets the CPU even when POST has no
             # shutdown-code continuation to resume.  Keep the current
             # visible CS:IP here: the caller may be a device-level reset
@@ -607,6 +610,39 @@ class Emulator:
         if self.cmos is not None:
             self.cmos._data[0x0F] = 0x00
         return True
+
+    def _cold_reset(self):
+        """Restart the current machine through its BIOS boot path."""
+        self.mem.ram[:0xA0000] = b'\x00' * 0xA0000
+        self.video.clear()
+        if self.kbd:
+            self.kbd.buffer.clear()
+        if self.kbd_ctrl:
+            for name in ('_out_buffer', '_scan_buffer', '_port_buffer',
+                         '_raw_buffer', '_physical_buffer',
+                         '_bios_key_buffer', '_state_buffer', '_scan_fifo'):
+                getattr(self.kbd_ctrl, name).clear()
+            self.kbd_ctrl._irq_port_event = None
+            self.kbd_ctrl._output_ready = False
+            self.kbd_ctrl._out_full = False
+            self.kbd_ctrl.irq_pending = False
+        boot_disk = self.hard_disk if self.boot_drive == 0x80 else self.disk
+        buf = bytearray(512)
+        boot_disk.read_sector(0, buf)
+        for i, value in enumerate(buf):
+            self.mem.write_byte(0x7C00 + i, value)
+        self._cpu_real_mode_reset()
+        self.cpu.cs = self.cpu.ds = self.cpu.es = self.cpu.ss = 0
+        self.cpu.ip = 0x7C00
+        self.cpu.sp = 0x7C00
+        self.cpu.dl = self.boot_drive
+        self.cpu.halted = False
+        self.cpu._reset_aborted_instruction = True
+        self.bios.initialize()
+        if self.pic:
+            self.pic.initialize()
+        self._setup_ivt_irq_handlers()
+        self._install_bios_interrupt_hook()
 
     def _cpu_real_mode_reset(self):
         """CPU-side state after the reset line is asserted."""

@@ -196,3 +196,18 @@ class TestWarmReset:
         assert not cpu.halted
         assert not cpu.if_flag
         assert emu.cmos._data[0x0F] == 0
+
+    def test_triple_fault_without_shutdown_code_cold_boots(self):
+        emu = self._emu()
+        cpu = emu.cpu
+        cpu._set_msw(1)
+        cpu.idt_base = 0
+        cpu.idt_limit = 0
+        emu.mem.write_byte((cpu.cs << 4) + cpu.ip, 0xCC)
+
+        cpu.execute()
+
+        assert emu.reset_requests == ['triple-fault']
+        assert (cpu.cs, cpu.ip) == (0x0000, 0x7C00)
+        assert not cpu._pm
+        assert not cpu.halted

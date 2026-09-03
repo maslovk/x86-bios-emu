@@ -36,6 +36,30 @@ def test_native_backend_keeps_python_memory_in_sync(memory, io_ports):
     assert cpu.halted
 
 
+def test_native_backend_a20_off_aliases_one_megabyte():
+    # MOV AX,1234h; MOV ES,FFFFh; MOV DI,0010h; MOV ES:[DI],AX; HLT.
+    emu = Emulator(cpu_backend='c')
+    emu.mem.ram[0x200:0x20F] = bytes((
+        0xB8, 0x34, 0x12,
+        0xBF, 0x10, 0x00,
+        0xB8, 0xFF, 0xFF,
+        0x8E, 0xC0,
+        0x26, 0x89, 0x05,
+        0xF4,
+    ))
+    cpu = emu.cpu
+    cpu.cs = cpu.ds = cpu.ss = 0
+    cpu.es = 0
+    cpu.ip = 0x200
+    cpu.sp = 0x7000
+    cpu.set_a20(False)
+
+    cpu.execute_many(32)
+
+    assert emu.mem.read_word(0x0000) == 0xFFFF
+    assert emu.mem.read_word(0x100000) == 0xFFFF
+
+
 def test_native_backend_does_not_treat_f4_branch_offset_as_hlt(
         memory, io_ports):
     # XOR AX,AX; JNZ -12. The untaken branch leaves IP immediately after an

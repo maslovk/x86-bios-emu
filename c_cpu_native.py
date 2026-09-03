@@ -100,6 +100,10 @@ class CCPU(CPU):
             0, len(self._ram), UC_PROT_ALL,
             ctypes.addressof(self._ram_buffer))
         self._pending_interrupt = None
+        self._a20_alias_hook = None
+        self._a20_low_alias_hook = None
+        self._a20_alias_read_hook = None
+        self._a20_aliasing = False
         self._native_vram_read_fallback = False
         self._native_vram_stos_fallback = False
         self._last_reg_values = None
@@ -150,6 +154,9 @@ class CCPU(CPU):
                 self._uc, self.io.video, self._ram)
         if self._native_vga_hook is None:
             self._uc.hook_add(UC_HOOK_MEM_WRITE, self._on_mem_write)
+        # A20 is disabled after reset, including during the first DPMIINST
+        # probe; install the alias hook before guest execution begins.
+        self.set_a20(False)
 
     # ── State synchronization ──────────────────────────────────────
 
@@ -201,15 +208,69 @@ class CCPU(CPU):
     # ── Native callbacks ────────────────────────────────────────────
 
     def set_a20(self, enabled):
-        """A20 gating is a Python-backend feature.
-
-        The native backend shares RAM with Unicorn directly, so the
-        address-line gate cannot be enforced there; guests that only
-        *enable* A20 (DPMI hosts, HIMEM-style loaders) behave
-        identically, while a disable request is tracked but not
-        enforced on the native path.
-        """
+        """Set the A20 gate and emulate its 1 MiB address alias in Unicorn."""
         super().set_a20(enabled)
+        if enabled:
+            if self._a20_alias_hook is not None:
+                self._uc.hook_del(self._a20_alias_hook)
+                self._a20_alias_hook = None
+            if self._a20_low_alias_hook is not None:
+                self._uc.hook_del(self._a20_low_alias_hook)
+                self._a20_low_alias_hook = None
+            if self._a20_alias_read_hook is not None:
+                self._uc.hook_del(self._a20_alias_read_hook)
+                self._a20_alias_read_hook = None
+        elif self._a20_alias_hook is None:
+            # Unicorn maps RAM linearly, so establish the state that an
+            # address-line mask would expose before the first aliased read.
+            # The write hook below maintains this pair thereafter.
+            if len(self._ram) >= 0x200000:
+                self._ram[0x100000:0x200000] = self._ram[:0x100000]
+            self._a20_alias_hook = self._uc.hook_add(
+                UC_HOOK_MEM_WRITE, self._on_a20_alias_write,
+                begin=0x100000, end=min(len(self._ram), 0x200000) - 1)
+            self._a20_low_alias_hook = self._uc.hook_add(
+                UC_HOOK_MEM_WRITE, self._on_a20_alias_write,
+                begin=0, end=0x0FFFF)
+            self._a20_alias_read_hook = self._uc.hook_add(
+                UC_HOOK_MEM_READ, self._on_a20_alias_read,
+                begin=0x100000, end=min(len(self._ram), 0x200000) - 1)
+
+    def _on_a20_alias_write(self, uc, access, address, size, value,
+                            user_data=None):
+        """Mirror writes across A20's 1 MiB alias while the gate is off.
+
+        Unicorn has one flat mapping and cannot express a runtime address-line
+        mask.  Mirroring both directions keeps reads coherent without adding
+        a per-instruction Python execution path; the hook exists only while
+        A20 is disabled.
+        """
+        if self._a20_aliasing or self._a20:
+            return
+        # Hooking only the high alias keeps normal low-memory writes native;
+        # the A20 probe writes the high address and observes the low alias.
+        alias = address ^ 0x100000
+        if alias < 0 or alias + size > len(self._ram):
+            return
+        self._a20_aliasing = True
+        try:
+            uc.mem_write(alias, int(value).to_bytes(size, 'little'))
+        finally:
+            self._a20_aliasing = False
+
+    def _on_a20_alias_read(self, uc, access, address, size, value,
+                           user_data=None):
+        """Refresh the requested side of the low/high A20 alias before read."""
+        if self._a20_aliasing or self._a20:
+            return
+        alias = address ^ 0x100000
+        if alias < 0 or alias + size > len(self._ram):
+            return
+        self._a20_aliasing = True
+        try:
+            uc.mem_write(address, bytes(self._ram[alias:alias + size]))
+        finally:
+            self._a20_aliasing = False
 
     def _on_interrupt(self, uc, number, user_data=None):
         # Unicorn has already advanced IP past CD imm8, but has not performed

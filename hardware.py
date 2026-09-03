@@ -294,6 +294,7 @@ class KeyboardController:
                 # 0xD1 command byte: the controller output port latch.
                 # Bit 1 gates A20, bit 0 (active low) drives CPU reset.
                 self._await_output_port = False
+                self._in_full = False
                 self._output_port = val & 0xFF
                 if self.on_a20:
                     self.on_a20(bool(val & 0x02))

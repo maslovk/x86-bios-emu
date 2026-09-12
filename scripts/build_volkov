@@ -14,8 +14,6 @@ import re
 import shutil
 import sys
 import tempfile
-import threading
-import time
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -63,6 +61,10 @@ class GuestDriver:
                       else 5_000_000)
         while spent < budget:
             screen = self.harness.vga_str()
+            if any(message in screen.lower() for message in (
+                    'unhandled exception', 'internal stack overflow', 'system halted')):
+                raise BuildError(f'guest terminated while waiting for {description}:\n'
+                                 + screen_tail(screen))
             if predicate(screen):
                 print(f'  reached {description} ({spent:,} steps)', flush=True)
                 return screen
@@ -71,7 +73,7 @@ class GuestDriver:
             spent += batch
             if trace and spent >= next_trace:
                 cpu = self.harness.cpu
-                code_addr = (cpu._code_base + cpu.ip) & 0xFFFFF
+                code_addr = cpu._code_base + cpu.ip
                 code = bytes(cpu._readb(code_addr + i) for i in range(8))
                 print(f'  [trace] {description}: {spent:,} steps '
                       f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
@@ -84,7 +86,7 @@ class GuestDriver:
                       f'{screen_tail(self.harness.vga_str(), 4)}', flush=True)
                 next_trace += (1_000_000 if progress else 5_000_000)
         cpu = self.harness.cpu
-        code_addr = (cpu._code_base + cpu.ip) & 0xFFFFF
+        code_addr = cpu._code_base + cpu.ip
         code = bytes(cpu._readb(code_addr + i) for i in range(8))
         raise BuildError(
             f'timed out waiting for {description} at '
@@ -128,52 +130,8 @@ class GuestDriver:
         return output
 
     def tasmx_command(self, command, drive, budget):
-        """Run TASMX until DOS regains control after its self-test/reset."""
-        # TASMX's startup self-test deliberately triple-faults to return to
-        # real mode.  That reset destroys the running DOS process, so the
-        # command must be relaunched after DOS boots again.
-        for attempt in range(2):
-            previous = self.harness.vga_str()
-            suffix = f' (retry {attempt})' if attempt else ''
-            print(f'  {drive}:\\> {command}{suffix}', flush=True)
-            self.harness.inject_string(command + '\r')
-            # Inject asynchronously so the key arrives after TASMX has
-            # entered its blocking read rather than being flushed as typeahead.
-            reset_count = len(getattr(self.harness.emu, 'reset_requests', []))
-
-            def feed_tasmx_keys():
-                for _ in range(2400):
-                    time.sleep(0.25)
-                    if len(getattr(self.harness.emu, 'reset_requests', [])) > reset_count:
-                        return
-                    self.harness.emu.kbd_ctrl.inject_key(ord(' '))
-
-            threading.Thread(target=feed_tasmx_keys, daemon=True).start()
-            screen = self.wait(
-                lambda current: current != previous and (
-                    at_prompt(current, drive) or
-                    (len(getattr(self.harness.emu, 'reset_requests', [])) >
-                     reset_count and at_prompt(current, 'C')) or
-                    'internal stack overflow' in current.lower() or
-                    'system halted' in current.lower()),
-                budget, f'completion of {command.split()[0]}')
-            if ('internal stack overflow' in screen.lower() or
-                    'system halted' in screen.lower()):
-                raise BuildError(
-                    f'TASMX terminated abnormally:\n{screen_tail(screen, 8)}')
-            if at_prompt(screen, drive):
-                return self.harness._transcript(0)
-            if attempt:
-                raise BuildError(
-                    'TASMX reset again during its restart attempt:\n' +
-                    screen_tail(screen, 12))
-            print('  TASMX self-test reset the guest; relaunching from E:',
-                  flush=True)
-            self.change_drive(drive)
-            # DOS rebuilds its environment during the reboot, so restore the
-            # staged tool directories before issuing the retry.
-            self.command(r'PATH D:\;F:\;C:\DOS', drive, 5_000_000)
-        raise AssertionError('unreachable')
+        """Configured TASMX runs normally and must return ERRORLEVEL zero."""
+        return self.command(command, drive, budget)
 
     def configure_dpmi(self):
         print('Configuring the Borland 16-bit DPMI host...', flush=True)
@@ -585,7 +543,7 @@ def build(args):
         if args.skip_dpmi_config:
             print('Using the supplied preconfigured DPMI16BI.OVL.', flush=True)
         else:
-            driver.configure_dpmi()
+            driver.command('DPMIINST -f02/02/04/0000/0000', 'D', 10_000_000)
 
         driver.command(r'PATH D:\;F:\;C:\DOS', 'D', 5_000_000)
         driver.change_drive('E')
@@ -613,21 +571,6 @@ def build(args):
                               for i in range(8))
             print(f'  [trace] IVT21={ivt_cs:04X}:{ivt_ip:04X} '
                   f'bytes={ivt_bytes.hex()}', flush=True)
-        else:
-            # A triple-fault reboot leaves ordinary RAM intact, while the
-            # rebooted DOS instance expects its pre-extender workspace.  The
-            # emulator intentionally models RAM persistence, so restore the
-            # DOS low-memory workspace before the TASMX retry as real DOS
-            # startup would have done while reinitializing it.
-            boot_memory = bytes(harness.emu.mem.ram[:0xA0000])
-            original_reset = harness.emu._warm_reset
-
-            def restore_dos_workspace(reason):
-                if reason == 'triple-fault':
-                    harness.emu.mem.ram[:0x20000] = boot_memory[:0x20000]
-                return original_reset(reason)
-
-            harness.emu._warm_reset = restore_dos_workspace
         tasmx_budget = int(os.environ.get('VC_TASMX_BUDGET',
                                           '600000000'))
         if os.environ.get('VC_CS_TRACE') == '1':

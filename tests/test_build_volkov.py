@@ -47,58 +47,44 @@ def test_atomic_publish_replaces_complete_artifact(tmp_path):
     assert not list(destination.parent.glob('.VC.COM.*.tmp'))
 
 
-def test_tasmx_relaunches_after_guest_reset(monkeypatch):
-    class Keyboard:
-        def inject_key(self, value):
-            pass
-
-    class Emulator:
-        def __init__(self):
-            self.reset_requests = []
-            self.kbd_ctrl = Keyboard()
-
-    class Harness:
-        def __init__(self):
-            self.cpu = type('CPU', (), {
-                'max_insns': 0,
-                'insn_count': 0,
-                })()
-            self.emu = Emulator()
-            self._scrollback = []
-            self.screens = ['E:\\>', 'C:\\>', 'E:\\>']
-            self.commands = []
-
-        def vga_str(self):
-            return self.screens[0]
-
-        def inject_string(self, value):
-            self.commands.append(value)
-
-        def _transcript(self, start):
-            return 'transcript'
-
-    harness = Harness()
+def test_tasmx_uses_checked_command_without_reset_or_key_injection(monkeypatch):
+    from types import SimpleNamespace
+    harness = SimpleNamespace(cpu=SimpleNamespace(max_insns=0, insn_count=0))
     driver = build_volkov.GuestDriver(harness)
-    waits = iter(['C:\\>', 'E:\\>', 'E:\\>', 'E:\\>'])
+    commands = []
 
-    def fake_wait(predicate, budget, description):
-        screen = next(waits)
-        if screen.startswith('C:'):
-            harness.emu.reset_requests.append('triple-fault')
-        return screen
+    def command(*args):
+        commands.append(args)
+        return 'assembler output'
 
-    def fake_change_drive(drive):
-        harness.commands.append(f'{drive}:\r')
+    monkeypatch.setattr(driver, 'command', command)
+    assert driver.tasmx_command('TASMX VCOVL', 'E', 100) == 'assembler output'
+    assert commands == [('TASMX VCOVL', 'E', 100)]
 
-    monkeypatch.setattr(driver, 'wait', fake_wait)
-    monkeypatch.setattr(driver, 'change_drive', fake_change_drive)
 
-    assert driver.tasmx_command('TASMX VCOVL', 'E', 100) == 'transcript'
-    assert harness.commands == [
-        'TASMX VCOVL\r', 'E:\r', 'PATH D:\\;F:\\;C:\\DOS\r',
-        'IF ERRORLEVEL 1 ECHO __VC_BUILD_FAILED__\r',
-        'TASMX VCOVL\r',
-    ]
+def test_tasmx_propagates_build_failure(monkeypatch):
+    import pytest
+    from types import SimpleNamespace
+    harness = SimpleNamespace(cpu=SimpleNamespace(max_insns=0, insn_count=0))
+    driver = build_volkov.GuestDriver(harness)
+
+    def command(*args):
+        raise build_volkov.BuildError('assembler failed')
+
+    monkeypatch.setattr(driver, 'command', command)
+    with pytest.raises(build_volkov.BuildError, match='assembler failed'):
+        driver.tasmx_command('TASMX VCOVL', 'E', 100)
+
+
+def test_wait_reports_borland_crash_without_spending_instruction_budget():
+    import pytest
+    from types import SimpleNamespace
+    harness = SimpleNamespace(
+        cpu=SimpleNamespace(max_insns=0, insn_count=0),
+        vga_str=lambda: 'Unhandled exception 000D at 01EF:1234')
+    driver = build_volkov.GuestDriver(harness)
+    with pytest.raises(build_volkov.BuildError, match='Unhandled exception'):
+        driver.wait(lambda screen: False, 600_000_000, 'TASMX')
 
 
 def test_dpmi_configuration_answers_optional_database_comment(monkeypatch):

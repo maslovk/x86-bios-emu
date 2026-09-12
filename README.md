@@ -300,8 +300,9 @@ python3 main.py --dos --host-dir ./DOS_sources/v1.25/source --host-dir-dos-text 
 python3 main.py --dos --host-dir ./dos-files --host-dir-write --persist --gtk
 python3 main.py --hard-disk dos622-new.hdd --boot-hard-disk \
   --host-mount D=./DOS_sources/TASM --host-mount E=./DOS_sources/VC_source --gtk
-./scripts/build_volkov                 # Build Volkov Commander's VC.COM and VC.OVL
-# Runs DPMIINST, TASM, LINK, and EXE2BIN in DOS; outputs go to build/volkov/
+./scripts/build_volkov --tasmx DOS_sources/TASM40/BIN/TASMX.EXE
+# Builds VC.COM and VC.OVL using DPMIINST, TASM, TASMX, LINK, and EXE2BIN in DOS
+# Outputs go to build/volkov/; source tools and disks are not modified
 # VC.OVL requires TASMX.EXE: use --tasmx PATH or set VC_TASMX=PATH
 python3 main.py --dos --cpu-backend python --gtk  # Explicit reference CPU
 python3 main.py --floppy disk.img --gtk  # Boot DOS floppy in a window

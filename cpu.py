@@ -996,35 +996,23 @@ class CPU:
         else:
             write_mem(addr, result)
 
-    def _exec_modrm_arith32(self, mod, rm, reg, imm):
-        """Register/memory form of GROUP 1 for an operand-size override."""
-        read = (lambda r: self._get_reg32(self._REG16_NAMES[r]))
-        write = (lambda r, v: self._set_reg32(self._REG16_NAMES[r], v))
-        if mod == 3:
-            value = read(rm)
+    def _alu32(self, operation, a, b):
+        """Shared full-width ALU for register, memory, and immediate forms."""
+        carry = int(self.cf) if operation in (2, 3) else 0
+        # ADC/SBB include carry in the result, but AF/OF use the original
+        # source operand (including when b + carry crosses a sign boundary).
+        if operation in (0, 2):
+            result = self._flags_add32(a, b + carry)
+            self.af = bool((a ^ b ^ result) & 0x10)
+            self.of = bool((~(a ^ b) & (a ^ result)) & 0x80000000)
+        elif operation in (3, 5, 7):
+            result = self._flags_sub32(a, b + carry)
+            self.af = bool((a ^ b ^ result) & 0x10)
+            self.of = bool(((a ^ b) & (a ^ result)) & 0x80000000)
         else:
-            addr = self._ea(mod, rm)
-            value = self._readd(addr)
-        imm &= 0xFFFFFFFF
-        if reg == 0:
-            result = self._do_add32(value, imm)
-        elif reg == 1:
-            result = value | imm
+            result = (a | b) if operation == 1 else (a & b) if operation == 4 else (a ^ b)
             self._flags_logic32(result)
-        elif reg == 5:
-            result = self._do_sub32(value, imm)
-        elif reg == 6:
-            result = value ^ imm
-            self._flags_logic32(result)
-        elif reg == 7:
-            self._do_sub32(value, imm)
-            return
-        else:
-            return
-        if mod == 3:
-            write(rm, result)
-        else:
-            self._writed(addr, result)
+        return result
 
     def _exec_group1_mem_arith(self, addr, reg, imm, is_word=True):
         """GROUP 1 helper for memory operands when EA must be resolved before imm."""
@@ -1090,6 +1078,22 @@ class CPU:
         return base + disp
 
     # ── Segment setters ────────────────────────────────────────────
+
+    def _pop_sreg(self, name):
+        """Commit the stack increment only after the segment load succeeds.
+
+        A not-present segment may be paged in by the guest's #NP handler.
+        Its exception frame must retain the pre-POP stack pointer so the
+        retried instruction reads the same selector, not the following word.
+        Compute the increment using the old stack size, including for POP SS.
+        """
+        saved_esp = self.esp
+        value = (self._popd() if self._operand_size_32 ^ self._code32
+                 else self._pop())
+        next_esp = self.esp
+        self.esp = saved_esp
+        self._load_sreg(name, value & 0xFFFF)
+        self.esp = next_esp
 
     def _set_es(self, v): self._load_sreg('es', v)
     def _set_cs(self, v, compat_return=False):
@@ -2461,24 +2465,26 @@ class CPU:
 
         # 00-05 ADD, 08-0D OR, 10-15 ADC, 18-1D SBB,
         # 20-25 AND, 28-2D SUB, 30-35 XOR, 38-3D CMP
-        if self._operand_size_32 and opc in (0x05, 0x2D, 0x3D):
-            imm = self._fetchd()
-            if opc == 0x05:
-                self.eax = self._do_add32(self.eax, imm)
-            elif opc == 0x2D:
-                self.eax = self._do_sub32(self.eax, imm)
-            else:
-                self._do_sub32(self.eax, imm)
-            return
-        if (self._operand_size_32 ^ self._code32) and opc in (0x0D, 0x25, 0x35):
-            imm = self._fetchd()
-            if opc == 0x0D:
-                self.eax |= imm
-            elif opc == 0x25:
-                self.eax &= imm
-            else:
-                self.eax ^= imm
-            self._flags_logic32(self.eax)
+        if (self._operand_size_32 ^ self._code32) and opc < 0x40 and (opc & 7) in (1, 3, 5):
+            operation = opc >> 3
+            if (opc & 7) == 5:
+                result = self._alu32(operation, self.eax, self._fetchd())
+                if operation != 7:
+                    self.eax = result
+                return
+            mod, reg, rm = self._decode_modrm()
+            addr = self._ea(mod, rm) if mod != 3 else None
+            reg_name, rm_name = self._REG16_NAMES[reg], self._REG16_NAMES[rm]
+            a = self._get_reg32(reg_name)
+            b = self._get_reg32(rm_name) if mod == 3 else self._readd(addr)
+            result = self._alu32(operation, a, b) if opc & 2 else self._alu32(operation, b, a)
+            if operation != 7:
+                if opc & 2:
+                    self._set_reg32(reg_name, result)
+                elif mod == 3:
+                    self._set_reg32(rm_name, result)
+                else:
+                    self._writed(addr, result)
             return
         if opc in (0x00, 0x01, 0x02, 0x03, 0x04, 0x05):
             self._exec_al_arith(opc, None); return
@@ -2499,15 +2505,15 @@ class CPU:
 
         # PUSH/POP segment registers
         if opc == 0x06: self._push(self.es); return
-        if opc == 0x07: self._set_es(self._pop()); return
+        if opc == 0x07: self._pop_sreg('es'); return
         if opc == 0x0E: self._push(self.cs); return
         if opc == 0x16: self._push(self.ss); return
         if opc == 0x17:
-            self._set_ss(self._pop())
+            self._pop_sreg('ss')
             self._arm_irq_shadow()
             return
         if opc == 0x1E: self._push(self.ds); return
-        if opc == 0x1F: self._set_ds(self._pop()); return
+        if opc == 0x1F: self._pop_sreg('ds'); return
 
         # Segment prefixes (handled in execute() loop now)
 
@@ -2568,6 +2574,12 @@ class CPU:
             return
 
         # 40-47 INC r16
+        if (self._operand_size_32 ^ self._code32) and 0x40 <= opc <= 0x4F:
+            name = self._REG16_NAMES[opc & 7]
+            old_cf = self.cf
+            self._set_reg32(name, self._alu32(5 if opc & 8 else 0, self._get_reg32(name), 1))
+            self.cf = old_cf
+            return
         if 0x40 <= opc <= 0x47:
             r = opc - 0x40
             old = self._reg16(r)
@@ -2804,6 +2816,21 @@ class CPU:
                 imm = self._fetchb()
                 self._exec_group1_mem_arith(addr, reg, imm, is_word=False)
             return
+        if (self._operand_size_32 ^ self._code32) and opc in (0x81, 0x83):
+            mod, reg, rm = self._decode_modrm()
+            addr = self._ea(mod, rm) if mod != 3 else None
+            imm = self._fetchd() if opc == 0x81 else self._fetchb()
+            if opc == 0x83 and imm & 0x80:
+                imm |= 0xFFFFFF00
+            name = self._REG16_NAMES[rm]
+            value = self._get_reg32(name) if mod == 3 else self._readd(addr)
+            result = self._alu32(reg, value, imm)
+            if reg != 7:
+                if mod == 3:
+                    self._set_reg32(name, result)
+                else:
+                    self._writed(addr, result)
+            return
         if opc == 0x83:
             mod, reg, rm = self._decode_modrm()
             if mod == 3:
@@ -2817,15 +2844,6 @@ class CPU:
                 if imm & 0x80:
                     imm |= 0xFF00
                 self._exec_group1_mem_arith(addr, reg, imm, is_word=True)
-            return
-
-        # 66 81/83 GROUP 1 (id / ib sign-extended)
-        if self._operand_size_32 and opc in (0x81, 0x83):
-            mod, reg, rm = self._decode_modrm()
-            imm = self._fetchd() if opc == 0x81 else self._fetchb()
-            if opc == 0x83 and imm & 0x80:
-                imm |= 0xFFFFFF00
-            self._exec_modrm_arith32(mod, rm, reg, imm)
             return
 
         # 81 GROUP 1 (iw)
@@ -2849,7 +2867,12 @@ class CPU:
         # 85 TEST r/m16, r16
         if opc == 0x85:
             mod, reg, rm = self._decode_modrm()
-            self._flags_logic16(self._reg16(reg) & self._ea_word(mod, rm))
+            if self._operand_size_32 ^ self._code32:
+                value = (self._get_reg32(self._REG16_NAMES[rm]) if mod == 3
+                         else self._readd(self._ea(mod, rm)))
+                self._flags_logic32(self._get_reg32(self._REG16_NAMES[reg]) & value)
+            else:
+                self._flags_logic16(self._reg16(reg) & self._ea_word(mod, rm))
             return
 
         # 86 XCHG r/m8, r8
@@ -2870,6 +2893,17 @@ class CPU:
         # 87 XCHG r/m16, r16
         if opc == 0x87:
             mod, reg, rm = self._decode_modrm()
+            if self._operand_size_32 ^ self._code32:
+                reg_name, rm_name = self._REG16_NAMES[reg], self._REG16_NAMES[rm]
+                value = self._get_reg32(reg_name)
+                if mod == 3:
+                    self._set_reg32(reg_name, self._get_reg32(rm_name))
+                    self._set_reg32(rm_name, value)
+                else:
+                    addr = self._ea(mod, rm)
+                    self._set_reg32(reg_name, self._readd(addr))
+                    self._writed(addr, value)
+                return
             if mod == 3:  # register-register exchange
                 v1 = self._reg16(reg)
                 v2 = self._reg16(rm)
@@ -3018,7 +3052,11 @@ class CPU:
         # A1 MOV AX, [addr]
         if opc == 0xA1:
             addr = self._fetchw()
-            self.ax = self._readw(self._physw(self._default_data_seg(), addr))
+            physical = self._physw(self._default_data_seg(), addr)
+            if self._operand_size_32 ^ self._code32:
+                self.eax = self._readd(physical)
+            else:
+                self.ax = self._readw(physical)
             return
 
         # A2 MOV [addr], AL
@@ -3030,7 +3068,11 @@ class CPU:
         # A3 MOV [addr], AX
         if opc == 0xA3:
             addr = self._fetchw()
-            self._writew(self._physw(self._default_data_seg(), addr), self.ax)
+            physical = self._physw(self._default_data_seg(), addr)
+            if self._operand_size_32 ^ self._code32:
+                self._writed(physical, self.eax)
+            else:
+                self._writew(physical, self.ax)
             return
 
         # A4 MOVSB
@@ -4012,12 +4054,20 @@ class CPU:
                     self._set_reg16(rm, r)
                 else:
                     self._writew(addr, r)
-            elif reg == 4:  # MUL r/m16
-                v = self._ea_word(mod, rm)
-                prod = self.ax * v
-                self.ax = prod & 0xFFFF
-                self.dx = (prod >> 16) & 0xFFFF
-                self.cf = prod > 0xFFFF
+            elif reg == 4:  # MUL r/m16 or r/m32
+                if self._operand_size_32 ^ self._code32:
+                    v = (self._get_reg32(self._REG16_NAMES[rm]) if mod == 3
+                         else self._readd(self._ea(mod, rm)))
+                    prod = self.eax * v
+                    self.eax = prod & 0xFFFFFFFF
+                    self.edx = prod >> 32
+                    self.cf = self.edx != 0
+                else:
+                    v = self._ea_word(mod, rm)
+                    prod = self.ax * v
+                    self.ax = prod & 0xFFFF
+                    self.dx = (prod >> 16) & 0xFFFF
+                    self.cf = prod > 0xFFFF
                 self.of = self.cf
             elif reg == 5:  # IMUL r/m16
                 v = self._ea_word(mod, rm)
@@ -4118,12 +4168,23 @@ class CPU:
         # FF INC/DEC/CALL/JMP/PUSH r/m16
         if opc == 0xFF:
             mod, reg, rm = self._decode_modrm()
+            wide_arith = (self._operand_size_32 ^ self._code32) and reg in (0, 1)
             if mod == 3:
-                target = self._reg16(rm)
+                target = (self._get_reg32(self._REG16_NAMES[rm]) if wide_arith
+                          else self._reg16(rm))
                 addr = None
             else:
                 addr = self._ea(mod, rm)
-                target = self._readw(addr)
+                target = self._readd(addr) if wide_arith else self._readw(addr)
+            if wide_arith:
+                old_cf = self.cf
+                value = self._alu32(5 if reg == 1 else 0, target, 1)
+                self.cf = old_cf
+                if mod == 3:
+                    self._set_reg32(self._REG16_NAMES[rm], value)
+                else:
+                    self._writed(addr, value)
+                return
             if reg == 0:  # INC
                 v = (target + 1) & 0xFFFF
                 self.zf = v == 0; self.sf = bool(v & 0x8000)
@@ -4307,6 +4368,8 @@ class CPU:
     def _do_shift(self, opc):
         """C0/C1 (imm8 count) and D0-D3 (1/CL count) shifts and rotates."""
         mod, reg, rm = self._decode_modrm()
+        # Displacement precedes the immediate count in memory forms.
+        addr = self._ea(mod, rm) if mod != 3 else None
         if opc == 0xD0:
             count = 1
         elif opc == 0xD1:
@@ -4321,28 +4384,30 @@ class CPU:
             count = self._fetchb() & 0x1F
 
         is_word = opc in (0xC1, 0xD1, 0xD3)
+        is_dword = is_word and (self._operand_size_32 ^ self._code32)
+        size = 32 if is_dword else 16 if is_word else 8
         # Rotate counts wrap at the operand width.  Through-carry rotates
         # include CF in the ring, so their modulus is width+1.  Without this
         # reduction ROL AL,8 and RCL AL,9 incorrectly perform a full cycle,
         # changing CF even though the architectural count is zero.
         if reg in (0, 1):
-            count %= 16 if is_word else 8
+            count %= size
         elif reg in (2, 3):
-            count %= 17 if is_word else 9
+            count %= size + 1
         if mod == 3:
             addr = None
-            val = self._get_reg16(rm) if is_word else self._get_reg8_modrm(rm)
+            val = (self._get_reg32(self._REG16_NAMES[rm]) if is_dword else
+                   self._get_reg16(rm) if is_word else self._get_reg8_modrm(rm))
         else:
             # Decode the effective address exactly once.  These are
             # read-modify-write instructions, so calling _ea_* again for the
             # write would consume the displacement a second time and advance
             # IP into the following instruction (EDLIN's ``SHR word
             # [13F2],1`` exposed this with a direct disp16 operand).
-            addr = self._ea(mod, rm)
-            val = self._readw(addr) if is_word else self._readb(addr)
+            val = (self._readd(addr) if is_dword else
+                   self._readw(addr) if is_word else self._readb(addr))
 
-        size = 16 if is_word else 8
-        mask = 0xFFFF if is_word else 0xFF
+        mask = (1 << size) - 1
         sign_bit = 1 << (size - 1)
 
         for _ in range(count):
@@ -4351,29 +4416,27 @@ class CPU:
                 val = ((val << 1) | cf) & mask
                 self.cf = cf
                 if count == 1:
-                    self.of = bool((val & sign_bit) ^ self.cf)
+                    self.of = bool(val & sign_bit) ^ bool(self.cf)
             elif reg == 1:  # ROR
                 cf = val & 1
                 val = ((val >> 1) | (cf << (size - 1))) & mask
                 self.cf = bool(cf)
                 if count == 1:
-                    self.of = bool((val & sign_bit) ^
-                                   ((val >> (size - 2)) & 1))
+                    self.of = bool(val & sign_bit) ^ bool(val & (sign_bit >> 1))
             elif reg == 2:  # RCL
                 old_cf = 1 if self.cf else 0
                 cf = bool(val & sign_bit)
                 val = ((val << 1) | old_cf) & mask
                 self.cf = cf
                 if count == 1:
-                    self.of = bool((val & sign_bit) ^ self.cf)
+                    self.of = bool(val & sign_bit) ^ bool(self.cf)
             elif reg == 3:  # RCR
                 old_cf = 1 if self.cf else 0
                 cf = val & 1
                 val = ((val >> 1) | (old_cf << (size - 1))) & mask
                 self.cf = bool(cf)
                 if count == 1:
-                    self.of = bool((val & sign_bit) ^
-                                   ((val >> (size - 2)) & 1))
+                    self.of = bool(val & sign_bit) ^ bool(val & (sign_bit >> 1))
             elif reg == 4:  # SAL/SHL
                 self.cf = bool(val & sign_bit)
                 val = (val << 1) & mask
@@ -4392,7 +4455,12 @@ class CPU:
                 val = ((val >> 1) | (val & sign_bit)) & mask
                 self.of = False
 
-        if is_word:
+        if is_dword:
+            if mod == 3:
+                self._set_reg32(self._REG16_NAMES[rm], val)
+            else:
+                self._writed(addr, val)
+        elif is_word:
             if mod == 3:
                 self._set_reg16(rm, val)
             else:

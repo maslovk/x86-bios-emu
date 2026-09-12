@@ -22,11 +22,15 @@ DPMIINST = ROOT / 'DOS_sources/TASM/DPMIINST.EXE'
 LINK = ROOT / 'DOS_sources/v4.0/src/TOOLS/LINK.EXE'
 TOOL_FILES = ('TASMX.EXE', 'RTM.EXE', 'DPMI16BI.OVL', 'DPMI32VM.OVL')
 pytestmark = [pytest.mark.slow, pytest.mark.skipif(
-    not all(p.is_file() for p in (HDD, FLOPPY, DPMIINST, LINK, *(TOOLS / f for f in TOOL_FILES))),
-    reason='local DOS 6.22, TASM 4.0 and Microsoft LINK fixtures are required')]
+    not all(p.is_file() for p in (HDD, FLOPPY, DPMIINST, *(TOOLS / f for f in TOOL_FILES))),
+    reason='local DOS 6.22 and TASM 4.0 fixtures are required')]
 
 
-def test_tasmx_assembles_links_and_runs(tmp_path):
+@pytest.mark.parametrize('linker', ['microsoft', 'turbo'])
+def test_tasmx_assembles_links_and_runs(tmp_path, linker):
+    linker_path = TOOLS / 'TLINK.EXE' if linker == 'turbo' else LINK
+    if not linker_path.is_file():
+        pytest.skip(f'local {linker} linker fixture is required')
     tools = tmp_path / 'tools'
     work = tmp_path / 'work'
     tools.mkdir()
@@ -37,7 +41,7 @@ def test_tasmx_assembles_links_and_runs(tmp_path):
     if configured_dpmi:
         shutil.copy2(configured_dpmi, tools / 'DPMI16BI.OVL')
     shutil.copy2(DPMIINST, tools / 'DPMIINST.EXE')
-    shutil.copy2(LINK, tools / 'LINK.EXE')
+    shutil.copy2(linker_path, tools / linker_path.name)
     source = """.MODEL SMALL
 .STACK 100h
 .DATA
@@ -59,6 +63,16 @@ END start
         writable=True, host_mounts={'D': str(tools), 'E': str(work)},
         host_dir_write=True, cpu_backend='python')
     try:
+        original_at_prompt = harness._at_prompt
+
+        def checked_prompt(previous):
+            screen = harness.vga_str()
+            assert 'unhandled exception' not in screen.lower(), screen
+            return original_at_prompt(previous)
+
+        # The Borland crash handler waits for a key instead of exiting.
+        # Report it immediately, not after the DOS prompt watchdog expires.
+        harness._at_prompt = checked_prompt
         build = runpy.run_path(str(ROOT / 'scripts/build_volkov'))
         driver = build['GuestDriver'](harness)
         driver.wait(lambda screen: build['at_prompt'](screen, 'C'),
@@ -88,7 +102,11 @@ END start
         output = command('TASMX E:\\HELLO.ASM,E:\\HELLO.OBJ')
         assert 'Error messages:    None' in output
         assert 'Warning messages:  None' in output
-        command('LINK E:\\HELLO.OBJ,E:\\HELLO.EXE,NUL;')
+        if linker == 'turbo':
+            output = command('TLINK E:\\HELLO.OBJ,E:\\HELLO.EXE')
+            assert 'Turbo Link  Version 6.00' in output
+        else:
+            command('LINK E:\\HELLO.OBJ,E:\\HELLO.EXE,NUL;')
         assert 'Hello from TASMX' in command('E:\\HELLO.EXE')
         assert harness.emu.reset_requests == resets_before
         harness.emu._persist_host_dir()

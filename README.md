@@ -411,9 +411,9 @@ code. Native instruction counts are batch-bounded around interrupt hooks, and
 unusual software or hardware may require the Python backend for maximum
 compatibility.
 
-### Borland TASMX 4.0
+### Borland TASMX 4.0 and Turbo Link 6.0
 
-Use the Python CPU backend for TASMX's protected-mode DPMI host. Run
+Use the Python CPU backend for TASMX and Turbo Link's protected-mode DPMI host. Run
 Borland's `DPMIINST.EXE` once alongside `DPMI16BI.OVL` to configure the
 host for this machine, then retain that configured overlay with the tools.
 For this emulator's default machine, the verified settings can be supplied
@@ -428,7 +428,8 @@ BIOS-identification scan and interactive keyboard checks.
 
 The end-to-end regression stages private copies of the local DOS 6.22 and
 TASM 4.0 fixtures, configures DPMI, assembles a sample with TASMX, links it
-with the repository's Microsoft LINK fixture, and executes the DOS program:
+with both Turbo Link 6.00 and the repository's Microsoft LINK fixture, and
+executes each resulting DOS program:
 
 ```bash
 python3 -m pytest -q -s tests/test_tasmx.py
@@ -439,8 +440,9 @@ configured overlay in this test. Original tools and disk images are not
 modified. The test also checks the object-file record checksums and verifies
 that assembling, linking, and running do not reset the guest.
 
-Turbo Link 6 still has a separate protected-mode crash; it is not used by
-this TASMX regression.
+To run only the Turbo Link path, add `-k turbo` to the command above.
+The Python core supports the restartable segment POPs and 32-bit arithmetic,
+shifts, multiplication, and table initialization used by the linker.
 
 ## Display modes
 

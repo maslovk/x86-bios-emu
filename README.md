@@ -411,6 +411,37 @@ code. Native instruction counts are batch-bounded around interrupt hooks, and
 unusual software or hardware may require the Python backend for maximum
 compatibility.
 
+### Borland TASMX 4.0
+
+Use the Python CPU backend for TASMX's protected-mode DPMI host. Run
+Borland's `DPMIINST.EXE` once alongside `DPMI16BI.OVL` to configure the
+host for this machine, then retain that configured overlay with the tools.
+For this emulator's default machine, the verified settings can be supplied
+through Borland's own configuration utility:
+
+```dos
+DPMIINST -f02/02/04/0000/0000
+```
+
+Running DPMIINST without that option performs a much slower automatic
+BIOS-identification scan and interactive keyboard checks.
+
+The end-to-end regression stages private copies of the local DOS 6.22 and
+TASM 4.0 fixtures, configures DPMI, assembles a sample with TASMX, links it
+with the repository's Microsoft LINK fixture, and executes the DOS program:
+
+```bash
+python3 -m pytest -q -s tests/test_tasmx.py
+```
+
+Set `TASMX_DPMI_OVL=/path/to/configured/DPMI16BI.OVL` to reuse an already
+configured overlay in this test. Original tools and disk images are not
+modified. The test also checks the object-file record checksums and verifies
+that assembling, linking, and running do not reset the guest.
+
+Turbo Link 6 still has a separate protected-mode crash; it is not used by
+this TASMX regression.
+
 ## Display modes
 
 The emulator supports two VGA output paths:

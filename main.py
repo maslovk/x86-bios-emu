@@ -533,6 +533,7 @@ class Emulator:
             self.mem.write_byte(0x7C00 + i, value)
         self.cpu.cs = 0x0000
         self.cpu.ip = 0x7C00
+        self.cpu._code_base = 0
         self.cpu.dl = self.boot_drive
         self.bios.initialize()
         if self.pic:
@@ -555,6 +556,10 @@ class Emulator:
         cpu.ram_wait_cycles = self.machine_profile.memory_wait_states
         cpu.prefetch_wait_cycles = self.machine_profile.prefetch_wait_cycles
         cpu.step_mode = self.step_mode
+        # DPMI16BI uses real-mode callback pointers while its temporary IDT
+        # is empty.  The CPU uses this only for that emulator-owned handoff;
+        # bare protected-mode CPU instances retain strict selector faults.
+        cpu._allow_dos_rm_callbacks = True
         # A triple fault (e.g. the deliberate null-IDT INT used by 286 DOS
         # extenders) asserts RESET and uses the normal shutdown-code resume.
         cpu.on_triple_fault = lambda: self._warm_reset('triple-fault')
@@ -590,9 +595,21 @@ class Emulator:
         cleared on dispatch, as the real POST does.
         """
         self.reset_requests.append(reason)
+        if os.environ.get('VC_RESET_TRACE') == '1':
+            print(f'[trace] warm reset reason={reason} '
+                  f'cmos0F={self.cmos._data[0x0F]:02X} '
+                  f'pm={self.cpu._pm} CS:IP={self.cpu.cs:04X}:'
+                  f'{self.cpu.ip:04X} SS:SP={self.cpu.ss:04X}:'
+                  f'{self.cpu.sp:04X}',
+                  file=sys.stderr, flush=True)
         code = self.cmos._data[0x0F] if self.cmos is not None else 0
         if code not in WARM_RESET_SHUTDOWN_CODES:
             if reason == 'triple-fault':
+                # TASMX may finish its protected-mode self-test by
+                # deliberately triple-faulting.  Flush host-mounted DOS
+                # disks before POST clears the transient machine state, so
+                # files created by the test/build remain recoverable.
+                self._persist_host_dir()
                 self._cold_reset()
                 return True
             # A reset pulse still resets the CPU even when POST has no
@@ -607,13 +624,18 @@ class Emulator:
         self._cpu_real_mode_reset()
         self.cpu.cs = vector_seg
         self.cpu.ip = vector_off
+        self.cpu._code_base = (self.cpu.cs << 4) & 0xFFFFF
         if self.cmos is not None:
             self.cmos._data[0x0F] = 0x00
         return True
 
     def _cold_reset(self):
         """Restart the current machine through its BIOS boot path."""
-        self.mem.ram[:0xA0000] = b'\x00' * 0xA0000
+        # RESET restarts the processor and POST; it does not erase RAM.
+        # Protected-mode hosts can deliberately triple-fault after placing a
+        # restart cookie or continuation state in conventional memory.  Keep
+        # that state intact here.  ``reset_guest`` remains the explicit UI
+        # action that clears guest RAM.
         self.video.clear()
         if self.kbd:
             self.kbd.buffer.clear()
@@ -635,6 +657,7 @@ class Emulator:
         self.cpu.cs = self.cpu.ds = self.cpu.es = self.cpu.ss = 0
         self.cpu.ip = 0x7C00
         self.cpu.sp = 0x7C00
+        self.cpu._code_base = 0
         self.cpu.dl = self.boot_drive
         self.cpu.halted = False
         self.cpu._reset_aborted_instruction = True
@@ -650,10 +673,26 @@ class Emulator:
         cpu.msw = 0xFFF0
         cpu._pm = False
         cpu._use_cached_code_base = False
+        cpu._code32 = False
+        cpu._stack32 = False
+        cpu._ip_hi = 0
+        cpu.flags = 0x0002
+        cpu._code_base = (cpu.cs << 4) & 0xFFFFF
         cpu.if_flag = False             # RESET services no maskable IRQs
+        cpu._irq_shadow = 0
+        cpu._seg_override = None
+        cpu._rep_prefix = None
+        cpu._operand_size_32 = False
+        cpu._address_size_32 = False
         cpu._desc_cache.clear()
         cpu._exception_active = False
         cpu._retry_interrupt_state = None
+        # A reset abandons any in-flight interrupt handoff.  Leaving these
+        # latches set lets the first post-reset INT skip its normal return
+        # bookkeeping and can strand DOS in the loader/real-mode loop.
+        cpu.int_no_return = False
+        cpu.retry_software_interrupt = False
+        cpu._pm_dos_bridge_active = False
         cpu.gdt_base = 0
         cpu.gdt_limit = 0
         cpu.idt_base = 0
@@ -1029,6 +1068,11 @@ class Emulator:
             self.kbd_ctrl.begin_irq()
         # Any delivered interrupt resumes a CPU halted by HLT.
         self.cpu.halted = False
+        if self.cpu._pm:
+            # Protected-mode IRQs use the guest IDT, including its stack
+            # switching and gate width. The guest's IRET owns the frame.
+            CPU._do_interrupt(self.cpu, vector, software=False)
+            return True
         # Push FLAGS, CS, IP and jump to handler
         saved_flags = self.cpu.flags
         self.cpu._push(saved_flags)
@@ -1039,6 +1083,9 @@ class Emulator:
         self._dispatch_hardware_interrupt(vector)
         # Pop IP, CS, FLAGS (return to interrupted code)
         if not self.cpu.int_no_return:
+            self._interrupt_return_context = (
+                f'irq={irq} vector={vector:02X} '
+                f'entry={self.cpu.cs:04X}:{self.cpu.ip:08X}')
             self._finish_interrupt_return(saved_flags)
         return True
 
@@ -1070,7 +1117,11 @@ class Emulator:
 
         self.cpu.int_no_return = False
         if bios_stub and (cs, ip) != bios_stub and (ip, cs) != (0, 0):
-            self.cpu.cs = cs
+            # A real-mode vector load must refresh the hidden CS base as
+            # well as the visible selector.  Direct assignment leaves the
+            # previous handler's fetch base active, which is especially
+            # damaging for DOS callbacks such as INT 2A during a PM bridge.
+            self.cpu._load_sreg('cs', cs)
             self.cpu.ip = ip
             self.cpu.int_no_return = True
             return
@@ -1079,8 +1130,36 @@ class Emulator:
 
     def _finish_interrupt_return(self, saved_flags):
         """Restore CS:IP and merge handler result flags with saved control flags."""
-        self.cpu.ip = self.cpu._pop()
-        self.cpu.cs = self.cpu._pop()
+        trace_return = os.environ.get('VC_CS_TRACE') == '1'
+        if trace_return:
+            # Capture the frame before consuming it.  This is particularly
+            # useful for nested DOS/PM callbacks: a bad return selector can
+            # otherwise look like a CS-load problem even though the wrong
+            # interrupt frame was selected several layers earlier.
+            frame = [self.mem.read_word(self.cpu._phys(
+                self.cpu.ss, (self.cpu.sp + 2 * i) & 0xFFFF))
+                     for i in range(4)]
+            if frame[1] >= 0x6000 or frame[0] > 0x8000:
+                print(f'  [trace] IRET frame before pop '
+                      f'current={self.cpu.cs:04X}:{self.cpu.ip:08X} '
+                      f'PM={self.cpu._pm} SS:SP={self.cpu.ss:04X}:{self.cpu.sp:04X} '
+                      f'frame={" ".join(f"{v:04X}" for v in frame)} '
+                      f'saved_flags={saved_flags:04X} '
+                      f'context={getattr(self, "_interrupt_return_context", "?")}',
+                      file=sys.stderr, flush=True)
+        ret_ip = self.cpu._pop()
+        ret_cs = self.cpu._pop()
+        if (os.environ.get('VC_BUILD_TRACE') == '1'
+                and (ret_cs > 0x7000 or ret_ip > 0x8000)):
+            print(f'  [trace] suspicious interrupt return '
+                  f'{ret_cs:04X}:{ret_ip:04X} '
+                  f'SS:SP={self.cpu.ss:04X}:{self.cpu.sp:04X}',
+                  file=sys.stderr, flush=True)
+        self.cpu.ip = ret_ip
+        # Restore CS architecturally.  In real mode this also refreshes the
+        # hidden fetch base; assigning the visible selector directly leaves
+        # post-reset DOS returns executing from the previous handler's base.
+        self.cpu._load_sreg('cs', ret_cs)
         self.cpu._pop()  # Discard the stack copy; we already captured FLAGS.
         self.cpu.flags = self._merge_interrupt_flags(saved_flags, self.cpu.flags)
 
@@ -1110,10 +1189,340 @@ class Emulator:
         bios_ref = self.bios
 
         def hooked_interrupt(n, error_code=None, software=False):
+            if (software and self.cpu._pm
+                    and os.environ.get('VC_BUILD_TRACE') == '1'):
+                print(f'  [trace] PM software INT{n:02X} '
+                      f'CS:IP={self.cpu.cs:04X}:{self.cpu.ip:08X} '
+                      f'AX={self.cpu.ax:04X} DS={self.cpu.ds:04X} '
+                      f'DX={self.cpu.dx:04X}', file=sys.stderr,
+                      flush=True)
             # A protected-mode guest owns its IDT: dispatch through the
             # CPU's gate machinery (including call/task gates and ring
             # switches) instead of the real-mode IVT/BIOS layer below.
             if self.cpu._pm:
+                gate = self.cpu.idt_base + n * 8
+                if (n * 8 + 7 <= self.cpu.idt_limit
+                        and self.cpu._readb(gate + 5) & 0x80):
+                    # A resident DPMI host owns its interrupt services.
+                    # In particular, INT 21h pointers are selectors here;
+                    # the host must translate them before calling DOS.
+                    CPU._do_interrupt(self.cpu, n, error_code=error_code,
+                                      software=software)
+                    return
+                # Borland's 16-bit DPMI host queries DOS's interrupt table
+                # while its transient client CS is active.  During the
+                # handoff it deliberately has no usable protected-mode IDT,
+                # so virtualize DOS's AH=35h (Get Interrupt Vector) and
+                # AH=25h (Set Interrupt Vector) and AH=4Ah (Resize Memory
+                # Block) through the real-mode DOS surface.
+                # Other protected interrupts retain
+                # normal IDT/triple-fault semantics.
+                if (software and n == 0x21 and
+                        (self.cpu.ax >> 8) in (0x25, 0x35, 0x4A)):
+                    vector = self.cpu.ax & 0xFF
+                    service = self.cpu.ax >> 8
+                    if service == 0x35:
+                        original_ip = self.mem.read_word(vector * 4)
+                        original_cs = self.mem.read_word(vector * 4 + 2)
+                        if vector == 0x21 and not hasattr(
+                                self, '_dos_int21_vector'):
+                            self._dos_int21_vector = (original_cs,
+                                                      original_ip)
+                        self.cpu.bx = original_ip
+                        self.cpu._set_es(original_cs)
+                    elif service == 0x25:
+                        # AH=25h installs DS:DX itself as the new handler
+                        # address; DS:DX is not a pointer to the vector.
+                        # DS may be a protected-mode selector whose
+                        # descriptor base differs from DS<<4, so convert
+                        # that base to the equivalent real-mode
+                        # segment:offset before updating the IVT.
+                        desc = self.cpu._desc_cache.get(self.cpu.ds)
+                        base = desc[0] if desc is not None else \
+                            ((self.cpu.ds << 4) & 0xFFFFF)
+                        if base & 0xF:
+                            linear = (base + self.cpu.dx) & 0xFFFFF
+                            new_seg, new_off = linear >> 4, linear & 0xF
+                        else:
+                            new_seg = (base >> 4) & 0xFFFF
+                            new_off = self.cpu.dx & 0xFFFF
+                        self.mem.write_word(vector * 4, new_off)
+                        self.mem.write_word(vector * 4 + 2, new_seg)
+                    # The emulator owns the DOS workspace; AH=4A is a
+                    # successful no-op for the DPMI host's block resize.
+                    self.cpu.cf = False
+                    return
+                if software and n == 0x21:
+                    # DOS services are real-mode code.  A DPMI client may
+                    # invoke them while its transient protected-mode IDT is
+                    # unavailable; execute the real IVT handler synchronously
+                    # and resume after its IRET with the PM hidden state
+                    # restored.  This keeps file, memory, and other DOS
+                    # services on the guest's actual DOS implementation.
+                    cpu = self.cpu
+                    if (os.environ.get('VC_BUILD_TRACE') == '1'
+                            and cpu.ah == 0x3D):
+                        try:
+                            filename_addr = cpu._phys(cpu.ds, cpu.dx)
+                            filename = bytearray()
+                            for i in range(96):
+                                value = cpu._readb(filename_addr + i)
+                                if value == 0:
+                                    break
+                                filename.append(value)
+                            filename_text = bytes(filename).decode(
+                                'ascii', errors='replace')
+                        except Exception as exc:
+                            filename_text = f'<read failed: {exc}>'
+                        print(f'  [trace] PM DOS open DS:DX={cpu.ds:04X}:'
+                              f'{cpu.dx:04X} name={filename_text!r} '
+                              f'CS:IP={cpu.cs:04X}:{cpu.ip:08X}',
+                              file=sys.stderr, flush=True)
+                    vector = n * 4
+                    return_cs, return_ip = cpu.cs, cpu.ip
+                    dos_vector = getattr(self, '_dos_int21_vector', None)
+                    if dos_vector is None:
+                        handler_ip = self.mem.read_word(vector)
+                        handler_cs = self.mem.read_word(vector + 2)
+                    else:
+                        handler_cs, handler_ip = dos_vector
+                    if handler_ip or handler_cs:
+                        # This pair came from the real-mode IVT.  A numeric
+                        # segment such as 0032 may also be a valid protected
+                        # mode selector in the DPMI GDT, but that coincidence
+                        # must not change the IVT's segment:offset meaning.
+                        # Execute the saved DOS entry through the real-mode
+                        # bridge below; it performs the required mode switch.
+                        # The PM selectors may have descriptor bases that do
+                        # not equal selector<<4.  DOS runs in real mode, so
+                        # temporarily express those same linear bases as
+                        # paragraph segment values before it touches the
+                        # caller's data or stack.
+                        def real_segment(selector):
+                            desc = cpu._desc_cache.get(selector)
+                            base = desc[0] if desc is not None else \
+                                ((selector << 4) & 0xFFFFF)
+                            return (base >> 4) & 0xFFFF
+
+                        protected = {
+                            'msw': cpu.msw, '_pm': cpu._pm,
+                            'gdt_base': cpu.gdt_base,
+                            'gdt_limit': cpu.gdt_limit,
+                            'idt_base': cpu.idt_base,
+                            'idt_limit': cpu.idt_limit,
+                            'ldtr_selector': cpu.ldtr_selector,
+                            'tr_selector': cpu.tr_selector,
+                            '_cpl': cpu._cpl,
+                            '_code_base': cpu._code_base,
+                            '_code32': cpu._code32,
+                            '_stack32': cpu._stack32,
+                            '_ip_hi': cpu._ip_hi,
+                            '_use_cached_code_base':
+                                cpu._use_cached_code_base,
+                            'cs': cpu.cs, 'ip': cpu.ip,
+                            'ss': cpu.ss, 'sp': cpu.sp,
+                            'ds': cpu.ds, 'es': cpu.es,
+                            'flags': cpu.flags,
+                            'desc_cache': dict(cpu._desc_cache),
+                            'halted': cpu.halted,
+                            'exception_active': cpu._exception_active,
+                        }
+                        cpu._pm = False
+                        cpu.msw &= ~0x0001
+                        cpu._use_cached_code_base = False
+                        cpu._code32 = False
+                        cpu._stack32 = False
+                        cpu.ss = real_segment(protected['ss']) \
+                            if 'ss' in protected else real_segment(cpu.ss)
+                        cpu.ds = real_segment(protected['ds']) \
+                            if 'ds' in protected else real_segment(cpu.ds)
+                        cpu.es = real_segment(protected['es']) \
+                            if 'es' in protected else real_segment(cpu.es)
+                        # DOS filesystem services can use substantially more
+                        # stack than the PM caller's handoff frame leaves
+                        # below SP.  Keep the real-mode INT/IRET frame and
+                        # DOS's nested calls on a private conventional-memory
+                        # stack; the protected SS:SP is restored below.
+                        cpu.ss = 0x7000
+                        cpu.sp = 0xFF00
+                        cpu._code_base = (handler_cs << 4) & 0xFFFFF
+                        if os.environ.get('VC_BUILD_TRACE') == '1':
+                            handler_addr = (handler_cs << 4) + handler_ip
+                            handler_bytes = bytes(
+                                self.mem.read_byte(handler_addr + i)
+                                for i in range(8))
+                            print(f'  [trace] PM DOS bridge AH={cpu.ah:02X} '
+                                  f'handler={handler_cs:04X}:{handler_ip:04X} '
+                                  f'DS={cpu.ds:04X} ES={cpu.es:04X} '
+                                  f'SS={cpu.ss:04X}:{cpu.sp:04X} '
+                                  f'bytes={handler_bytes.hex()}',
+                                  file=sys.stderr, flush=True)
+                        # Do not call the normal real-mode entry here: it
+                        # rereads IVT[21h], which TASMX has deliberately
+                        # replaced with its (unavailable) PM thunk.  Enter
+                        # the saved DOS target directly with the same frame
+                        # that a hardware INT instruction would create.
+                        cpu._push(cpu.flags)
+                        cpu.tf = False
+                        cpu.if_flag = False
+                        cpu._push(cpu.cs)
+                        cpu._push(cpu.ip)
+                        if os.environ.get('VC_BUILD_TRACE') == '1':
+                            print(f'  [trace] PM DOS bridge enter '
+                                  f'return={return_cs:04X}:{return_ip:08X} '
+                                  f'protected SS:SP={protected["ss"]:04X}:'
+                                  f'{protected["sp"]:04X} '
+                                  f'rmframe={cpu.ss:04X}:{cpu.sp:04X}',
+                                  file=sys.stderr, flush=True)
+                        cpu.cs = handler_cs
+                        cpu.ip = handler_ip
+                        cpu._pm_dos_bridge_active = True
+                        returned = False
+                        bridge_trace = int(os.environ.get(
+                            'VC_PM_DOS_TRACE', '0'))
+                        bridge_progress = (
+                            os.environ.get('VC_BUILD_PROGRESS') == '1')
+                        bridge_pit = 0
+                        bridge_budget = int(os.environ.get(
+                            'VC_PM_DOS_STEPS', '20000000'))
+                        for bridge_step in range(bridge_budget):
+                            # DOS console services may poll INT 16h with IF
+                            # clear while the bridge is executing.  In that
+                            # case the normal IRQ pump cannot expose a queued
+                            # host key, so make the controller's next byte
+                            # visible directly; BIOS INT 16h will consume it.
+                            if (self.kbd_ctrl and
+                                    self.kbd_ctrl.has_data() and
+                                    not self.kbd_ctrl.has_output_data()):
+                                self.kbd_ctrl.service_input(force=True)
+                            if (bridge_progress and bridge_step and
+                                    bridge_step % 1_000_000 == 0):
+                                bridge_addr = (cpu._code_base + cpu.ip) & 0xFFFFF
+                                bridge_op = bytes(
+                                    cpu._readb(bridge_addr + i)
+                                    for i in range(6))
+                                bridge_stack = [cpu._readw(cpu._phys(
+                                    cpu.ss, (cpu.sp + 2 * i) & 0xFFFF))
+                                    for i in range(4)]
+                                print(f'  [trace] PM DOS bridge progress '
+                                      f'{bridge_step:,}/{bridge_budget:,} '
+                                      f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
+                                      f'AX={cpu.ax:04X} '
+                                      f'AH={cpu.ah:02X} flags={cpu.flags:04X} '
+                                      f'op={bridge_op.hex()} '
+                                      f'stack={" ".join(f"{v:04X}" for v in bridge_stack)} '
+                                      f'kbd={int(bool(self.kbd_ctrl and self.kbd_ctrl.has_data()))} '
+                                      f'pm={cpu._pm} '
+                                      f'halted={cpu.halted}',
+                                      file=sys.stderr, flush=True)
+                            if (not cpu._pm and cpu.cs == return_cs and
+                                    cpu.ip == return_ip):
+                                returned = True
+                                break
+                            if bridge_trace:
+                                addr = (cpu.cs << 4) + cpu.ip
+                                raw = bytes(cpu.mem.read_byte(addr + i)
+                                            for i in range(5))
+                                print(f'  [trace] DOS {cpu.cs:04X}:{cpu.ip:04X} '
+                                      f'op={raw[0]:02X} bytes={raw.hex()} '
+                                      f'AX={cpu.ax:04X} SP={cpu.sp:04X} '
+                                      f'flags={cpu.flags:04X}',
+                                      file=sys.stderr, flush=True)
+                                bridge_trace -= 1
+                            if not cpu.execute():
+                                if self.pit:
+                                    self.io.tick(1.0 / 18.2)
+                                self._check_and_dispatch_irq()
+                                self._schedule_keyboard_irq()
+                                if not cpu.halted:
+                                    continue
+                                break
+                            bridge_pit += 1
+                            if bridge_pit >= 256:
+                                bridge_pit = 0
+                                if self.pit:
+                                    self.io.tick(1.0 / 18.2)
+                                self._check_and_dispatch_irq()
+                                self._schedule_keyboard_irq()
+                        if returned:
+                            # 16-bit DOS preserves the visible segment
+                            # context of its caller; restore the PM caches
+                            # and mode, but retain AX/flags/etc. as returned
+                            # by DOS.
+                            cpu.msw = protected['msw']
+                            cpu._pm = protected['_pm']
+                            cpu.gdt_base = protected['gdt_base']
+                            cpu.gdt_limit = protected['gdt_limit']
+                            cpu.idt_base = protected['idt_base']
+                            cpu.idt_limit = protected['idt_limit']
+                            cpu.ldtr_selector = protected['ldtr_selector']
+                            cpu.tr_selector = protected['tr_selector']
+                            cpu._cpl = protected['_cpl']
+                            cpu._code_base = protected['_code_base']
+                            cpu._code32 = protected['_code32']
+                            cpu._stack32 = protected['_stack32']
+                            cpu._ip_hi = protected['_ip_hi']
+                            cpu._use_cached_code_base = \
+                                protected['_use_cached_code_base']
+                            cpu.cs = protected['cs']
+                            cpu.ip = protected['ip']
+                            cpu.ss = protected['ss']
+                            cpu.sp = protected['sp']
+                            cpu.ds = protected['ds']
+                            cpu.es = protected['es']
+                            cpu._desc_cache = protected['desc_cache']
+                            cpu.halted = protected['halted']
+                            cpu._exception_active = \
+                                protected['exception_active']
+                            cpu._pm_dos_bridge_active = False
+                            if os.environ.get('VC_BUILD_TRACE') == '1':
+                                print(f'  [trace] PM DOS bridge returned '
+                                      f'AX={cpu.ax:04X} CF={int(cpu.cf)}',
+                                      file=sys.stderr, flush=True)
+                            return
+                        cpu._pm_dos_bridge_active = False
+                        if os.environ.get('VC_BUILD_TRACE') == '1':
+                            print(f'  [trace] PM DOS bridge exhausted '
+                                  f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
+                                  f'op={cpu.mem.read_byte((cpu.cs << 4) + cpu.ip):02X} '
+                                  f'AX={cpu.ax:04X} BX={cpu.bx:04X} '
+                                  f'CX={cpu.cx:04X} DX={cpu.dx:04X} '
+                                  f'halted={cpu.halted}',
+                                  file=sys.stderr, flush=True)
+                        # Do not fall through to the normal PM INT 21h
+                        # dispatcher after the synchronous bridge has
+                        # exhausted its budget.  At this point the CPU is
+                        # still using the bridge's real-mode stack; letting
+                        # the original path continue consumes a mixed frame
+                        # and eventually underflows SP into DOS memory.
+                        cpu.msw = protected['msw']
+                        cpu._pm = protected['_pm']
+                        cpu.gdt_base = protected['gdt_base']
+                        cpu.gdt_limit = protected['gdt_limit']
+                        cpu.idt_base = protected['idt_base']
+                        cpu.idt_limit = protected['idt_limit']
+                        cpu.ldtr_selector = protected['ldtr_selector']
+                        cpu.tr_selector = protected['tr_selector']
+                        cpu._cpl = protected['_cpl']
+                        cpu._code_base = protected['_code_base']
+                        cpu._code32 = protected['_code32']
+                        cpu._stack32 = protected['_stack32']
+                        cpu._ip_hi = protected['_ip_hi']
+                        cpu._use_cached_code_base = \
+                            protected['_use_cached_code_base']
+                        cpu.cs = protected['cs']
+                        cpu.ip = protected['ip']
+                        cpu.ss = protected['ss']
+                        cpu.sp = protected['sp']
+                        cpu.ds = protected['ds']
+                        cpu.es = protected['es']
+                        cpu._desc_cache = protected['desc_cache']
+                        cpu.halted = protected['halted']
+                        cpu._exception_active = protected['exception_active']
+                        cpu._pm_dos_bridge_active = False
+                        cpu.flags = protected['flags'] | 0x0001
+                        cpu.ax = 0x0008       # DOS bridge timeout/error
+                        return
                 CPU._do_interrupt(self.cpu, n, error_code=error_code,
                                   software=software)
                 return
@@ -1125,6 +1534,14 @@ class Emulator:
                 self._int28_idle_calls += 1
             # Push flags, CS, IP (standard INT behavior)
             entry_cs, entry_ip = self.cpu.cs, self.cpu.ip
+            if (os.environ.get('VC_BUILD_TRACE') == '1'
+                    and getattr(self.cpu, '_pm_dos_bridge_active', False)
+                    and n in (0x13, 0x21, 0x24)):
+                print(f'  [trace] DOS nested INT{n:02X} '
+                      f'AX={self.cpu.ax:04X} BX={self.cpu.bx:04X} '
+                      f'CX={self.cpu.cx:04X} DX={self.cpu.dx:04X} '
+                      f'CS:IP={self.cpu.cs:04X}:{self.cpu.ip:04X}',
+                      file=sys.stderr, flush=True)
             stub = bios_ref.ivt_stubs.get(n)
             at_bios_stub = (stub is not None
                             and (entry_cs, entry_ip) == (stub[0], stub[1] + 2))
@@ -1147,9 +1564,26 @@ class Emulator:
             self.cpu.int_no_return = False
             self.cpu.retry_software_interrupt = False
             # Call BIOS handler (modifies registers; sets int_no_return for boot)
-            bios_ref.handle_interrupt(self.cpu, n)
+            nested_dos = (getattr(self.cpu, '_pm_dos_bridge_active', False)
+                          and n == 0x21
+                          and getattr(self, '_dos_int21_vector', None))
+            if nested_dos:
+                dos_cs, dos_ip = self._dos_int21_vector
+                # The DPMI thunk has switched back to real mode.  Load CS
+                # architecturally so the hidden real-mode fetch base follows
+                # the DOS vector; assigning the visible selector alone would
+                # keep fetching from the thunk's previous segment.
+                self.cpu._load_sreg('cs', dos_cs)
+                self.cpu.ip = dos_ip
+                self.cpu.int_no_return = True
+            else:
+                bios_ref.handle_interrupt(self.cpu, n)
             # For normal interrupts: restore CS:IP and IRET-style control flags.
             if not self.cpu.int_no_return:
+                self._interrupt_return_context = (
+                    f'int={n:02X} software={software} '
+                    f'entry={entry_cs:04X}:{entry_ip:08X} '
+                    f'handler={self.cpu.cs:04X}:{self.cpu.ip:08X}')
                 self._finish_interrupt_return(saved_flags)
                 if self.cpu.retry_software_interrupt:
                     # INT imm8 is two bytes.  Repeating it lets the outer loop

@@ -123,13 +123,19 @@ class BIOS:
         # BIOS IVT stubs are `INT n; IRET`, so an app that hooks and *chains*
         # to the old vector (e.g. IO.SYS's INT 13h) would recurse if we
         # transferred, and the Python handler is what boots DOS correctly.
-        if n in (0x01, 0x03, 0x20, 0x21, 0x29):
+        if n in (0x01, 0x03, 0x20, 0x21, 0x29, 0x2A):
             ip = self.mem.read_word(n * 4)
             cs = self.mem.read_word(n * 4 + 2)
             stub = self.ivt_stubs.get(n)
             if ((stub is None or (cs, ip) != stub)
                     and (ip, cs) != (0, 0)):
-                cpu.cs = cs
+                # Loading a real-mode vector updates the hidden CS base too;
+                # assigning only the visible selector makes DOS callbacks
+                # fetch instructions from the previous handler's segment.
+                if hasattr(cpu, '_load_sreg'):
+                    cpu._load_sreg('cs', cs)
+                else:
+                    cpu.cs = cs
                 cpu.ip = ip
                 cpu.int_no_return = True
                 return
@@ -140,7 +146,10 @@ class BIOS:
         ip = self.mem.read_word(n * 4)
         cs = self.mem.read_word(n * 4 + 2)
         if ip != 0 or cs != 0:
-            cpu.cs = cs
+            if hasattr(cpu, '_load_sreg'):
+                cpu._load_sreg('cs', cs)
+            else:
+                cpu.cs = cs
             cpu.ip = ip
             cpu.int_no_return = True
 
@@ -329,7 +338,10 @@ class BIOS:
         # let its IRET consume the original IRQ frame. Skip the built-in BIOS
         # stub here; it is only for far calls, not for hardware IRQ chaining.
         if (ip, cs) != (0, 0) and (cs, ip) != self.ivt_stubs.get(0x1C):
-            cpu.cs = cs
+            if hasattr(cpu, '_load_sreg'):
+                cpu._load_sreg('cs', cs)
+            else:
+                cpu.cs = cs
             cpu.ip = ip
             cpu.int_no_return = True
 
@@ -1273,11 +1285,14 @@ class BIOS:
         elif ah == 0x04:  # Get RTC date
             if self.cmos:
                 t = self.cmos.get_date_bcd()
-                cpu.cx = (t['weekday'] << 8) | t['day']
-                cpu.dx = (t['month'] << 8) | t['year']
+                cpu.cx = (t['century'] << 8) | t['year']
+                cpu.dx = (t['month'] << 8) | t['day']
                 cpu.flags &= ~0x01
             else:
                 cpu.flags |= 0x01
+        else:
+            cpu.ah = 0x86
+            cpu.cf = True
 
     # ── INT 2Ah: (compat) Get System Time ──────────────────────
 

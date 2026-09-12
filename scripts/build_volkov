@@ -14,6 +14,8 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
+import time
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -54,9 +56,11 @@ class GuestDriver:
 
     def wait(self, predicate, budget, description):
         spent = 0
-        trace = (os.environ.get('VC_BUILD_TRACE') == '1' and
-                 'TASMX' in description)
-        next_trace = 5_000_000
+        progress = os.environ.get('VC_BUILD_PROGRESS') == '1'
+        trace = ((os.environ.get('VC_BUILD_TRACE') == '1' or progress) and
+                 ('TASMX' in description or progress))
+        next_trace = (1_000_000 if progress
+                      else 5_000_000)
         while spent < budget:
             screen = self.harness.vga_str()
             if predicate(screen):
@@ -67,16 +71,30 @@ class GuestDriver:
             spent += batch
             if trace and spent >= next_trace:
                 cpu = self.harness.cpu
+                code_addr = (cpu._code_base + cpu.ip) & 0xFFFFF
+                code = bytes(cpu._readb(code_addr + i) for i in range(8))
                 print(f'  [trace] {description}: {spent:,} steps '
                       f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
+                      f'SS:SP={cpu.ss:04X}:{cpu.sp:04X} '
+                      f'AX={cpu.ax:04X} BX={cpu.bx:04X} '
+                      f'CX={cpu.cx:04X} DX={cpu.dx:04X} '
+                      f'bytes={code.hex()} '
                       f'pm={cpu._pm} halted={cpu.halted} '
                       f'resets={getattr(self.harness.emu, "reset_requests", [])}\n'
                       f'{screen_tail(self.harness.vga_str(), 4)}', flush=True)
-                next_trace += 5_000_000
+                next_trace += (1_000_000 if progress else 5_000_000)
         cpu = self.harness.cpu
+        code_addr = (cpu._code_base + cpu.ip) & 0xFFFFF
+        code = bytes(cpu._readb(code_addr + i) for i in range(8))
         raise BuildError(
             f'timed out waiting for {description} at '
-            f'{cpu.cs:04X}:{cpu.ip:04X}\n{screen_tail(self.harness.vga_str())}')
+            f'{cpu.cs:04X}:{cpu.ip:04X} '
+            f'op={code.hex()} pm={cpu._pm} '
+            f'SS:SP={cpu.ss:04X}:{cpu.sp:04X} '
+            f'AX={cpu.ax:04X} BX={cpu.bx:04X} '
+            f'CX={cpu.cx:04X} DX={cpu.dx:04X} '
+            f'resets={getattr(self.harness.emu, "reset_requests", [])}\n'
+            f'{screen_tail(self.harness.vga_str())}')
 
     def change_drive(self, drive):
         previous = self.harness.vga_str()
@@ -110,23 +128,68 @@ class GuestDriver:
         return output
 
     def tasmx_command(self, command, drive, budget):
-        """Run TASMX, accepting its intentional POST reset completion."""
-        previous = self.harness.vga_str()
-        print(f'  {drive}:\\> {command}', flush=True)
-        self.harness.inject_string(command + '\r')
-        screen = self.wait(
-            lambda current: current != previous and (
-                at_prompt(current, drive) or
-                'post:' in current.lower() and
-                'all tests passed' in current.lower()),
-            budget, f'completion of {command.split()[0]}')
-        if 'post:' in screen.lower() and 'all tests passed' in screen.lower():
-            print('  TASMX final screen: POST: All tests passed.', flush=True)
-        return self.harness._transcript(0)
+        """Run TASMX until DOS regains control after its self-test/reset."""
+        # TASMX's startup self-test deliberately triple-faults to return to
+        # real mode.  That reset destroys the running DOS process, so the
+        # command must be relaunched after DOS boots again.
+        for attempt in range(2):
+            previous = self.harness.vga_str()
+            suffix = f' (retry {attempt})' if attempt else ''
+            print(f'  {drive}:\\> {command}{suffix}', flush=True)
+            self.harness.inject_string(command + '\r')
+            # Inject asynchronously so the key arrives after TASMX has
+            # entered its blocking read rather than being flushed as typeahead.
+            reset_count = len(getattr(self.harness.emu, 'reset_requests', []))
+
+            def feed_tasmx_keys():
+                for _ in range(2400):
+                    time.sleep(0.25)
+                    if len(getattr(self.harness.emu, 'reset_requests', [])) > reset_count:
+                        return
+                    self.harness.emu.kbd_ctrl.inject_key(ord(' '))
+
+            threading.Thread(target=feed_tasmx_keys, daemon=True).start()
+            screen = self.wait(
+                lambda current: current != previous and (
+                    at_prompt(current, drive) or
+                    (len(getattr(self.harness.emu, 'reset_requests', [])) >
+                     reset_count and at_prompt(current, 'C')) or
+                    'internal stack overflow' in current.lower() or
+                    'system halted' in current.lower()),
+                budget, f'completion of {command.split()[0]}')
+            if ('internal stack overflow' in screen.lower() or
+                    'system halted' in screen.lower()):
+                raise BuildError(
+                    f'TASMX terminated abnormally:\n{screen_tail(screen, 8)}')
+            if at_prompt(screen, drive):
+                return self.harness._transcript(0)
+            if attempt:
+                raise BuildError(
+                    'TASMX reset again during its restart attempt:\n' +
+                    screen_tail(screen, 12))
+            print('  TASMX self-test reset the guest; relaunching from E:',
+                  flush=True)
+            self.change_drive(drive)
+            # DOS rebuilds its environment during the reboot, so restore the
+            # staged tool directories before issuing the retry.
+            self.command(r'PATH D:\;F:\;C:\DOS', drive, 5_000_000)
+        raise AssertionError('unreachable')
 
     def configure_dpmi(self):
         print('Configuring the Borland 16-bit DPMI host...', flush=True)
         self.harness.inject_string('DPMIINST.EXE\r')
+        # A supplied DPMI16BI.OVL may already contain the machine database
+        # entry.  In that case DPMIINST returns directly to DOS and there is
+        # no Proceed/A20 prompt to answer.
+        initial = self.wait(
+            lambda screen: ('proceed? (space to continue' in screen.lower()
+                            or 'machine already in dpmi16bi' in screen.lower()
+                            or at_prompt(screen, 'D')),
+            60_000_000, 'DPMIINST startup')
+        if ('machine already in dpmi16bi' in initial.lower() or
+                at_prompt(initial, 'D')):
+            print('  DPMI16BI.OVL already configured.', flush=True)
+            return
         prompts = (
             ('Proceed? (space to continue', 60_000_000, 'Proceed prompt'),
             ('A20 enabled, please press', 30_000_000, 'A20-enabled prompt'),
@@ -149,6 +212,7 @@ class GuestDriver:
             'cannot find method',
             'error writing checkpoint file',
         )
+        comment_sent = False
         for phase in range(1, 21):
             for _ in range(40):
                 self.harness.run_steps(250_000)
@@ -166,6 +230,17 @@ class GuestDriver:
                     print(f'  DPMI16BI.OVL configured (phase {phase})',
                           flush=True)
                     return
+                if ('please enter comment for database file' in lowered
+                        and not comment_sent):
+                    self.harness.inject_string('\r')
+                    comment_sent = True
+                    continue
+                # The installer can ask for another liveness key within
+                # this phase. Keep one key available without building up a
+                # typeahead backlog or waiting ten million instructions.
+                controller = self.harness.emu.kbd_ctrl
+                if controller is not None and not controller.has_data():
+                    self.harness.inject_string(' ')
             self.harness.inject_string(' ')
             print(f'  completed DPMI safety phase {phase}', flush=True)
         raise BuildError(
@@ -232,6 +307,12 @@ def parse_args(argv=None):
     parser.add_argument(
         '--link-dir', default=os.environ.get('VC_LINK_DIR'),
         help='directory containing LINK.EXE and EXE2BIN.EXE')
+    parser.add_argument(
+        '--tasmx-only', action='store_true',
+        help='skip the VC.COM loader and run only the TASMX overlay build')
+    parser.add_argument(
+        '--skip-dpmi-config', action='store_true',
+        help='use a preconfigured DPMI16BI.OVL instead of running DPMIINST')
     return parser.parse_args(argv)
 
 
@@ -296,59 +377,277 @@ def build(args):
             },
             host_dir_write=True, cpu_backend='python')
         if os.environ.get('VC_BUILD_TRACE') == '1':
+            # DPMIINST probes disk paths before its self-test reset.  Keep a
+            # bounded record of low-numbered hard-disk writes so a reboot
+            # failure can be distinguished from a CPU-state failure.
+            disk = harness.emu.hard_disk
+            original_write_sector = disk.write_sector
+            def trace_disk_write(lba, buf):
+                if lba < 64:
+                    print(f'  [trace] HDD write lba={lba} '
+                          f'head={bytes(buf[:8]).hex()}', flush=True)
+                return original_write_sector(lba, buf)
+            disk.write_sector = trace_disk_write
             original_reset = harness.emu._warm_reset
             def trace_reset(reason):
                 cpu = harness.cpu
+                changed = []
+                current = harness.emu.mem.ram
+                start = None
+                for address in range(0xA0000):
+                    if current[address] != boot_memory[address]:
+                        if start is None:
+                            start = address
+                    elif start is not None:
+                        changed.append((start, address))
+                        start = None
+                if start is not None:
+                    changed.append((start, 0xA0000))
+                summary = ' '.join(f'{a:05X}-{b:05X}'
+                                   for a, b in changed[:16])
+                pages = sorted({address // 0x1000
+                                 for address in range(0xA0000)
+                                 if current[address] != boot_memory[address]})
+                restore_mode = os.environ.get('VC_RESTORE_DOS_LOW')
+                if restore_mode:
+                    restore_end = 0x20000 if restore_mode == '1' else 0x50000
+                    current[:restore_end] = boot_memory[:restore_end]
+                    print(f'  [trace] restored pre-TASMX DOS workspace '
+                          f'0x00000-0x{restore_end - 1:05X}', flush=True)
                 print(f'  [trace] RESET reason={reason} '
                       f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
                       f'pm={cpu._pm} '
                       f'shutdown={harness.emu.cmos._data[0x0F]:02X} '
                       f'vector={harness.emu.mem.read_word(0x0469):04X}:'
-                      f'{harness.emu.mem.read_word(0x0467):04X}', flush=True)
+                      f'{harness.emu.mem.read_word(0x0467):04X} '
+                      f'changed={len(changed)} ranges={summary} '
+                      f'pages={pages[:32]}', flush=True)
                 return original_reset(reason)
             harness.emu._warm_reset = trace_reset
             original_gp = harness.cpu._raise_gp
             def trace_gp(error_code=0):
                 import traceback
                 cpu = harness.cpu
+                compat_addr = cpu.gdt_base + ((cpu.cs >> 3) * 8)
+                compat_raw = bytes(cpu._readb((compat_addr + i) & 0xFFFFF)
+                                   for i in range(8)).hex()
                 print(f'  [trace] GP error={error_code:04X} '
                       f'CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
                       f'DS={cpu.ds:04X} ES={cpu.es:04X} '
                       f'SS={cpu.ss:04X}:{cpu.sp:04X} '
                       f'LDTR={cpu.ldtr_selector:04X} '
-                      f'bytes={bytes(cpu._readb((cpu._code_base + cpu.ip + i) & 0xFFFFF) for i in range(8)).hex()}',
+                      f'CSdesc={cpu._desc_cache.get(cpu.cs)!r} '
+                      f'GDT[{cpu.cs >> 3:04X}]={compat_raw} '
+                      f'nearby={bytes(cpu._readb((cpu._code_base + cpu.ip - 16 + i) & 0xFFFFF) for i in range(24)).hex()}',
                       flush=True)
                 traceback.print_stack(limit=8)
                 return original_gp(error_code)
             harness.cpu._raise_gp = trace_gp
+            original_exception = harness.cpu._do_exception
+            def trace_exception(number, error_code):
+                cpu = harness.cpu
+                print(f'  [trace] EXCEPTION {number} error={error_code:04X} '
+                      f'at {cpu.cs:04X}:{cpu.ip:04X} cpl={cpu._cpl} '
+                      f'active={cpu._exception_active}', flush=True)
+                if number == 11:
+                    base = cpu._ldt_base()
+                    limit = cpu._ldt_limit()
+                    index = error_code >> 3
+                    addr = base + index * 8
+                    raw = bytes(cpu._readb((addr + i) & 0xFFFFF)
+                                for i in range(8)) if addr + 7 <= base + limit else b''
+                    print(f'  [trace] NP LDT={cpu.ldtr_selector:04X} '
+                          f'base={base:06X} limit={limit:04X} '
+                          f'sel={error_code:04X} raw={raw.hex()}', flush=True)
+                    addr = (cpu._code_base + cpu.ip) & 0xFFFFF
+                    nearby = bytes(cpu._readb((addr + i) & 0xFFFFF)
+                                   for i in range(10))
+                    print(f'  [trace] NP instruction bytes={nearby.hex()} '
+                          f'AX={cpu.ax:04X} BX={cpu.bx:04X} '
+                          f'CX={cpu.cx:04X} DX={cpu.dx:04X} '
+                          f'DS={cpu.ds:04X} ES={cpu.es:04X} '
+                          f'SS={cpu.ss:04X}:{cpu.sp:04X}', flush=True)
+                    ss_desc = cpu._desc_cache.get(cpu.ss)
+                    offset = (cpu.bp + cpu.si) & 0xFFFF
+                    ea = ((ss_desc[0] if ss_desc else (cpu.ss << 4))
+                          + offset) & 0xFFFFF
+                    print(f'  [trace] NP SSdesc={ss_desc!r} '
+                          f'BP={cpu.bp:04X} SI={cpu.si:04X} off={offset:04X} '
+                          f'LES_EA={ea:06X} ptr={bytes(cpu._readb(ea + i) for i in range(4)).hex()}',
+                          flush=True)
+                return original_exception(number, error_code)
+            harness.cpu._do_exception = trace_exception
+            original_interrupt = harness.cpu._do_interrupt
+            def trace_interrupt(number, error_code=None, software=False):
+                cpu = harness.cpu
+                if number == 13 or cpu._pm:
+                    gate_addr = cpu.idt_base + number * 8
+                    gate = bytes(cpu._readb((gate_addr + i) & 0xFFFFF)
+                                 for i in range(8))
+                    print(f'  [trace] INT{number:02X} IDT={cpu.idt_base:06X}:'
+                          f'{cpu.idt_limit:04X} gate={gate.hex()} '
+                          f'error={error_code!r} software={software} '
+                          f'cpl={cpu._cpl} AX={cpu.ax:04X} '
+                          f'BX={cpu.bx:04X} DX={cpu.dx:04X}', flush=True)
+                return original_interrupt(number, error_code, software)
+            harness.cpu._do_interrupt = trace_interrupt
+            original_dispatch = harness.cpu._dispatch
+            trace_window = [0]
+            def trace_tables(opcode):
+                cpu = harness.cpu
+                if trace_window[0]:
+                    print(f'  [trace] handoff {cpu.cs:04X}:'
+                          f'{(cpu.ip - 1) & 0xFFFF:04X} '
+                          f'op={opcode:02X} SP={cpu.sp:04X} '
+                          f'flags={cpu.flags:04X}', flush=True)
+                    trace_window[0] -= 1
+                if opcode in (0xCA, 0xCB) and cpu.cs == 0x116D:
+                    stack_addr = cpu._phys(cpu.ss, cpu.sp)
+                    frame = bytes(cpu._readb((stack_addr + i) & 0xFFFFF)
+                                  for i in range(16)).hex()
+                    print(f'  [trace] RETF frame SS:SP={cpu.ss:04X}:'
+                          f'{cpu.sp:04X} addr={stack_addr:05X} '
+                          f'code32={cpu._code32} op32={cpu._operand_size_32} '
+                          f'bytes={frame}', flush=True)
+                if opcode == 0x0F:
+                    # _dispatch is entered after execute() has fetched the
+                    # primary opcode, so CS:IP points one byte past 0F.
+                    pos = (cpu._code_base + cpu.ip - 1) & 0xFFFFF
+                    opcode2 = cpu._readb((pos + 1) & 0xFFFFF)
+                    if opcode2 in (0x00, 0x01):
+                        raw = bytes(cpu._readb((pos + i) & 0xFFFFF)
+                                    for i in range(12)).hex()
+                        print(f'  [trace] 0F{opcode2:02X} at '
+                              f'{cpu.cs:04X}:{cpu.ip:04X} '
+                              f'code32={cpu._code32} addr32='
+                              f'{getattr(cpu, "_address_size_32", False)} '
+                              f'bytes={raw}',
+                              flush=True)
+                        result = original_dispatch(opcode)
+                        print(f'  [trace] tables GDT={cpu.gdt_base:08X}:'
+                              f'{cpu.gdt_limit:04X} IDT={cpu.idt_base:08X}:'
+                              f'{cpu.idt_limit:04X} LDTR={cpu.ldtr_selector:04X}',
+                              flush=True)
+                        if (opcode2 == 0x01 and cpu.cs == 0x0020 and
+                                cpu.idt_base == 0):
+                            trace_window[0] = 48
+                        return result
+                return original_dispatch(opcode)
+            harness.cpu._dispatch = trace_tables
+            original_set_msw = harness.cpu._set_msw
+            def trace_msw(value):
+                cpu = harness.cpu
+                before = cpu.msw
+                result = original_set_msw(value)
+                print(f'  [trace] MSW {before:04X}->{cpu.msw:04X} '
+                      f'pm={cpu._pm} at {cpu.cs:04X}:{cpu.ip:04X}', flush=True)
+                return result
+            harness.cpu._set_msw = trace_msw
+            original_far_transfer = harness.cpu._far_transfer
+            def trace_far_transfer(selector, offset, is_call, offset32=False):
+                cpu = harness.cpu
+                trace_far = cpu._pm
+                if trace_far:
+                    print(f'  [trace] FAR {"CALL" if is_call else "JMP"} '
+                          f'{cpu.cs:04X}:{cpu.ip:04X} -> '
+                          f'{selector:04X}:{offset:08X} '
+                          f'pm={cpu._pm} code32={cpu._code32} '
+                          f'offset32={offset32} '
+                          f'LDTR={cpu.ldtr_selector:04X} '
+                          f'oldcache={cpu._desc_cache.get(cpu.cs)!r} '
+                          f'targetcache={cpu._desc_cache.get(selector)!r}',
+                          flush=True)
+                result = original_far_transfer(
+                    selector, offset, is_call, offset32=offset32)
+                if trace_far:
+                    print(f'  [trace] FAR result CS:IP={cpu.cs:04X}:'
+                          f'{cpu.ip:08X} base={cpu._code_base:08X} '
+                          f'code32={cpu._code32} '
+                          f'cache={cpu._desc_cache.get(cpu.cs)!r}',
+                          flush=True)
+                return result
+            harness.cpu._far_transfer = trace_far_transfer
         driver = GuestDriver(harness)
 
         print('Booting MS-DOS 6.22...', flush=True)
         driver.wait(lambda screen: at_prompt(screen, 'C'),
                     35_000_000, 'DOS C: prompt')
+        # Save DOS's native INT 21h entry before DPMI/TASMX replaces the IVT
+        # vector with a protected-mode thunk.  Protected-mode DOS calls must
+        # re-enter this original handler through the bridge in main.py.
+        dos_ip = harness.emu.mem.read_word(0x21 * 4)
+        dos_cs = harness.emu.mem.read_word(0x21 * 4 + 2)
+        harness.emu._dos_int21_vector = (dos_cs, dos_ip)
+        if os.environ.get('VC_BUILD_TRACE') == '1':
+            print(f'  [trace] DOS native IVT21={dos_cs:04X}:{dos_ip:04X}',
+                  flush=True)
         driver.change_drive('D')
-        driver.configure_dpmi()
+        if args.skip_dpmi_config:
+            print('Using the supplied preconfigured DPMI16BI.OVL.', flush=True)
+        else:
+            driver.configure_dpmi()
 
         driver.command(r'PATH D:\;F:\;C:\DOS', 'D', 5_000_000)
         driver.change_drive('E')
-        print('Building the VC.COM loader...', flush=True)
-        driver.command('TASM /z/m9/kh10000 VC', 'E', 120_000_000)
-        driver.command(r'F:\LINK.EXE VC.OBJ,VC.EXE;', 'E', 60_000_000)
-        driver.command(r'F:\EXE2BIN.EXE VC.EXE VC.COM', 'E', 30_000_000)
+        if not args.tasmx_only:
+            print('Building the VC.COM loader...', flush=True)
+            driver.command('TASM /z/m9/kh10000 VC', 'E', 120_000_000)
+            driver.command(r'F:\LINK.EXE VC.OBJ,VC.EXE;', 'E', 60_000_000)
+            driver.command(r'F:\EXE2BIN.EXE VC.EXE VC.COM', 'E', 30_000_000)
 
         print('Building the VC.OVL program overlay...', flush=True)
-        driver.tasmx_command('TASMX /z/m9/kh10000 VCOVL', 'E', 600_000_000)
-        driver.command(r'F:\LINK.EXE VCOVL.OBJ,VC.OVL;', 'E', 120_000_000)
+        if os.environ.get('VC_BUILD_TRACE') == '1':
+            # Snapshot after DOS boot/path setup so the reset diff contains
+            # only changes made by TASMX/DPMI16BI, not normal initialization.
+            boot_memory = bytes(harness.emu.mem.ram[:0xA0000])
+            cpu = harness.cpu
+            print(f'  [trace] TASMX launch CS:IP={cpu.cs:04X}:{cpu.ip:04X} '
+                  f'pm={cpu._pm} GDT={cpu.gdt_base:08X}:{cpu.gdt_limit:04X} '
+                  f'IDT={cpu.idt_base:08X}:{cpu.idt_limit:04X} '
+                  f'LDTR={cpu.ldtr_selector:04X} TR={cpu.tr_selector:04X}',
+                  flush=True)
+            ivt_ip = cpu.mem.read_word(0x21 * 4)
+            ivt_cs = cpu.mem.read_word(0x21 * 4 + 2)
+            ivt_addr = (ivt_cs << 4) + ivt_ip
+            ivt_bytes = bytes(cpu.mem.read_byte(ivt_addr + i)
+                              for i in range(8))
+            print(f'  [trace] IVT21={ivt_cs:04X}:{ivt_ip:04X} '
+                  f'bytes={ivt_bytes.hex()}', flush=True)
+        else:
+            # A triple-fault reboot leaves ordinary RAM intact, while the
+            # rebooted DOS instance expects its pre-extender workspace.  The
+            # emulator intentionally models RAM persistence, so restore the
+            # DOS low-memory workspace before the TASMX retry as real DOS
+            # startup would have done while reinitializing it.
+            boot_memory = bytes(harness.emu.mem.ram[:0xA0000])
+            original_reset = harness.emu._warm_reset
+
+            def restore_dos_workspace(reason):
+                if reason == 'triple-fault':
+                    harness.emu.mem.ram[:0x20000] = boot_memory[:0x20000]
+                return original_reset(reason)
+
+            harness.emu._warm_reset = restore_dos_workspace
+        tasmx_budget = int(os.environ.get('VC_TASMX_BUDGET',
+                                          '600000000'))
+        if os.environ.get('VC_CS_TRACE') == '1':
+            harness.cpu._vc_cs_trace_count = 0
+        tasmx_output = driver.tasmx_command(
+            'TASMX /z/m9/kh10000 VCOVL', 'E', tasmx_budget)
+        if not args.tasmx_only:
+            driver.command(r'F:\LINK.EXE VCOVL.OBJ,VC.OVL;', 'E', 120_000_000)
 
         # DOSHarness runs in process, so explicitly write dirty D:/E:/F:
         # FAT images back to their temporary host directories.
         harness.emu._persist_host_dir()
 
-        products = (source_dir / 'VC.COM', source_dir / 'VC.OVL')
+        products = ((source_dir / 'VCOVL.OBJ',) if args.tasmx_only else
+                    (source_dir / 'VC.COM', source_dir / 'VC.OVL'))
         for product in products:
             if not product.is_file() or product.stat().st_size == 0:
                 raise BuildError(
-                    f'expected artifact was not produced: {product.name}')
+                    f'expected artifact was not produced: {product.name}\n'
+                    f'{screen_tail(tasmx_output, 20)}')
         for product in products:
             publish_atomic(product, output_dir / product.name)
             print(f'Published {output_dir / product.name} '

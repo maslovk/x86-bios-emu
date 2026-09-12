@@ -842,24 +842,49 @@ class PIC:
         self._icw_state = 0
         self._need_icw4 = False
         self._auto_eoi = False
+        self._single = False
+        self._slave_icw_state = 0
+        self._slave_need_icw4 = False
+        self._slave_single = False
+        self._slave_auto_eoi = False
 
     def write_master(self, port, val):
         if port == 0x20:
             self._write_command(val)
         elif port == 0x21:
-            self.mask = val
+            self._write_init_data(val, slave=False)
 
     def write_slave(self, port, val):
         if port == 0xA0:
             self._write_command_slave(val)
         elif port == 0xA1:
-            self.slave_mask = val
+            self._write_init_data(val, slave=True)
+
+    def _write_init_data(self, val, slave):
+        """ICW2/3/4 use the data port; only subsequent writes are masks."""
+        prefix = '_slave_' if slave else '_'
+        state = getattr(self, prefix + 'icw_state')
+        if state == 1:
+            setattr(self, 'slave_base' if slave else 'master_base', val & 0xF8)
+            state = (3 if getattr(self, prefix + 'need_icw4') else 0) \
+                if getattr(self, prefix + 'single') else 2
+        elif state == 2:
+            # ICW3 describes the cascade wiring, fixed by this PC's board.
+            state = 3 if getattr(self, prefix + 'need_icw4') else 0
+        elif state == 3:
+            setattr(self, prefix + 'auto_eoi', bool(val & 2))
+            state = 0
+        else:
+            setattr(self, 'slave_mask' if slave else 'mask', val & 0xFF)
+        setattr(self, prefix + 'icw_state', state)
 
     def _write_command(self, val):
         if val & 0x10:
             self._icw_state = 1
             self._need_icw4 = bool(val & 0x01)
             self._auto_eoi = False
+            self._single = bool(val & 0x02)
+            self.mask = self.irr = self.ims = 0
         elif val < 0x08:
             pass
         else:
@@ -867,8 +892,11 @@ class PIC:
 
     def _write_command_slave(self, val):
         if val & 0x10:
-            self._icw_state = 1
-            self._need_icw4 = bool(val & 0x01)
+            self._slave_icw_state = 1
+            self._slave_need_icw4 = bool(val & 0x01)
+            self._slave_single = bool(val & 0x02)
+            self._slave_auto_eoi = False
+            self.slave_mask = self.slave_irr = self.slave_ims = 0
 
     def _send_eoi(self):
         for i in range(8):
@@ -931,16 +959,17 @@ class PIC:
             return self.slave_base + (irq - 8)
 
     def initialize(self):
+        master_mask, slave_mask = self.mask, self.slave_mask
         self.write_master(0x20, 0x11)
-        self.write_master(0x20, self.master_base)
-        self.write_master(0x20, 1 << self.cascade_irq)
-        self.write_master(0x20, 0x01)
-        self.write_master(0x21, self.mask)
+        self.write_master(0x21, self.master_base)
+        self.write_master(0x21, 1 << self.cascade_irq)
+        self.write_master(0x21, 0x01)
+        self.write_master(0x21, master_mask)
         self.write_slave(0xA0, 0x11)
-        self.write_slave(0xA0, self.slave_base)
-        self.write_slave(0xA0, self.cascade_irq)
-        self.write_slave(0xA0, 0x01)
-        self.write_slave(0xA1, self.slave_mask)
+        self.write_slave(0xA1, self.slave_base)
+        self.write_slave(0xA1, self.cascade_irq)
+        self.write_slave(0xA1, 0x01)
+        self.write_slave(0xA1, slave_mask)
         self.irr = 0
         self.slave_irr = 0
         self.ims = 0
@@ -1025,4 +1054,5 @@ class CMOS:
             'seconds': self._data[0x00], 'minutes': self._data[0x01],
             'hours': self._data[0x02], 'weekday': self._data[0x06],
             'day': self._data[0x03], 'month': self._data[0x04], 'year': self._data[0x05],
+            'century': self._data[0x0C],
         }

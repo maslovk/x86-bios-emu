@@ -60,6 +60,20 @@ ACC_TRAP_GATE = 0x87  # present, ring 0, 286 trap gate
 
 
 class TestMSWAndTableRegisters:
+    def test_real_mode_far_call_retf_round_trip(self):
+        cpu, mem = make_cpu()
+        # CALL FAR 0200:0000; the callee returns with the ordinary 16-bit
+        # real-mode RETF frame used by DOS kernel services.
+        write_code(cpu, mem, 0x0100,
+                   [0x9A, 0x00, 0x00, 0x00, 0x20])
+        write_code(cpu, mem, 0x20000, [0xB8, 0xEF, 0xBE, 0xCB])
+        cpu.execute()
+        assert (cpu.cs, cpu.ip, cpu.sp) == (0x2000, 0x0000, 0xFFFA)
+        cpu.execute()
+        cpu.execute()
+        assert cpu.ax == 0xBEEF
+        assert (cpu.cs, cpu.ip, cpu.sp) == (0x0000, 0x0105, 0xFFFE)
+
     def test_msw_reset_value(self):
         cpu, mem = make_cpu()
         assert cpu.msw == 0xFFF0
@@ -119,6 +133,157 @@ class TestMSWAndTableRegisters:
         assert cpu.idt_limit == 0x0207
         assert cpu.idt_base == 0
         assert mem.read_word(0x3000) == 0x0207
+
+    def test_unlatched_386_ldt_code_cache_uses_32bit_defaults(self):
+        cpu, _ = make_cpu()
+        cpu._pm = True
+        cpu.msw |= 1
+        cpu.cs = 0x0007                 # active transient LDT code context
+        selector = 0x116D
+        cpu._desc_cache[selector] = (0x116D0, 0xFFFFFFFF, 0x9B, 0)
+
+        cpu._set_cs(selector, compat_return=True)
+
+        assert cpu.cs == selector
+        assert cpu._code_base == 0x116D0
+        assert cpu._code32
+
+    def test_unlatched_16bit_code_cache_does_not_read_the_ivt_as_a_d_bit(self):
+        cpu, mem = make_cpu()
+        cpu._pm = True
+        cpu.msw |= 1
+        cpu.cs = 0x0007
+        selector = 0x116D
+        # Descriptor address zero is synthetic, not a real descriptor at
+        # physical address zero.  Its D bit must not come from IVT byte 6.
+        mem.ram[6] = 0x40
+        cpu._desc_cache[selector] = (0x116D0, 0xFFFF, 0x9B, 0)
+
+        cpu._set_cs(selector, compat_return=True)
+
+        assert cpu.cs == selector
+        assert not cpu._code32
+
+    def test_unlatched_data_load_does_not_replace_active_code_cache(self):
+        cpu, _ = make_cpu()
+        cpu._pm = True
+        cpu.msw |= 1
+        selector = 0x116D
+        cpu.cs = selector
+        cpu._code_base = 0x116D0
+        cpu._code32 = True
+        cpu._desc_cache[selector] = (0x116D0, 0xFFFFFFFF, 0x9B, 0)
+
+        cpu._set_ss(selector)
+
+        assert cpu.ss == selector
+        assert cpu._desc_cache[selector][:3] == (0x116D0, 0xFFFFFFFF, 0x9B)
+        assert cpu._code32
+
+    def test_retf_can_seed_a_transient_ldt_target_after_gdt_code(self):
+        cpu, _ = make_cpu()
+        cpu._pm = True
+        cpu.msw |= 1
+        cpu.cs = 0x1011                 # current host/GDT code selector
+        cpu._desc_cache[cpu.cs] = (0x10000, 0xFFFF, 0x9B, 0)
+        target = 0x101E                 # transient LDT return selector
+
+        cpu._set_cs(target, compat_return=True)
+
+        assert cpu.cs == target
+        assert cpu._code_base == target << 4
+        assert cpu._desc_cache[target][:3] == (target << 4, 0xFFFF, 0x9B)
+
+    def test_operand_sized_far_jump_keeps_16bit_transient_ldt_defaults(self):
+        cpu, mem = make_cpu()
+        cpu._pm = True
+        cpu.msw |= 1
+        cpu.cs = 0x0007                 # transient LDT source code selector
+        cpu._code_base = 0x0100
+        cpu._desc_cache[cpu.cs] = (0x0100, 0xFFFF, 0x9B, 0)
+        # 66 EA ptr16:32: pointer width is independent of the target
+        # descriptor's D bit, so this transient LDT target remains 16-bit.
+        write_code(cpu, mem, 0x0200,
+                   [0x66, 0xEA, 0x56, 0x34, 0x00, 0x00, 0x6D, 0x11])
+
+        cpu.execute()
+
+        assert cpu.cs == 0x116D
+        assert cpu.ip == 0x3456
+        assert cpu._code_base == 0x116D0
+        assert not cpu._code32
+        assert cpu._desc_cache[cpu.cs][:3] == (0x116D0, 0xFFFF, 0x9B)
+
+    def test_32bit_retf_pops_a_32bit_far_return_frame(self):
+        cpu, mem = make_cpu()
+        cpu._pm = True
+        cpu.msw |= 1
+        cpu.cs = 0x0007
+        cpu._code_base = 0x0100
+        cpu._code32 = True
+        cpu.ss = 0
+        cpu.sp = 0x9000
+        cpu._desc_cache[cpu.cs] = (0x0100, 0xFFFFFFFF, 0x9B, 0)
+        cpu._desc_cache[cpu.ss] = (0, 0xFFFF, 0x93, 0)
+        target = 0x116C
+        cpu._desc_cache[target] = (0x116C0, 0xFFFFFFFF, 0x9B, 0)
+        # A 32-bit far-call frame is CS then EIP, making EIP the top item.
+        cpu._pushd(target)
+        cpu._pushd(0x00123456)
+        write_code(cpu, mem, 0x0200, [0xCB])
+
+        cpu.execute()
+
+        assert cpu.cs == target
+        assert cpu.eip == 0x00123456
+        assert cpu.sp == 0x9000
+        assert cpu._code32
+
+    def test_operand_sized_far_call_and_retf_preserve_the_32bit_frame(self):
+        cpu, mem = make_cpu()
+        cpu._pm = True
+        cpu.msw |= 1
+        cpu.cs = 0x0004
+        cpu._code_base = 0x0100
+        cpu.ss = 0
+        cpu.sp = 0x9000
+        cpu._desc_cache[cpu.cs] = (0x0100, 0xFFFF, 0x9B, 0)
+        cpu._desc_cache[cpu.ss] = (0, 0xFFFF, 0x93, 0)
+        target = 0x116C
+        # The source is 16-bit and explicitly calls a transient LDT client
+        # with a ptr16:32.  The target remains 16-bit and prefixes RETF to
+        # consume the matching 32-bit far-call frame.
+        write_code(cpu, mem, 0x0200,
+                   [0x66, 0x9A, 0x20, 0x00, 0x00, 0x00, 0x6C, 0x11])
+        write_code(cpu, mem, 0x116C0 + 0x20, [0x66, 0xCB])
+
+        cpu.execute()
+        assert cpu.cs == target
+        assert cpu.eip == 0x20
+        assert not cpu._code32
+        cpu.execute()
+
+        assert cpu.cs == 0x0004
+        assert cpu.ip == 0x0108
+        assert not cpu._code32
+        assert cpu.sp == 0x9000
+
+    def test_386_lidt_loads_high_base_byte(self):
+        cpu, mem = make_cpu()
+        # Enter a 32-bit code segment so the effective default operand size
+        # for LIDT is the 386 limit:16 + base:32 form.
+        cpu._code32 = True
+        base = 0x12034567
+        mem.ram[0x2000:0x2006] = bytes((0x1F, 0x00,
+                                        base & 0xFF,
+                                        (base >> 8) & 0xFF,
+                                        (base >> 16) & 0xFF,
+                                        (base >> 24) & 0xFF))
+        write_code(cpu, mem, 0x0100,
+                   [0x0F, 0x01, 0x1E, 0x00, 0x20])  # LIDT [0x2000]
+        cpu.execute()
+        assert cpu.idt_limit == 0x001F
+        assert cpu.idt_base == base
 
     def test_mov_cr0_round_trip(self):
         cpu, mem = make_cpu()
@@ -447,7 +612,7 @@ class TestSelectorVerification:
         write_code(cpu, self.mem, 0x0104, [0x0F, 0x02, 0x06, 0x00, 0x01])
         cpu.ip = 0x0104
         cpu.execute()
-        assert cpu.ax == ACC_DATA
+        assert cpu.ax == ACC_DATA << 8
         assert cpu.zf
         write_code(cpu, self.mem, 0x0104, [0x0F, 0x03, 0x06, 0x00, 0x01])
         cpu.ax = 0

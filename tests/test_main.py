@@ -276,6 +276,53 @@ class TestEmulatorIntegration:
         assert emu.cpu.cf is True
         assert emu.cpu.if_flag is True
 
+    def test_dpmi_get_interrupt_vector_bridges_to_real_mode_ivt(self):
+        from main import Emulator
+        emu = Emulator(enable_hardware=False)
+        emu.mem.write_word(0x2F * 4, 0x3456)
+        emu.mem.write_word(0x2F * 4 + 2, 0x789A)
+        emu.cpu._pm = True
+        emu.cpu.msw |= 1
+        emu.cpu.cs = 0x0007       # transient LDT client selector
+        emu.cpu._desc_cache[emu.cpu.cs] = (0x0070, 0xFFFF, 0x9B, 0)
+        emu.cpu.ax = 0x352F       # DOS Get Interrupt Vector, INT 2Fh
+        emu.cpu.cf = True
+        emu._install_bios_interrupt_hook()
+
+        emu.cpu._do_interrupt(0x21, software=True)
+
+        assert emu.cpu.bx == 0x3456
+        assert emu.cpu.es == 0x789A
+        assert not emu.cpu.cf
+        assert not emu.cpu.halted
+
+        emu.cpu.ds = emu.cpu.cs
+        emu.cpu.dx = 0x0100
+        emu.cpu.ax = 0x252F       # DOS Set Interrupt Vector, INT 2Fh
+        emu.cpu._do_interrupt(0x21, software=True)
+
+        # AH=25h installs DS:DX itself (translated through the
+        # selector's descriptor base); the vector is not a pointer to
+        # the handler address.  Selector 0x0007 has base 0x0070, the
+        # identity mapping, so the IVT entry becomes 0007:0100.
+        assert emu.mem.read_word(0x2F * 4) == 0x0100
+        assert emu.mem.read_word(0x2F * 4 + 2) == 0x0007
+
+        # A selector whose base is not selector<<4 must still produce a
+        # real-mode reachable handler address (base 0x20000 -> 2000h).
+        emu.cpu.ds = 0x0023
+        emu.cpu._desc_cache[emu.cpu.ds] = (0x20000, 0xFFFF, 0x93, 0)
+        emu.cpu.dx = 0x0100
+        emu.cpu._do_interrupt(0x21, software=True)
+
+        assert emu.mem.read_word(0x2F * 4) == 0x0100
+        assert emu.mem.read_word(0x2F * 4 + 2) == 0x2000
+
+        emu.cpu.ax = 0x4A00       # DOS Resize Memory Block
+        emu.cpu.cf = True
+        emu.cpu._do_interrupt(0x21, software=True)
+        assert not emu.cpu.cf
+
     def test_blocking_keyboard_interrupt_retries_after_device_pump(self):
         from main import Emulator
         emu = Emulator()

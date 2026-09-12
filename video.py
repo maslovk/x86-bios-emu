@@ -778,9 +778,13 @@ class IO:
         # PIC master data (0x20) — read ISR/IRR
         if port == 0x20 and self.pic:
             return self.pic.ims | self.pic.irr
+        if port == 0x21 and self.pic:
+            return self.pic.mask
         # PIC slave data (0xA0)
         if port == 0xA0 and self.pic:
             return self.pic.slave_ims | self.pic.slave_irr
+        if port == 0xA1 and self.pic:
+            return self.pic.slave_mask
 
         # CMOS address (0x70) — read returns last address
         if port == 0x70 and self.cmos:

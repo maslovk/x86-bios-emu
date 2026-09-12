@@ -240,11 +240,11 @@ class TestLahfSahf:
         """SAHF must read from AH, not AL (the bug was reading AL)."""
         cpu = make_cpu([0x9E])
         # AH=0x00, AL=0x46 — if SAHF wrongly reads AL, flags low byte
-        # would become 0x46 instead of 0x00.
+        # would become 0x46 instead of 0x02 (reserved bit 1 stays set).
         cpu.ax = 0x0046
         cpu.flags = 0x0000
         cpu.execute()
-        assert cpu.flags & 0xFF == 0x00, \
+        assert cpu.flags & 0xFF == 0x02, \
             f"SAHF must read AH not AL; got flags low=0x{cpu.flags&0xFF:02X}"
 
     def test_lahf_sahf_roundtrip(self):

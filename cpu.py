@@ -9,6 +9,10 @@ Minimal x86 real-mode CPU emulator with full instruction decode.
 import os
 
 
+class _InstructionFault(Exception):
+    """Stop the faulting instruction after the guest exception is delivered."""
+
+
 class CPU:
     """Minimal x86 real-mode CPU emulator."""
 
@@ -414,6 +418,13 @@ class CPU:
 
     def _writeb(self, a, v):
         address = a & 0xFFFFF
+        if (os.environ.get('VC_TRACE_LDT_WRITES') == '1'
+                and 0x10A130 <= address < 0x10A138):
+            old = (self._ram[address] if self._ram is not None
+                   else self.mem.read_byte(address))
+            print(f'[trace] LDT write {address:06X} {old:02X}->{v & 0xFF:02X} '
+                  f'at {self.cs:04X}:{self.ip:08X} pm={self._pm}',
+                  file=sys.stderr, flush=True)
         if 0xB8000 <= address < 0xB9000:
             self.cycle_count += self.vram_wait_cycles
         elif not (0xA0000 <= address < 0xB0000
@@ -1086,16 +1097,39 @@ class CPU:
         # LDT selector after LDTR has been cleared.  Seed the hidden code
         # cache only for that return path; making every CS load synthetic
         # would corrupt normal protected-mode transitions.
-        if (compat_return and self._pm and (self.cs & 0x04)
-                and not self.ldtr_selector and (v & 0x04)
+        if (compat_return and self._pm and not self.ldtr_selector
+                and (v & 0x04)
                 and not ((self._desc_cache.get(v) is not None) and
                          (self._desc_cache[v][2] & 0x18) == 0x18)):
-            self._desc_cache[v] = (
-                ((v << 4) & 0xFFFFF),
-                0xFFFFFFFF if (getattr(self, '_address_size_32', False)
-                               or self._stack32) else 0xFFFF,
-                0x9B, 0)
+            self._desc_cache[v] = self._compat_code_descriptor(v)
         self._load_sreg('cs', v)
+
+    def _dpmi_return_to_real_mode(self, ret_cs, ret_ip):
+        """RETF leg of Borland's DPMI protected-to-real-mode handoff.
+
+        The 16-bit DPMI host returns from its exit stub to the client's
+        real-mode segment while PE is still set and its temporary
+        low-memory IDT is torn down.  Architecturally that RETF cannot
+        load a plain paragraph as a GDT selector; the resulting fault
+        escalates through the empty IDT into a triple-fault reset in the
+        middle of the return instruction, leaving a half-reset machine.
+        Treat the transfer as the mode handoff instead, mirroring the
+        far-jump callback path in ``_do_far_transfer``.
+        """
+        if (self._pm
+                and getattr(self, '_allow_dos_rm_callbacks', False)
+                and self.idt_base == 0 and self.idt_limit == 0xFFFF
+                and not (ret_cs & 0x04)
+                and ret_ip < 0x1000):
+            self.msw &= ~0x0001
+            self._pm = False
+            self._use_cached_code_base = False
+            self._code32 = False
+            self._stack32 = False
+            self._set_cs(ret_cs)
+            self.ip = ret_ip & 0xFFFF
+            return True
+        return False
     def _set_ss(self, v):
         self._load_sreg('ss', v)
     def _set_ds(self, v): self._load_sreg('ds', v)
@@ -1109,6 +1143,31 @@ class CPU:
     AR_CODE = 0x08
     AR_RDWR = 0x02
 
+    def _code_default_32(self, selector, desc):
+        """Return the D-bit default for a cached code descriptor.
+
+        Compatibility entries for a DPMI host's transient, unlatched LDT
+        selectors have no descriptor-table address.  In that case a 4 GiB
+        limit is the emulator's explicit representation of a 386 code
+        segment, so byte 6 cannot be consulted for its D bit.
+        """
+        synthetic = ((selector & 0x04) and not self.ldtr_selector and
+                     desc[3] == 0 and (desc[2] & 0x18) == 0x18)
+        if synthetic:
+            return desc[1] > 0xFFFF
+        return bool(self._readb(desc[3] + 6) & 0x40)
+
+    def _compat_code_descriptor(self, selector):
+        """Create the hidden cache for a transient unlatched LDT CS.
+
+        With no usable LDT, the descriptor itself is unrecoverable.  A
+        The selector's normal descriptor is unavailable, so preserve the
+        host's established 16-bit execution default.  A far pointer's
+        operand width controls only that transfer and is not the target
+        descriptor's D bit.
+        """
+        return (((selector << 4) & 0xFFFFF), 0xFFFF, 0x9B, 0)
+
     def _load_sreg(self, name, value):
         """Architectural segment-register load.
 
@@ -1119,11 +1178,30 @@ class CPU:
         """
         value &= 0xFFFF
         if not self._pm:
+            if (name == 'cs' and value >= 0x6000 and
+                    os.environ.get('VC_CS_TRACE') == '1'):
+                count = getattr(self, '_vc_cs_trace_count', 0)
+                if count < int(os.environ.get('VC_CS_TRACE_MAX', '120')):
+                    old_addr = (self._code_base + self.ip) & 0xFFFFF
+                    old_bytes = bytes(self._readb(old_addr + i)
+                                     for i in range(6))
+                    stack_words = [self._readw(self._phys(self.ss,
+                                                           (self.sp + 2 * i)
+                                                           & 0xFFFF))
+                                   for i in range(4)]
+                    print(f'[trace] RM CS load {self.cs:04X}:{self.ip:04X} '
+                          f'->{value:04X} base={(value << 4) & 0xFFFFF:05X}',
+                          f' op={old_bytes.hex()} '
+                          f'SS:SP={self.ss:04X}:{self.sp:04X} '
+                          f'stack={" ".join(f"{word:04X}" for word in stack_words)}',
+                          file=sys.stderr, flush=True)
+                self._vc_cs_trace_count = count + 1
             setattr(self, name, value)
             if name == 'cs':
                 self._code_base = (value << 4) & 0xFFFFF
                 self._use_cached_code_base = False
                 self._code32 = False
+                self._cpl = 0
             elif name == 'ss':
                 self._stack32 = False
             return
@@ -1196,13 +1274,31 @@ class CPU:
         if not (desc[2] & 0x01):
             desc = (desc[0], desc[1], desc[2] | 0x01, desc[3])
             self._writeb(desc[3] + 5, desc[2])
-        self._desc_cache[value] = desc
+        # A legacy unlatched-LDT handoff may use the same selector-shaped
+        # value for a flat data/stack segment as for the active synthetic
+        # code segment.  Real hardware has separate hidden caches per
+        # segment register; keeping this compatibility entry in our
+        # selector-keyed map would otherwise replace CS's code cache with a
+        # data descriptor just before RETF resumes it.
+        active_code = self._desc_cache.get(self.cs)
+        preserve_active_code = (
+            compat_unlatched and name != 'cs' and value == self.cs and
+            active_code is not None and
+            (active_code[2] & 0x18) == 0x18)
+        if not preserve_active_code:
+            self._desc_cache[value] = desc
         if name == 'cs':
             self._code_base = desc[0]
             # Descriptor byte 6 bit 6 is the 386 D (default operand/address
             # size) bit.  Keep it separate from the access byte tuple so the
             # existing 286 descriptor consumers remain unchanged.
-            self._code32 = bool(self._readb(desc[3] + 6) & 0x40)
+            # A transient TI=1 selector used by legacy DPMI hosts can outlive
+            # an unlatched LDTR.  Its synthetic cached descriptor has no
+            # descriptor-table byte to inspect (address 0), but a 4 GiB limit
+            # is our explicit representation of the host's 386 code segment.
+            # Decoding it as 16-bit truncates rel32 CALL/JMP displacements and
+            # sends the client into zero-filled memory.
+            self._code32 = self._code_default_32(value, desc)
             if not ((desc[2] & 0x18) == 0x18 and (desc[2] & 0x04)):
                 # Non-conforming code: CPL follows the selector's RPL.
                 self._cpl = value & 0x0003
@@ -1247,7 +1343,7 @@ class CPU:
                         access, 0)
             self._raise_gp(sel & 0xFFFC)
             return None
-        raw = bytes(self._readb((addr + i) & 0xFFFFF) for i in range(8))
+        raw = bytes(self._readb(addr + i) for i in range(8))
         limit = raw[0] | (raw[1] << 8) | ((raw[6] & 0x0F) << 16)
         if raw[6] & 0x80:
             limit = (limit << 12) | 0xFFF
@@ -1255,9 +1351,21 @@ class CPU:
                 | (raw[7] << 24))
         access = raw[5]
         if not (access & 0x80):
+            if (getattr(self, '_allow_dos_rm_callbacks', False)
+                    and (sel & 0x04)
+                    and ((access & 0x1F) in (0x09, 0x0B))):
+                # DPMI16BI briefly uses an LDT code entry with P=0 while
+                # rebuilding its callback task.  Its #NP gate is absent too,
+                # so architectural delivery would reset the emulated guest;
+                # latch the already-loaded system descriptor for this
+                # narrowly scoped legacy handoff.
+                access |= 0x80
+                desc = (base & 0xFFFFFFFF, limit, access, addr)
+                self._desc_cache[sel] = desc
+                return desc
             self._raise_np(sel & 0xFFFC)
             return None
-        return (base & 0xFFFFFFFF, limit, access, addr & 0xFFFFF)
+        return (base & 0xFFFFFFFF, limit, access, addr)
 
     def _ldt_base(self):
         desc = self._desc_cache.get(self.ldtr_selector)
@@ -1285,7 +1393,7 @@ class CPU:
         desc = self._desc_cache.get(self.tr_selector)
         if desc is None:
             self._raise_gp(self.tr_selector & 0xFFFC)
-        return self._readw((desc[0] + offset) & 0xFFFFF)
+        return self._readw(desc[0] + offset)
 
     def _tss_dword(self, offset):
         desc = self._desc_cache.get(self.tr_selector)
@@ -1306,7 +1414,7 @@ class CPU:
         desc = self._desc_cache.get(self.tr_selector)
         if desc is None:
             self._raise_gp(self.tr_selector & 0xFFFC)
-        self._writew((desc[0] + offset) & 0xFFFFF, value & 0xFFFF)
+        self._writew(desc[0] + offset, value & 0xFFFF)
 
     # 286 TSS field offsets (dynamic set saved/restored on task switch).
     TSS_BACKLINK = 0x00
@@ -1360,6 +1468,7 @@ class CPU:
         self._write_tss_word(self.TSS_CS, self.cs)
         self._write_tss_word(self.TSS_SS, self.ss)
         self._write_tss_word(self.TSS_DS, self.ds)
+        self._write_tss_word(self.TSS_LDT, self.ldtr_selector)
 
     def _peek_descriptor_for(self, sel):
         """Non-faulting descriptor fetch by selector (None if unusable)."""
@@ -1373,7 +1482,7 @@ class CPU:
         addr = table_base + index * 8
         if addr + 7 > table_base + table_limit:
             return None
-        raw = bytes(self._readb((addr + i) & 0xFFFFF) for i in range(8))
+        raw = bytes(self._readb(addr + i) for i in range(8))
         if not (raw[5] & 0x80):
             return None
         limit = raw[0] | (raw[1] << 8) | ((raw[6] & 0x0F) << 16)
@@ -1381,7 +1490,7 @@ class CPU:
             limit = (limit << 12) | 0xFFF
         base = (raw[2] | (raw[3] << 8) | (raw[4] << 16)
                 | (raw[7] << 24))
-        return (base & 0xFFFFFFFF, limit, raw[5], addr & 0xFFFFF)
+        return (base & 0xFFFFFFFF, limit, raw[5], addr)
 
     def _peek_compat_386_tss(self, sel):
         """Recover a legacy DPMI host's unlatched LDT-backed 386 TSS.
@@ -1394,7 +1503,7 @@ class CPU:
         if not (sel & 0x04) or self.ldtr_selector:
             return None
         addr = self.gdt_base + (sel >> 3) * 8
-        raw = bytes(self._readb((addr + i) & 0xFFFFF) for i in range(8))
+        raw = bytes(self._readb(addr + i) for i in range(8))
         if (raw[5] & 0x1F) not in (0x09, 0x0B) or not (raw[5] & 0x80):
             return None
         limit = raw[0] | (raw[1] << 8) | ((raw[6] & 0x0F) << 16)
@@ -1402,7 +1511,7 @@ class CPU:
             limit = (limit << 12) | 0xFFF
         base = (raw[2] | (raw[3] << 8) | (raw[4] << 16)
                 | (raw[7] << 24))
-        return (base & 0xFFFFFFFF, limit, raw[5], addr & 0xFFFFF)
+        return (base & 0xFFFFFFFF, limit, raw[5], addr)
 
     def _set_tss_busy(self, sel, busy):
         """Flip the busy bit of a 286 or 386 TSS descriptor."""
@@ -1428,9 +1537,21 @@ class CPU:
         self.cs = self._tss_word(self.TSS_CS)
         self.ss = self._tss_word(self.TSS_SS)
         self.ds = self._tss_word(self.TSS_DS)
+        ldt_selector = self._tss_word(self.TSS_LDT)
         self.sp = self._tss_word(self.TSS_SP)
         self.ip = self._tss_word(self.TSS_IP)
-        self.flags = self._tss_word(self.TSS_FLAGS)
+        self.flags = self._tss_word(self.TSS_FLAGS) | 2
+        # The 286 TSS contains an LDT selector at 2Ah.  Restoring only the
+        # visible segment registers leaves TI=1 code/data selectors pointing
+        # at no table, which is especially damaging when a DPMI host task
+        # switches back to its client.
+        if ldt_selector & 0xFFFC:
+            ldt_desc = self._peek_descriptor_for(ldt_selector)
+            if ldt_desc is None or (ldt_desc[2] & 0x1F) != 0x02:
+                self._raise_gp(ldt_selector & 0xFFFC)
+                return
+            self._desc_cache[ldt_selector] = ldt_desc
+        self.ldtr_selector = ldt_selector
         self._cpl = self.cs & 3
         # Refresh the descriptor caches for the loaded selectors; where a
         # descriptor is missing fall back to real-mode-style bases so the
@@ -1466,7 +1587,7 @@ class CPU:
                              (self.TSS32_ESI, 'esi'), (self.TSS32_EDI, 'edi')):
             setattr(self, name, self._tss_dword(offset))
         self.eip = self._tss_dword(self.TSS32_EIP)
-        self.flags = self._tss_dword(self.TSS32_EFLAGS)
+        self.flags = self._tss_dword(self.TSS32_EFLAGS) | 2
         self.es = self._tss_dword(self.TSS32_ES) & 0xFFFF
         self.cs = self._tss_dword(self.TSS32_CS) & 0xFFFF
         self.ss = self._tss_dword(self.TSS32_SS) & 0xFFFF
@@ -1565,7 +1686,7 @@ class CPU:
         else:
             self.sp = new_sp
 
-    def _far_transfer(self, sel, off, is_call):
+    def _far_transfer(self, sel, off, is_call, offset32=False):
         """Far JMP/CALL through a selector, honouring 286 call gates.
 
         A direct code selector transfers as in milestone 1 (with the
@@ -1577,10 +1698,17 @@ class CPU:
         """
         if not self._pm:
             if is_call:
-                self._push(self.cs)
-                self._push(self.ip)
+                if offset32:
+                    self._pushd(self.cs)
+                    self._pushd(self.eip)
+                else:
+                    self._push(self.cs)
+                    self._push(self.ip)
             self._set_cs(sel)
-            self.ip = off
+            if offset32:
+                self.eip = off
+            else:
+                self.ip = off
             return
         # Preserve the hidden base of a currently executing legacy LDT
         # selector before a far transfer replaces CS.  This lets the paired
@@ -1597,7 +1725,10 @@ class CPU:
             resumed = self._raise_gp(0)
             if not self._pm and not self._reset_aborted_instruction:
                 self._set_cs(sel)
-                self.ip = off
+                if offset32:
+                    self.eip = off
+                else:
+                    self.ip = off
             return
         # A legacy DOS DPMI host can leave LDTR zero after switching back to
         # a cached LDT code segment.  Do not reinterpret that selector using
@@ -1608,13 +1739,20 @@ class CPU:
             if (cached[2] & 0x18) == 0x18:
                 old_cs, old_ip = self.cs, self.ip
                 if is_call:
-                    self._push(old_cs)
-                    self._push(old_ip)
+                    if offset32:
+                        self._pushd(old_cs)
+                        self._pushd(self.eip)
+                    else:
+                        self._push(old_cs)
+                        self._push(old_ip)
                 self.cs = sel
                 self._cpl = sel & 3
                 self._code_base = cached[0]
-                self._code32 = bool(self._readb(cached[3] + 6) & 0x40)
-                self.ip = off
+                self._code32 = self._code_default_32(sel, cached)
+                if offset32:
+                    self.eip = off
+                else:
+                    self.ip = off
                 return
         if (sel & 0x04) and not self.ldtr_selector and (
                 cached is None or not ((cached[2] & 0x18) == 0x18)):
@@ -1622,28 +1760,58 @@ class CPU:
             # without loading LDTR.  Their return CS uses the conventional
             # selector<<4 base; preserve that compatibility without making
             # arbitrary invalid LDT selectors valid in normal paths.
-            desc = (((sel << 4) & 0xFFFFF), 0xFFFF, 0x9B, 0)
+            desc = self._compat_code_descriptor(sel)
             old_cs, old_ip = self.cs, self.ip
             if is_call:
-                self._push(old_cs)
-                self._push(old_ip)
+                if offset32:
+                    self._pushd(old_cs)
+                    self._pushd(self.eip)
+                else:
+                    self._push(old_cs)
+                    self._push(old_ip)
             self._desc_cache[sel] = desc
             self.cs = sel
             self._cpl = sel & 3
             self._code_base = desc[0]
-            self._code32 = False
-            self.ip = off
+            self._code32 = self._code_default_32(sel, desc)
+            if offset32:
+                self.eip = off
+            else:
+                self.ip = off
             return
         table_base = (self._ldt_base() if sel & 0x04 else self.gdt_base)
         table_limit = (self._ldt_limit() if sel & 0x04 else self.gdt_limit)
         gate_addr = table_base + index * 8
         if gate_addr + 7 > table_base + table_limit:
+            if (getattr(self, '_allow_dos_rm_callbacks', False)
+                    and not is_call and self._pm
+                    and self.idt_base == 0 and self.idt_limit == 0xFFFF
+                    and off < 0x1000):
+                # Borland's DPMI host jumps through a real-mode callback
+                # pointer while PE is still set and its temporary IDT is
+                # deliberately null.  This is an emulator handoff, not a
+                # general relaxation of protected-mode selector checks.
+                self.msw &= ~0x0001
+                self._pm = False
+                self._use_cached_code_base = False
+                self._code32 = False
+                self._stack32 = False
+                self._set_cs(sel)
+                self.ip = off & 0xFFFF
+                # The callback is entered from the DPMI DOS handoff, so
+                # nested real-mode INT 21h calls must use the emulator's
+                # saved DOS vector rather than the already-replaced IVT.
+                self._pm_dos_bridge_active = True
+                return
             resumed = self._raise_gp(sel & 0xFFFC)
             if not self._pm and not self._reset_aborted_instruction:
                 self._set_cs(sel)
-                self.ip = off
+                if offset32:
+                    self.eip = off
+                else:
+                    self.ip = off
             return
-        gate = bytes(self._readb((gate_addr + i) & 0xFFFFF)
+        gate = bytes(self._readb(gate_addr + i)
                      for i in range(8))
         access = gate[5]
         if (access & 0x1F) == 0x05:            # task gate
@@ -1723,21 +1891,50 @@ class CPU:
             self._raise_gp(sel & 0xFFFC)
         dpl = (desc[2] >> 5) & 3
         conforming = ((desc[2] & 0x1C) == 0x1C)
-        if not conforming and dpl != self._cpl:
+        if (not conforming and dpl != self._cpl and
+                getattr(self, '_allow_dos_rm_callbacks', False)
+                and not is_call and self._pm
+                and getattr(self, '_pm_dos_bridge_active', False)
+                and dpl < self._cpl and sel == 0x0020):
+            # DPMI16BI's return thunk reloads its ring-0 host selector with
+            # a direct far jump after the real-mode callback.  The thunk is
+            # an emulator-owned compatibility path; ordinary protected-mode
+            # transfers must still use a gate for privilege changes.
+            self._cpl = dpl
+        elif not conforming and dpl != self._cpl:
             # A direct far transfer can never change rings; use a gate
             # to go inner or RETF/IRET to return outer.
             self._raise_gp(sel & 0xFFFC)
         if conforming and dpl > self._cpl:
             self._raise_gp(sel & 0xFFFC)
         if is_call:
-            self._push(self.cs)
-            self._push(self.ip)
+            if offset32:
+                self._pushd(self.cs)
+                self._pushd(self.eip)
+            else:
+                self._push(self.cs)
+                self._push(self.ip)
         self._load_sreg('cs', sel)
-        self.ip = off
+        if offset32:
+            self.eip = off
+        else:
+            self.ip = off
 
     def _iopl(self):
         """The IOPL field of the flags word."""
         return (self.flags >> 12) & 3
+
+    def _clear_outer_data_segments(self):
+        """Invalidate privileged data segments after an outer-ring return."""
+        for name in ('ds', 'es'):
+            selector = getattr(self, name)
+            desc = self._desc_cache.get(selector)
+            if desc is None:
+                continue
+            access = desc[2]
+            conforming_code = (access & 0x1C) == 0x1C
+            if not conforming_code and ((access >> 5) & 3) < self._cpl:
+                setattr(self, name, 0)
 
     def _check_io_privilege(self):
         """``#GP(0)`` when I/O-sensitive instructions are not permitted.
@@ -1754,7 +1951,9 @@ class CPU:
         Only ring 0 may change IOPL; IF may be changed when CPL is no
         higher (outer) than IOPL.  Other flag bits load unconditionally.
         """
-        value &= 0xFFFF
+        # FLAGS bit 1 is hard-wired high. Borland's DPMI interrupt stubs
+        # use it to distinguish an IRQ's FLAGS word from an exception's CS.
+        value = (value & 0xFFFF) | 0x0002
         if not self._pm:
             # Real mode on the 80286: IOPL reads 0 and NT stays clear;
             # bits 12-15 never stick.  This is exactly the PUSHF/POPF
@@ -1789,6 +1988,7 @@ class CPU:
             # directly while in real mode).
             self._code_base = (self.cs << 4) & 0xFFFFF
         elif not self._pm and was_pm:
+            self._cpl = 0
             self._desc_cache.clear()
             # Keep the protected-mode CS hidden base for the instruction
             # immediately following MOV CR0.  Real hardware retains it
@@ -1828,17 +2028,24 @@ class CPU:
             else:
                 self.halted = True
             return False
+        fault_context = getattr(self, '_fault_context', None)
+        if fault_context is not None and self.cs == fault_context[0]:
+            self.eip = fault_context[1]
         self._exception_active = True
         try:
-            return self._do_interrupt(n, error_code=error_code)
+            result = self._do_interrupt(n, error_code=error_code)
         finally:
             self._exception_active = False
+        if fault_context is not None:
+            raise _InstructionFault()
+        return result
 
     def _peek_selector(self, sel):
         """Non-faulting ``_translate_selector`` for VERR/VERW/LAR/LSL.
 
-        Returns None for any invalid index, table bound, type, or
-        not-present condition instead of raising.
+        Returns None for invalid indices or table bounds. These inspection
+        instructions may examine not-present descriptors; a later segment
+        load is what checks the Present bit.
         """
         index = sel >> 3
         if index == 0:
@@ -1850,11 +2057,9 @@ class CPU:
         addr = table_base + index * 8
         if addr + 7 > table_base + table_limit:
             return None
-        raw = bytes(self._readb((addr + i) & 0xFFFFF) for i in range(8))
-        if not (raw[5] & 0x80):
-            return None
+        raw = bytes(self._readb(addr + i) for i in range(8))
         base = raw[2] | (raw[3] << 8) | (raw[4] << 16)
-        return (base & 0xFFFFF, raw[0] | (raw[1] << 8), raw[5])
+        return (base, raw[0] | (raw[1] << 8), raw[5])
 
     def _verify_selector(self, sel, write=False):
         """VERR/VERW: True when the selector addresses a usable segment."""
@@ -1923,6 +2128,7 @@ class CPU:
         self.insn_count += 1
         save_ip = self.ip
         save_cs = self.cs
+        save_eip = self.eip
         # Latch the Trap Flag as it was *before* this instruction.  The
         # single-step trap (INT 1) fires after the instruction completes iff
         # TF was set coming in.  Latching implements the one-instruction delay
@@ -1964,8 +2170,37 @@ class CPU:
                 self._rep_prefix = 'rep'
                 continue
             break
+        if (os.environ.get('VC_BUILD_TRACE') == '1'
+                and not self._pm
+                and ((save_cs, save_ip) in ((0x907A, 0x8654),
+                                             (0x9E58, 0x00C9)))):
+            count = getattr(self, '_vc_return_trace_count', 0)
+            if count < 24:
+                nearby = bytes(self._readb((self._code_base + save_ip + i)
+                                           & 0xFFFFF) for i in range(12))
+                print(f'[trace] RM return target {save_cs:04X}:{save_ip:04X} '
+                      f'bytes={nearby.hex()} AX={self.ax:04X} '
+                      f'BX={self.bx:04X} CX={self.cx:04X} DX={self.dx:04X} '
+                      f'SS:SP={self.ss:04X}:{self.sp:04X}',
+                      file=sys.stderr, flush=True)
+            self._vc_return_trace_count = count + 1
+        if (os.environ.get('VC_BUILD_TRACE') == '1'
+                and not self._pm and save_cs == 0x907A):
+            count = getattr(self, '_vc_907a_trace_count', 0)
+            if count < 80:
+                print(f'[trace] RM 907A:{save_ip:04X} op={opc:02X} '
+                      f'AX={self.ax:04X} BX={self.bx:04X} '
+                      f'CX={self.cx:04X} DX={self.dx:04X} '
+                      f'SI={self.si:04X} DI={self.di:04X} '
+                      f'FL={self.flags:04X}',
+                      file=sys.stderr, flush=True)
+            self._vc_907a_trace_count = count + 1
+        previous_fault_context = getattr(self, '_fault_context', None)
+        self._fault_context = (save_cs, save_eip)
         try:
             self._dispatch(opc)
+        except _InstructionFault:
+            return not self.halted
         except Exception as e:
             import traceback
             print(f"\n[CPU EXCEPTION] CS:IP={self.cs:04X}:{save_ip:04X} "
@@ -1973,6 +2208,8 @@ class CPU:
             traceback.print_exc(file=sys.stderr)
             self.halted = True
             return False
+        finally:
+            self._fault_context = previous_fault_context
         self.last_instruction_cycles = self.cycles_per_instruction
         self.cycle_count += self.last_instruction_cycles
         if self._irq_shadow:
@@ -2233,6 +2470,16 @@ class CPU:
             else:
                 self._do_sub32(self.eax, imm)
             return
+        if (self._operand_size_32 ^ self._code32) and opc in (0x0D, 0x25, 0x35):
+            imm = self._fetchd()
+            if opc == 0x0D:
+                self.eax |= imm
+            elif opc == 0x25:
+                self.eax &= imm
+            else:
+                self.eax ^= imm
+            self._flags_logic32(self.eax)
+            return
         if opc in (0x00, 0x01, 0x02, 0x03, 0x04, 0x05):
             self._exec_al_arith(opc, None); return
         if 0x08 <= opc <= 0x0D:
@@ -2386,6 +2633,12 @@ class CPU:
 
         # 60 PUSHA
         if opc == 0x60:
+            if self._operand_size_32 ^ self._code32:
+                orig_sp = self.esp
+                for value in (self.eax, self.ecx, self.edx, self.ebx,
+                              orig_sp, self.ebp, self.esi, self.edi):
+                    self._pushd(value)
+                return
             orig_sp = self.sp
             for value in (
                 self.ax, self.cx, self.dx, self.bx,
@@ -2396,6 +2649,16 @@ class CPU:
 
         # 61 POPA
         if opc == 0x61:
+            if self._operand_size_32 ^ self._code32:
+                self.edi = self._popd()
+                self.esi = self._popd()
+                self.ebp = self._popd()
+                self._popd()  # Discard the saved ESP slot.
+                self.ebx = self._popd()
+                self.edx = self._popd()
+                self.ecx = self._popd()
+                self.eax = self._popd()
+                return
             self.di = self._pop()
             self.si = self._pop()
             self.bp = self._pop()
@@ -2420,11 +2683,34 @@ class CPU:
             self._pushd(self._fetchd()) if self._operand_size_32 else self._push(self._fetchw())
             return
 
-        # 69 IMUL r16, r/m16, imm16 (skip — partial)
-        if opc == 0x69:
+        # IMUL r16/32, r/m16/32, immediate (signed, truncated product).
+        if opc in (0x69, 0x6B):
             mod, reg, rm = self._decode_modrm()
-            self._skip_disp(mod, rm)
-            self.ip = (self.ip + 2) & 0xFFFF  # skip imm16
+            wide = self._operand_size_32 ^ self._code32
+            bits = 32 if wide else 16
+            if mod == 3:
+                source = (self._get_reg32(self._REG16_NAMES[rm]) if wide
+                          else self._get_reg16(rm))
+            else:
+                addr = self._ea(mod, rm)
+                source = self._readd(addr) if wide else self._readw(addr)
+            if opc == 0x6B:
+                immediate = self._fetchb()
+                if immediate & 0x80:
+                    immediate -= 0x100
+            else:
+                immediate = self._fetchd() if wide else self._fetchw()
+                if immediate & (1 << (bits - 1)):
+                    immediate -= 1 << bits
+            if source & (1 << (bits - 1)):
+                source -= 1 << bits
+            product = source * immediate
+            self.cf = self.of = not (-(1 << (bits - 1)) <= product <
+                                     (1 << (bits - 1)))
+            if wide:
+                self._set_reg32(self._REG16_NAMES[reg], product)
+            else:
+                self._set_reg16(reg, product & 0xFFFF)
             return
 
         # 6A PUSH imm8 (sign-extended)
@@ -2434,16 +2720,47 @@ class CPU:
             self._push(imm)
             return
 
-        # 6B IMUL r16, r/m8, imm8 (skip)
-        if opc == 0x6B:
-            mod, reg, rm = self._decode_modrm()
-            self._skip_disp(mod, rm)
-            self.ip = (self.ip + 1) & 0xFFFF  # skip imm8
-            return
-
-        # 6C-6F INS/OUTS (stub - skip ModR/M byte)
+        # 6C-6F INS/OUTS. These are string instructions and have no
+        # ModR/M byte.  Consuming one here (the old stub behavior) advances
+        # past the following opcode and desynchronizes DOS extenders such as
+        # DPMI16BI while they probe hardware.
         if 0x6C <= opc <= 0x6F:
-            self._fetchb()  # consume ModR/M byte
+            count = self.cx if self._rep_prefix else 1
+            if count == 0:
+                return
+            width = 2 if opc in (0x6D, 0x6F) else 1
+            step = -width if self.df else width
+            self._check_io_privilege()
+            for _ in range(count):
+                if opc in (0x6C, 0x6D):       # INS[B/W] DX, ES:[DI]
+                    value = self.io.inw(self.dx) if width == 2 else self.io.inb(self.dx)
+                    addr = self._phys(self.es, self.di)
+                    if width == 2:
+                        self._writew(addr, value)
+                    else:
+                        self._writeb(addr, value)
+                    self.di = (self.di + step) & 0xFFFF
+                else:                         # OUTS[B/W] DX, DS:[SI]
+                    addr = self._phys(self._default_data_seg(), self.si)
+                    value = (self._readw(addr) if width == 2
+                             else self._readb(addr))
+                    if (os.environ.get('VC_BUILD_TRACE') == '1'
+                            and not self._pm and self.cs == 0x907A):
+                        count_outs = getattr(self, '_vc_outs_trace_count', 0)
+                        if count_outs < 40:
+                            print(f'[trace] RM OUTS{width * 8} '
+                                  f'port={self.dx:04X} value={value:04X} '
+                                  f'DS:SI={self._default_data_seg():04X}:'
+                                  f'{self.si:04X}',
+                                  file=sys.stderr, flush=True)
+                        self._vc_outs_trace_count = count_outs + 1
+                    if width == 2:
+                        self.io.outw(self.dx, value)
+                    else:
+                        self.io.outb(self.dx, value)
+                    self.si = (self.si + step) & 0xFFFF
+            if self._rep_prefix:
+                self.cx = 0
             return
 
         # 70-7F Conditional jumps
@@ -2665,14 +2982,15 @@ class CPU:
 
         # 9A CALL far
         if opc == 0x9A:
-            off = self._fetchw()
+            offset32 = self._operand_size_32 ^ self._code32
+            off = self._fetchd() if offset32 else self._fetchw()
             seg = self._fetchw()
-            self._far_transfer(seg, off, is_call=True)
+            self._far_transfer(seg, off, is_call=True, offset32=offset32)
             return
 
         # 9C PUSHF
         if opc == 0x9C:
-            word = self.flags
+            word = self.flags | 2
             if self._pm and self._cpl > self._iopl():
                 word &= ~0x3000        # IOPL reads as 00 from outer rings
             self._push(word)
@@ -2683,12 +3001,12 @@ class CPU:
 
         # 9E SAHF — load AH into flags low byte
         if opc == 0x9E:
-            self.flags = (self.flags & 0xFF00) | ((self.ax >> 8) & 0xFF)
+            self.flags = (self.flags & 0xFF00) | ((self.ax >> 8) & 0xD5) | 2
             return
 
         # 9F LAHF — store flags low byte into AH
         if opc == 0x9F:
-            self.ax = ((self.flags & 0xFF) << 8) | (self.ax & 0xFF)
+            self.ax = (((self.flags & 0xD5) | 2) << 8) | (self.ax & 0xFF)
             return
 
         # A0 MOV AL, [addr]
@@ -2723,8 +3041,8 @@ class CPU:
             inc = 1 if not self.df else -1
             src_seg = self._default_data_seg()
             for _ in range(count):
-                s = self._physw(src_seg, self.si)
-                d = self._physw(self.es, self.di)
+                s = self._phys(src_seg, self.si)
+                d = self._phys(self.es, self.di)
                 self._writeb(d, self._readb(s))
                 self.si = (self.si + inc) & 0xFFFF
                 self.di = (self.di + inc) & 0xFFFF
@@ -3002,16 +3320,43 @@ class CPU:
 
         # CB RETF
         if opc == 0xCB:
-            self.ip = self._pop()
-            ret_cs = self._pop()
+            offset32 = self._operand_size_32 ^ self._code32
+            trace_retf = (os.environ.get('VC_BUILD_TRACE') == '1'
+                          and not self._pm)
+            if trace_retf and self.cs == 0x0070 and self.ip == 0x0700:
+                stack_addr = self._phys(self.ss, self.sp)
+                words = [self._readw(stack_addr + 2 * i)
+                         for i in range(4)]
+                print(f'[trace] RM RETF DOS0700 stack '
+                      f'SS:SP={self.ss:04X}:{self.sp:04X} '
+                      f'words={" ".join(f"{w:04X}" for w in words)}',
+                      file=sys.stderr, flush=True)
+            ret_ip = self._popd() if offset32 else self._pop()
+            ret_cs = (self._popd() if offset32 else self._pop()) & 0xFFFF
+            if trace_retf and (ret_cs >= 0x6000 or ret_ip > 0x8000):
+                print(f'[trace] RM RETF suspicious {ret_cs:04X}:{ret_ip:04X} '
+                      f'from {self.cs:04X}:{self.ip:04X} '
+                      f'SS:SP={self.ss:04X}:{self.sp:04X} '
+                      f'offset32={offset32}',
+                      file=sys.stderr, flush=True)
+            if self._dpmi_return_to_real_mode(ret_cs, ret_ip):
+                return
             if self._pm and (ret_cs & 3) > self._cpl:
-                outer_sp = self._pop()
-                outer_ss = self._pop()
+                outer_sp = self._popd() if offset32 else self._pop()
+                outer_ss = (self._popd() if offset32 else self._pop()) & 0xFFFF
                 self._set_cs(ret_cs, compat_return=True)
                 self._set_ss(outer_ss)
-                self.sp = outer_sp
+                if offset32:
+                    self.esp = outer_sp
+                else:
+                    self.sp = outer_sp
+                self._clear_outer_data_segments()
             else:
                 self._set_cs(ret_cs, compat_return=True)
+            if offset32:
+                self.eip = ret_ip
+            else:
+                self.ip = ret_ip
             return
 
         # CA RETF imm16
@@ -3020,19 +3365,40 @@ class CPU:
         # instruction stream, corrupting both SP and the resumed IP.
         if opc == 0xCA:
             extra = self._fetchw()
-            self.ip = self._pop()
-            ret_cs = self._pop()
+            offset32 = self._operand_size_32 ^ self._code32
+            trace_retf = (os.environ.get('VC_BUILD_TRACE') == '1'
+                          and not self._pm)
+            ret_ip = self._popd() if offset32 else self._pop()
+            ret_cs = (self._popd() if offset32 else self._pop()) & 0xFFFF
+            if trace_retf and (ret_cs >= 0x6000 or ret_ip > 0x8000):
+                print(f'[trace] RM RETF+ suspicious {ret_cs:04X}:{ret_ip:04X} '
+                      f'from {self.cs:04X}:{self.ip:04X} '
+                      f'SS:SP={self.ss:04X}:{self.sp:04X}',
+                      file=sys.stderr, flush=True)
+            if self._dpmi_return_to_real_mode(ret_cs, ret_ip):
+                return
             if self._pm and (ret_cs & 3) > self._cpl:
                 # Outer-ring return: the caller's SS:SP sits below the
                 # return address on the current (inner) stack.
-                outer_sp = self._pop()
-                outer_ss = self._pop()
+                outer_sp = self._popd() if offset32 else self._pop()
+                outer_ss = (self._popd() if offset32 else self._pop()) & 0xFFFF
                 self._set_cs(ret_cs, compat_return=True)
                 self._set_ss(outer_ss)
-                self.sp = (outer_sp + extra) & 0xFFFF
+                if offset32:
+                    self.esp = (outer_sp + extra) & 0xFFFFFFFF
+                else:
+                    self.sp = (outer_sp + extra) & 0xFFFF
+                self._clear_outer_data_segments()
             else:
                 self._set_cs(ret_cs, compat_return=True)
-                self.sp = (self.sp + extra) & 0xFFFF
+                if offset32:
+                    self.esp = (self.esp + extra) & 0xFFFFFFFF
+                else:
+                    self.sp = (self.sp + extra) & 0xFFFF
+            if offset32:
+                self.eip = ret_ip
+            else:
+                self.ip = ret_ip
             return
 
         # CC INT3
@@ -3059,7 +3425,7 @@ class CPU:
                 back = self._tss_word(self.TSS_BACKLINK) & 0xFFFC
                 self._do_task_switch(back, 'iret')
                 return
-            if self._pm and self._code32:
+            if self._pm and (self._operand_size_32 ^ self._code32):
                 # 386 interrupt/trap frames store EIP, CS, and EFLAGS as
                 # four-byte stack slots (selectors are zero-extended).
                 ret_eip = self._popd()
@@ -3074,6 +3440,7 @@ class CPU:
                     outer_ss = self._popd() & 0xFFFF
                     self._set_ss(outer_ss)
                     self.esp = outer_esp
+                    self._clear_outer_data_segments()
                 return
             self.ip = self._pop()
             ret_cs = self._pop()
@@ -3086,6 +3453,7 @@ class CPU:
                 self._pop_flags(flags)
                 self._set_ss(outer_ss)
                 self.sp = outer_sp
+                self._clear_outer_data_segments()
             else:
                 flags = self._pop()
                 self._set_cs(ret_cs, compat_return=True)
@@ -3205,9 +3573,10 @@ class CPU:
 
         # EA JMP far
         if opc == 0xEA:
-            off = self._fetchw()
+            offset32 = self._operand_size_32 ^ self._code32
+            off = self._fetchd() if offset32 else self._fetchw()
             seg = self._fetchw()
-            self._far_transfer(seg, off, is_call=False)
+            self._far_transfer(seg, off, is_call=False, offset32=offset32)
             return
 
         # EB JMP short
@@ -3367,6 +3736,20 @@ class CPU:
                     sel = self._ea_word(mod, rm)
                     if sel & 0xFFFC:
                         desc = self._translate_selector(sel)
+                        if (os.environ.get('VC_TRACE_LLDT') == '1'
+                                and self._pm):
+                            print(f'[trace] LLDT sel={sel:04X} '
+                                  f'desc={desc!r}', file=sys.stderr,
+                                  flush=True)
+                            ldt_base = desc[0]
+                            for candidate in (ldt_base - 0x90,
+                                               ldt_base, ldt_base + 0x70):
+                                raw20 = bytes(self._readb(candidate + i)
+                                              for i in range(0xA8))
+                                entry = raw20[0xA0:0xA8].hex()
+                                print(f'[trace] LLDT region '
+                                      f'{candidate:06X} entry00A4={entry}',
+                                      file=sys.stderr, flush=True)
                         if (desc[2] & 0x1F) != 0x02:
                             self._raise_gp(sel & 0xFFFC)  # not an LDT
                         self._desc_cache[sel] = desc
@@ -3393,7 +3776,13 @@ class CPU:
             elif opc2 == 0x01:
                 # 286 table/MSW group: SGDT/SIDT/LGDT/LIDT/SMSW/LMSW
                 mod, reg, rm = self._decode_modrm()
-                if reg in (0, 1):          # SGDT / SIDT m16&24
+                # In a 32-bit code segment the default pseudo-descriptor is
+                # limit:16 + base:32.  The operand-size prefix toggles that
+                # default just like the other 386 instructions.  The old
+                # implementation always used the 286 m16&24 form, which
+                # silently truncated protected-mode tables above 16 MiB.
+                table32 = self._operand_size_32 ^ self._code32
+                if reg in (0, 1):          # SGDT / SIDT m16&24 or m16&32
                     if mod == 3:
                         self._raise_gp(0)
                     base, limit = ((self.gdt_base, self.gdt_limit)
@@ -3401,25 +3790,31 @@ class CPU:
                                    else (self.idt_base, self.idt_limit))
                     addr = self._ea(mod, rm)
                     self._writew(addr, limit)
-                    self._writeb((addr + 2) & 0xFFFFF, base & 0xFF)
-                    self._writeb((addr + 3) & 0xFFFFF, (base >> 8) & 0xFF)
-                    self._writeb((addr + 4) & 0xFFFFF, (base >> 16) & 0xFF)
+                    self._writeb(addr + 2, base & 0xFF)
+                    self._writeb(addr + 3, (base >> 8) & 0xFF)
+                    self._writeb(addr + 4, (base >> 16) & 0xFF)
+                    if table32:
+                        self._writeb(addr + 5, (base >> 24) & 0xFF)
                 elif reg == 2:             # LGDT m16&24
                     if mod == 3:
                         self._raise_gp(0)
                     addr = self._ea(mod, rm)
                     self.gdt_limit = self._readw(addr)
-                    self.gdt_base = self._readb((addr + 2) & 0xFFFFF) \
-                        | (self._readb((addr + 3) & 0xFFFFF) << 8) \
-                        | (self._readb((addr + 4) & 0xFFFFF) << 16)
+                    self.gdt_base = self._readb(addr + 2) \
+                        | (self._readb(addr + 3) << 8) \
+                        | (self._readb(addr + 4) << 16)
+                    if table32:
+                        self.gdt_base |= self._readb(addr + 5) << 24
                 elif reg == 3:             # LIDT m16&24
                     if mod == 3:
                         self._raise_gp(0)
                     addr = self._ea(mod, rm)
                     self.idt_limit = self._readw(addr)
-                    self.idt_base = self._readb((addr + 2) & 0xFFFFF) \
-                        | (self._readb((addr + 3) & 0xFFFFF) << 8) \
-                        | (self._readb((addr + 4) & 0xFFFFF) << 16)
+                    self.idt_base = self._readb(addr + 2) \
+                        | (self._readb(addr + 3) << 8) \
+                        | (self._readb(addr + 4) << 16)
+                    if table32:
+                        self.idt_base |= self._readb(addr + 5) << 24
                 elif reg == 4:             # SMSW r/m16
                     self._ea_write_word(mod, rm, self.msw)
                 elif reg == 6:             # LMSW r/m16
@@ -3435,7 +3830,7 @@ class CPU:
                 sel = self._ea_word(mod, rm)
                 desc = self._peek_selector(sel)
                 if desc is not None and (desc[2] & 0x10):
-                    self._set_reg16(reg, desc[2] & 0xFF)
+                    self._set_reg16(reg, (desc[2] & 0xFF) << 8)
                     self.zf = True
                 else:
                     self.zf = False
@@ -3470,9 +3865,9 @@ class CPU:
                         val = 0            # CR2/CR3: paging not modelled
                     else:
                         val = 0            # reserved control registers
-                    self._set_reg16(rm, val & 0xFFFF)
+                    self._set_reg32(self._REG16_NAMES[rm], val)
                 else:                      # MOV CR, r32
-                    val = self._get_reg16(rm)
+                    val = self._get_reg32(self._REG16_NAMES[rm])
                     if reg == 0:
                         self._set_msw(val)
                     # CR2/CR3/reserved writes are ignored (no paging)
@@ -3747,23 +4142,39 @@ class CPU:
                 self._push(self.ip)
                 self.ip = target
             elif reg == 3:  # CALL far
+                offset32 = self._operand_size_32 ^ self._code32
                 if mod == 3:
                     off = target
                     seg = self.cs
                 else:
-                    off = self._readw(addr)
-                    seg = self._readw((addr + 2) & 0xFFFFF)
-                self._far_transfer(seg, off, is_call=True)
+                    off = (self._readd(addr) if offset32 else
+                           self._readw(addr))
+                    seg = self._readw(addr + (4 if offset32 else 2))
+                if os.environ.get('VC_TRACE_FF') == '1' and self._pm:
+                    print(f'[trace] FF/3 addr={addr!r} ptr={seg:04X}:{off:08X} '
+                          f'CS:IP={self.cs:04X}:{self.ip:08X} '
+                          f'DS={self.ds:04X} ES={self.es:04X}',
+                          file=sys.stderr, flush=True)
+                self._far_transfer(seg, off, is_call=True,
+                                   offset32=offset32)
             elif reg == 4:  # JMP near
                 self.ip = target
             elif reg == 5:  # JMP far
+                offset32 = self._operand_size_32 ^ self._code32
                 if mod == 3:
                     off = target
                     seg = self.cs
                 else:
-                    off = self._readw(addr)
-                    seg = self._readw((addr + 2) & 0xFFFFF)
-                self._far_transfer(seg, off, is_call=False)
+                    off = (self._readd(addr) if offset32 else
+                           self._readw(addr))
+                    seg = self._readw(addr + (4 if offset32 else 2))
+                if os.environ.get('VC_TRACE_FF') == '1' and self._pm:
+                    print(f'[trace] FF/5 addr={addr!r} ptr={seg:04X}:{off:08X} '
+                          f'CS:IP={self.cs:04X}:{self.ip:08X} '
+                          f'DS={self.ds:04X} ES={self.es:04X}',
+                          file=sys.stderr, flush=True)
+                self._far_transfer(seg, off, is_call=False,
+                                   offset32=offset32)
             elif reg == 6:  # PUSH
                 if mod == 3:
                     self._push(target)
@@ -3800,7 +4211,7 @@ class CPU:
         if n * 8 + 7 > self.idt_limit:
             self._raise_gp((n << 3) | 2)
             return
-        gate = bytes(self._readb((gate_addr + i) & 0xFFFFF)
+        gate = bytes(self._readb(gate_addr + i)
                      for i in range(8))
         access = gate[5]
         gate_type = access & 0x0F
@@ -3832,7 +4243,20 @@ class CPU:
             return
         sel = gate[2] | (gate[3] << 8)
         offset = gate[0] | (gate[1] << 8)
-        target = self._translate_selector(sel)
+        if ((sel & 0x04) and not self.ldtr_selector and
+                (self.cs & 0x04) and (sel & 0xFFFC)):
+            cached_target = self._desc_cache.get(sel)
+            if (cached_target is None or
+                    (cached_target[2] & 0x18) != 0x18):
+                cached_target = (
+                    ((sel << 4) & 0xFFFFF),
+                    0xFFFFFFFF if (getattr(self, '_address_size_32', False)
+                                   or self._stack32) else 0xFFFF,
+                    0x9B, 0)
+                self._desc_cache[sel] = cached_target
+            target = cached_target
+        else:
+            target = self._translate_selector(sel)
         if target is None:
             return
         # 386 interrupt/trap gates carry the high half of the destination

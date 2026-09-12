@@ -200,6 +200,7 @@ class TestWarmReset:
     def test_triple_fault_without_shutdown_code_cold_boots(self):
         emu = self._emu()
         cpu = emu.cpu
+        emu.mem.write_word(0x5000, 0xBEEF)  # RAM survives an asserted RESET.
         cpu._set_msw(1)
         cpu.idt_base = 0
         cpu.idt_limit = 0
@@ -211,3 +212,4 @@ class TestWarmReset:
         assert (cpu.cs, cpu.ip) == (0x0000, 0x7C00)
         assert not cpu._pm
         assert not cpu.halted
+        assert emu.mem.read_word(0x5000) == 0xBEEF

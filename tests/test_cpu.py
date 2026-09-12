@@ -321,9 +321,9 @@ class TestOpcodes:
 
     def test_pushf_popf(self, cpu):
         self._load(cpu, [0x9C, 0x9D])
-        cpu.flags = 0x0234
+        cpu.flags = 0x0216
         cpu.execute(); cpu.execute()
-        assert cpu.flags == 0x0234
+        assert cpu.flags == 0x0216
 
     def test_pushf_popf_masks_80286_only_bits_in_real_mode(self, cpu):
         """Bits 12-15 (IOPL/NT/reserved) never stick in real mode on a
@@ -339,13 +339,13 @@ class TestOpcodes:
         cpu.flags = 0x0045
         cpu.ax = 0x0000             # AH=0, AL=0
         cpu.execute()               # LAHF: AH = flags low byte
-        assert ((cpu.ax >> 8) & 0xFF) == 0x45, \
+        assert ((cpu.ax >> 8) & 0xFF) == 0x47, \
             f"LAHF loads flags into AH; got AH=0x{(cpu.ax>>8)&0xFF:02X}"
         assert (cpu.ax & 0xFF) == 0x00, \
             f"LAHF must not alter AL; got AL=0x{cpu.ax&0xFF:02X}"
         cpu.flags = 0xFF00          # clobber flags low byte
         cpu.execute()               # SAHF: flags low byte = AH
-        assert (cpu.flags & 0xFF) == 0x45
+        assert (cpu.flags & 0xFF) == 0x47
 
     def test_cbw_positive(self, cpu):
         self._load(cpu, [0x98])

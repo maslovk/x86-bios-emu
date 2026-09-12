@@ -319,6 +319,8 @@ class TestInterruptRingSwitch:
         assert cpu.ss == outer_ss
         assert cpu.sp == outer_sp
         assert mem.read_word(R0_DATA_BASE + 0x0200) == 0x9999
+        # Ring-0 DS is no longer accessible after IRET to ring 3.
+        assert cpu.ds == 0
 
     def test_saved_outer_stack_is_below_return_frame(self):
         cpu, mem = self.build_int3_machine()

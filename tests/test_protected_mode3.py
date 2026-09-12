@@ -40,6 +40,7 @@ R0_CODE_BASE, R0_DATA_BASE, R0_STACK_BASE = 0x00500, 0x07000, 0x09000
 TASK_GATE = 0x20
 TSS_A, TSS_B = 0x28, 0x30
 TSS_A_BASE, TSS_B_BASE = 0x0E000, 0x0E400
+LDT_SEL, LDT_BASE = 0x38, 0x0E800
 GDT, IDT = 0x00800, 0x00A00
 
 
@@ -64,6 +65,7 @@ def build_tasks(cpu, mem):
         bytes((0x00, 0x00, TSS_B, 0x00, 0x00, 0x85, 0, 0)),
         desc(TSS_A_BASE, 0x0067, 0x83),        # 0x28 TSS A (busy: type 3)
         desc(TSS_B_BASE, 0x0067, 0x81),        # 0x30 TSS B (available)
+        desc(LDT_BASE, 0x0007, 0x82),          # 0x38 LDT for task B
     ]
     for i, d in enumerate(gdt):
         mem.ram[GDT + i * 8:GDT + i * 8 + 8] = d
@@ -117,6 +119,20 @@ class TestTaskSwitch:
         assert mem.ram[GDT + 5 * 8 + 5] == 0x81
         assert mem.ram[GDT + 6 * 8 + 5] == 0x83
         assert cpu.tr_selector == TSS_B
+
+    def test_task_switch_restores_tss_ldt_selector(self):
+        cpu, mem = make_cpu()
+        build_tasks(cpu, mem)
+        mem.write_word(TSS_B_BASE + CPU.TSS_LDT, LDT_SEL)
+        write_code(mem, R0_CODE_BASE + 0x0100, [
+            0xEA, 0x00, 0x00, TSS_B, 0x00,
+        ])
+
+        cpu.execute()
+
+        assert cpu.tr_selector == TSS_B
+        assert cpu.ldtr_selector == LDT_SEL
+        assert cpu._desc_cache[LDT_SEL][:3] == (LDT_BASE, 0x0007, 0x82)
 
     def test_call_through_task_gate_nests_and_iret_returns(self):
         cpu, mem = make_cpu()
